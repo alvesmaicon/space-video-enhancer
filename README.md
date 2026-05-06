@@ -104,13 +104,33 @@ Se depois voce quiser uma experiencia mais moderna e rapida, a alternativa natur
 - seleciona um video local
 - permite navegar pelos frames com um slider
 - inclui botoes para ir ao inicio, voltar um frame, avancar um frame, ir ao final e reproduzir a visualizacao quadro a quadro
+- permite redimensionar a area de preview com zoom por botoes e percentual de exibicao
+- organiza os ajustes laterais em abas tematicas para cor e detalhe, geometria, ruido e exportacao
+- inclui uma aba `Filtros` com presets de imagem em miniatura baseados no frame selecionado, atualizados quando o preview esta pausado, e um controle de intensidade do preset atual
+- inclui barra de menu superior com secoes como `Arquivo`, `Editar`, `Reproducao` e `Ajuda`
 - exibe comparacao antes/depois com divisor arrastavel
 - inclui crop interativo sobre o preview, com presets de proporcao e modo livre
 - aplica a melhoria sempre com OpenCV frame a frame no preview e na exportacao
 - oferece presets de melhoria para partir de um ajuste base
 - permite resetar cada slider para o valor do preset ativo
-- ajusta denoise, nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
-- permite marcar frame inicial e final para exportar apenas um corte do video, com indicadores visuais no slider
+- ajusta denoise com modo manual, auto ou baseado em uma amostra independente escolhida no preview, alem de nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
+- oferece filtros iniciais para equilibrio de sombras, realces, varias camadas de contraste local e atenuacao seletiva de cores quentes ou frias em cenas com faixa dinamica dificil
+- permite marcar frame inicial e final na aba de exportacao para exportar apenas um corte do video, com indicadores visuais no slider
 - mostra barra de progresso durante a exportacao
 - permite cancelar uma exportacao em andamento sem fechar o programa
 - exporta um novo arquivo localmente, usando FFmpeg apenas para encode final e mux do audio original
+- inclui modo de aceleracao "GPU automatica", que tenta usar OpenCL no processamento e encoder por hardware no FFmpeg
+
+## Aceleracao por GPU
+
+Na interface agora existe a opcao `Aceleracao` com dois modos:
+
+- `CPU`: usa o caminho tradicional, mais previsivel
+- `GPU automatica`: tenta usar OpenCL no processamento dos frames e, na exportacao, prioriza `h264_nvenc` (NVIDIA) ou `h264_vaapi` (Linux) quando o FFmpeg oferecer suporte
+
+Importante:
+
+- o processamento continua tendo partes em CPU, entao o ganho real depende do video, dos filtros ativos e do driver da placa
+- se OpenCL ou o encoder de hardware nao estiverem disponiveis, o app faz fallback automatico para CPU
+- no Linux, o caminho `VAAPI` normalmente exige um dispositivo como `/dev/dri/renderD128`
+- para placas NVIDIA, o FFmpeg precisa ter sido compilado com suporte a `nvenc`
