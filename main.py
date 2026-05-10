@@ -17,6 +17,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -213,6 +214,7 @@ class FrameRangeSlider(QSlider):
 class ComparePreview(QWidget):
     cropChanged = Signal(object)
     sampleChanged = Signal(object)
+    stabilizationChanged = Signal(object)
     DEFAULT_BASE_SIZE = QSize(960, 540)
 
     def __init__(self) -> None:
@@ -233,8 +235,15 @@ class ComparePreview(QWidget):
         self._sample_drag_mode: Optional[str] = None
         self._sample_drag_offset = QPointF()
         self._sample_anchor_norm = QPointF()
+        self._stabilization_enabled = False
+        self._stabilization_editing = False
+        self._stabilization_rect_norm = QRectF(0.4, 0.3, 0.2, 0.2)
+        self._stabilization_drag_mode: Optional[str] = None
+        self._stabilization_drag_offset = QPointF()
+        self._stabilization_anchor_norm = QPointF()
         self._base_size = QSize(self.DEFAULT_BASE_SIZE)
         self._zoom_factor = 1.0
+        self._smooth_transform_enabled = True
         self.setMinimumSize(320, 200)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.resize(self.sizeHint())
@@ -269,7 +278,13 @@ class ComparePreview(QWidget):
         self.update()
 
     def set_zoom_factor(self, zoom_factor: float) -> None:
-        self._zoom_factor = max(0.25, min(4.0, zoom_factor))
+        self._zoom_factor = max(0.25, min(8.0, zoom_factor))
+        self.updateGeometry()
+        self.resize(self.sizeHint())
+        self.update()
+
+    def set_render_quality(self, smooth_transform_enabled: bool) -> None:
+        self._smooth_transform_enabled = smooth_transform_enabled
         self.updateGeometry()
         self.resize(self.sizeHint())
         self.update()
@@ -306,11 +321,24 @@ class ComparePreview(QWidget):
             self._sample_drag_mode = None
         self.update()
 
+    def set_stabilization_state(
+        self,
+        enabled: bool,
+        stabilization_rect_norm: QRectF,
+        editing: bool,
+    ) -> None:
+        self._stabilization_enabled = enabled
+        self._stabilization_rect_norm = QRectF(stabilization_rect_norm)
+        self._stabilization_editing = editing and enabled
+        if not self._stabilization_editing:
+            self._stabilization_drag_mode = None
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self._smooth_transform_enabled)
         painter.fillRect(self.rect(), QColor("#f3f4f6"))
 
         if self._before is None or self._after is None:
@@ -367,9 +395,26 @@ class ComparePreview(QWidget):
             self._draw_crop_overlay(painter)
         if self._sample_enabled:
             self._draw_sample_overlay(painter)
+        if self._stabilization_enabled:
+            self._draw_stabilization_overlay(painter)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._image_rect.contains(event.position()):
+            if self._stabilization_editing:
+                stabilization_rect = self._display_rect(self._stabilization_rect_norm)
+                handle = self._selection_handle_at(event.position(), stabilization_rect)
+                if handle is not None:
+                    self._stabilization_drag_mode = handle
+                    self._stabilization_anchor_norm = self._anchor_for_handle(handle, self._stabilization_rect_norm)
+                    self.setCursor(self._cursor_for_handle(handle))
+                    return
+                if stabilization_rect.contains(event.position()):
+                    self._stabilization_drag_mode = "move"
+                    pointer_norm = self._point_to_normalized(event.position())
+                    self._stabilization_drag_offset = pointer_norm - self._stabilization_rect_norm.topLeft()
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    return
+
             if self._sample_editing:
                 sample_rect = self._display_rect(self._sample_rect_norm)
                 handle = self._selection_handle_at(event.position(), sample_rect)
@@ -403,6 +448,10 @@ class ComparePreview(QWidget):
             self._update_split_ratio(event.position().x())
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._stabilization_editing and self._stabilization_drag_mode is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            self._update_stabilization_drag(event.position())
+            return
+
         if self._sample_editing and self._sample_drag_mode is not None and (event.buttons() & Qt.MouseButton.LeftButton):
             self._update_sample_drag(event.position())
             return
@@ -411,7 +460,16 @@ class ComparePreview(QWidget):
             self._update_crop_drag(event.position())
             return
 
-        if self._sample_editing:
+        if self._stabilization_editing:
+            stabilization_rect = self._display_rect(self._stabilization_rect_norm)
+            handle = self._selection_handle_at(event.position(), stabilization_rect)
+            if handle is not None:
+                self.setCursor(self._cursor_for_handle(handle))
+            elif stabilization_rect.contains(event.position()):
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            else:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif self._sample_editing:
             sample_rect = self._display_rect(self._sample_rect_norm)
             handle = self._selection_handle_at(event.position(), sample_rect)
             if handle is not None:
@@ -437,7 +495,8 @@ class ComparePreview(QWidget):
         del event
         self._crop_drag_mode = None
         self._sample_drag_mode = None
-        if self._sample_enabled or self._crop_enabled:
+        self._stabilization_drag_mode = None
+        if self._stabilization_enabled or self._sample_enabled or self._crop_enabled:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
 
     def _fit_rect(self, image: QImage) -> QRectF:
@@ -516,6 +575,27 @@ class ComparePreview(QWidget):
         if self._sample_editing:
             for handle_rect in self._selection_handles(sample_rect).values():
                 painter.fillRect(handle_rect, QColor("#2563eb"))
+
+    def _draw_stabilization_overlay(self, painter: QPainter) -> None:
+        stabilization_rect = self._display_rect(self._stabilization_rect_norm)
+        if stabilization_rect.isNull() or stabilization_rect.width() <= 0 or stabilization_rect.height() <= 0:
+            return
+
+        outline_color = QColor("#16a34a") if self._stabilization_editing else QColor("#4ade80")
+        fill_color = QColor(22, 163, 74, 28)
+        painter.fillRect(stabilization_rect, fill_color)
+        painter.setPen(QPen(outline_color, 2, Qt.PenStyle.DashLine))
+        painter.drawRect(stabilization_rect)
+        painter.setPen(QColor("#166534"))
+        painter.drawText(
+            int(stabilization_rect.left() + 8),
+            int(stabilization_rect.top() + 20),
+            "Ponto focal",
+        )
+
+        if self._stabilization_editing:
+            for handle_rect in self._selection_handles(stabilization_rect).values():
+                painter.fillRect(handle_rect, QColor("#16a34a"))
 
     def _display_crop_rect(self) -> QRectF:
         return self._display_rect(self._crop_rect_norm)
@@ -611,6 +691,28 @@ class ComparePreview(QWidget):
         self.sampleChanged.emit(QRectF(self._sample_rect_norm))
         self.update()
 
+    def _update_stabilization_drag(self, position: QPointF) -> None:
+        pointer_norm = self._point_to_normalized(position)
+        if self._stabilization_drag_mode == "move":
+            new_rect = QRectF(
+                pointer_norm.x() - self._stabilization_drag_offset.x(),
+                pointer_norm.y() - self._stabilization_drag_offset.y(),
+                self._stabilization_rect_norm.width(),
+                self._stabilization_rect_norm.height(),
+            )
+            new_rect = self._move_rect_within_bounds(new_rect)
+        else:
+            new_rect = self._resize_rect(
+                self._stabilization_drag_mode,
+                pointer_norm,
+                self._stabilization_anchor_norm,
+                None,
+            )
+
+        self._stabilization_rect_norm = new_rect
+        self.stabilizationChanged.emit(QRectF(self._stabilization_rect_norm))
+        self.update()
+
     def _move_rect_within_bounds(self, rect: QRectF) -> QRectF:
         x = min(max(0.0, rect.x()), 1.0 - rect.width())
         y = min(max(0.0, rect.y()), 1.0 - rect.height())
@@ -656,14 +758,25 @@ class ComparePreview(QWidget):
 
 class MainWindow(QMainWindow):
     EXPORT_CANCELLED_MESSAGE = "Exportacao cancelada pelo usuario."
-    PROCESSING_MODE_OPTIONS = [
-        ("CPU", "cpu"),
-        ("GPU automatica", "gpu"),
+    ROTATION_OPTIONS = [
+        ("Sem rotacao", "none"),
+        ("90°", "90"),
+        ("180°", "180"),
+        ("270°", "270"),
+    ]
+    STABILIZATION_MODE_OPTIONS = [
+        ("Desativado", "off"),
+        ("Automatico (translacao)", "auto"),
+        ("Automatico por similaridade", "similarity"),
+        ("Automatico por perspectiva", "perspective"),
+        ("Camera lock (regiao)", "camera_lock"),
+        ("Hibrido: camera lock + fallback", "hybrid"),
     ]
     DENOISE_MODE_OPTIONS = [
+        ("Desativado", "off"),
         ("Manual", "manual"),
         ("Auto", "auto"),
-        ("Amostra do crop", "sample"),
+        ("Amostra do preview", "sample"),
     ]
     DENOISE_TEMPLATE_OPTIONS = [3, 5, 7, 9]
     DENOISE_SEARCH_OPTIONS = [11, 15, 21, 27, 35]
@@ -681,7 +794,18 @@ class MainWindow(QMainWindow):
         ("1:1", 1.0),
         ("9:16", 9 / 16),
     ]
-    PREVIEW_ZOOM_OPTIONS = [50, 75, 100, 125, 150, 200]
+    PREVIEW_ZOOM_OPTIONS = [50, 75, 100, 125, 150, 200, 300, 400, 600]
+    PREVIEW_RENDER_MODE_OPTIONS = [
+        ("Alta qualidade", "high"),
+        ("Balanceado", "balanced"),
+        ("Rapido", "fast"),
+    ]
+    PREVIEW_FRAME_SKIP_OPTIONS = [
+        ("Sem pulo", 0),
+        ("Pular 1", 1),
+        ("Pular 2", 2),
+        ("Pular 3", 3),
+    ]
     IMAGE_FILTER_PRESETS = [
         ImageFilterPreset(
             "original",
@@ -815,7 +939,7 @@ class MainWindow(QMainWindow):
         ),
     ]
     DEFAULT_FILTER_SETTINGS = FilterSettings(
-        denoise_mode="manual",
+        denoise_mode="off",
         denoise_strength=20,
         denoise_color_strength=20,
         denoise_template_window=7,
@@ -937,6 +1061,10 @@ class MainWindow(QMainWindow):
         self.playback_end_frame = 0
         self.crop_rect_norm = QRectF(0.1, 0.1, 0.8, 0.8)
         self.denoise_sample_rect_norm = QRectF(0.33, 0.33, 0.34, 0.34)
+        self.stabilization_rect_norm = QRectF(0.4, 0.3, 0.2, 0.2)
+        self.stabilization_reference_frame: Optional[np.ndarray] = None
+        self.stabilization_reference_frame_index = 0
+        self._preview_auto_stabilization_state = self._new_auto_stabilization_state()
         self.export_cancel_requested = False
         self._last_export_ui_update = 0.0
         self._opencl_checked = False
@@ -948,10 +1076,17 @@ class MainWindow(QMainWindow):
         self._current_export_backend_label = "CPU + libx264"
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self._advance_playback_frame)
+        self._preview_refresh_timer = QTimer(self)
+        self._preview_refresh_timer.setSingleShot(True)
+        self._preview_refresh_timer.timeout.connect(self._refresh_preview_impl)
+        self._thumbnail_refresh_timer = QTimer(self)
+        self._thumbnail_refresh_timer.setSingleShot(True)
+        self._thumbnail_refresh_timer.timeout.connect(self._refresh_filter_thumbnails)
 
         self.preview = ComparePreview()
         self.preview.cropChanged.connect(self._handle_preview_crop_changed)
         self.preview.sampleChanged.connect(self._handle_preview_sample_changed)
+        self.preview.stabilizationChanged.connect(self._handle_preview_stabilization_changed)
         self.preview_zoom_out_button = QPushButton("−")
         self.preview_zoom_in_button = QPushButton("+")
         self.preview_zoom_combo = QComboBox()
@@ -961,6 +1096,14 @@ class MainWindow(QMainWindow):
         if default_zoom_index >= 0:
             self.preview_zoom_combo.setCurrentIndex(default_zoom_index)
         self.preview_zoom_combo.setToolTip("Define o zoom exibido no preview")
+        self.preview_render_mode_combo = QComboBox()
+        for label, mode in self.PREVIEW_RENDER_MODE_OPTIONS:
+            self.preview_render_mode_combo.addItem(label, mode)
+        self.preview_render_mode_combo.setToolTip("Troca qualidade por velocidade apenas no preview")
+        self.preview_frame_skip_combo = QComboBox()
+        for label, skip_count in self.PREVIEW_FRAME_SKIP_OPTIONS:
+            self.preview_frame_skip_combo.addItem(label, skip_count)
+        self.preview_frame_skip_combo.setToolTip("Pula frames apenas na reproducao do preview para ficar mais leve")
         self.select_button = QPushButton("Selecionar video")
         self.export_button = QPushButton("Aplicar e exportar")
         self.thread_label = QLabel("Threads")
@@ -969,13 +1112,6 @@ class MainWindow(QMainWindow):
             self.thread_combo.addItem(str(thread_count), thread_count)
         self.thread_combo.setCurrentIndex(0)
         self.thread_combo.setToolTip("Escolha quantas threads usar na exportacao")
-        self.acceleration_combo = QComboBox()
-        for label, mode in self.PROCESSING_MODE_OPTIONS:
-            self.acceleration_combo.addItem(label, mode)
-        self.acceleration_combo.setCurrentIndex(0)
-        self.acceleration_combo.setToolTip(
-            "Usa OpenCL no processamento e encoder por hardware no FFmpeg quando houver suporte"
-        )
         self.cancel_export_button = QPushButton("Cancelar exportacao")
         self.cancel_export_button.setObjectName("cancelExportButton")
         self.cancel_export_button.setEnabled(False)
@@ -1031,6 +1167,20 @@ class MainWindow(QMainWindow):
         self.denoise_info_label.setWordWrap(True)
         self.denoise_sample_info_label = QLabel()
         self.denoise_sample_info_label.setWordWrap(True)
+        self.stabilization_mode_combo = QComboBox()
+        for label, mode in self.STABILIZATION_MODE_OPTIONS:
+            self.stabilization_mode_combo.addItem(label, mode)
+        self.stabilization_intensity_slider = LabeledSlider("Intensidade da estabilizacao", 0, 100, 65)
+        self.stabilization_smoothing_slider = LabeledSlider("Suavizacao temporal", 0, 100, 35)
+        self.stabilization_edit_button = QPushButton("Editar ponto/regiao no preview")
+        self.stabilization_edit_button.setCheckable(True)
+        self.stabilization_reset_button = QPushButton("Resetar ponto focal")
+        self.stabilization_auto_crop_checkbox = QCheckBox("Crop automatico para esconder bordas")
+        self.stabilization_auto_crop_checkbox.setChecked(True)
+        self.stabilization_zoom_out_checkbox = QCheckBox("Zoom out automatico para preservar bordas")
+        self.stabilization_zoom_out_checkbox.setChecked(False)
+        self.stabilization_info_label = QLabel()
+        self.stabilization_info_label.setWordWrap(True)
         self.filter_preset_buttons: dict[str, QToolButton] = {}
         self.filter_button_group = QButtonGroup(self)
         self.filter_button_group.setExclusive(True)
@@ -1049,6 +1199,11 @@ class MainWindow(QMainWindow):
         self.scale_combo = QComboBox()
         for label, factor in self.SCALE_OPTIONS:
             self.scale_combo.addItem(label, factor)
+        self.rotation_combo = QComboBox()
+        for label, rotation_mode in self.ROTATION_OPTIONS:
+            self.rotation_combo.addItem(label, rotation_mode)
+        self.flip_horizontal_checkbox = QCheckBox("Espelhar horizontalmente")
+        self.flip_vertical_checkbox = QCheckBox("Espelhar verticalmente")
         self.crop_mode_combo = QComboBox()
         for label, mode in self.CROP_OPTIONS:
             self.crop_mode_combo.addItem(label, mode)
@@ -1094,6 +1249,10 @@ class MainWindow(QMainWindow):
         self.preview_zoom_in_button.setFixedWidth(38)
         self.preview_zoom_in_button.setToolTip("Aumentar zoom do preview")
         preview_toolbar.addWidget(self.preview_zoom_in_button)
+        preview_toolbar.addWidget(QLabel("Qualidade"))
+        preview_toolbar.addWidget(self.preview_render_mode_combo)
+        preview_toolbar.addWidget(QLabel("Playback"))
+        preview_toolbar.addWidget(self.preview_frame_skip_combo)
         preview_toolbar.addStretch(1)
 
         self.preview_scroll = QScrollArea()
@@ -1128,6 +1287,7 @@ class MainWindow(QMainWindow):
         self.settings_tabs.setMinimumWidth(340)
         self.settings_tabs.addTab(self._build_color_tab(), "Cor e detalhe")
         self.settings_tabs.addTab(self._build_filters_tab(), "Filtros")
+        self.settings_tabs.addTab(self._build_stabilization_tab(), "Estabilizacao")
         self.settings_tabs.addTab(self._build_geometry_tab(), "Geometria")
         self.settings_tabs.addTab(self._build_noise_tab(), "Ruido")
         self.settings_tabs.addTab(self._build_export_tab(), "Midia")
@@ -1416,7 +1576,34 @@ class MainWindow(QMainWindow):
 
         return self._wrap_tab_content(filters_group)
 
+    def _build_stabilization_tab(self) -> QScrollArea:
+        stabilization_group = QGroupBox("Estabilizacao")
+        stabilization_layout = QVBoxLayout(stabilization_group)
+        stabilization_layout.setSpacing(14)
+
+        stabilization_form = QFormLayout()
+        stabilization_form.addRow("Modo", self.stabilization_mode_combo)
+        stabilization_layout.addLayout(stabilization_form)
+        stabilization_layout.addWidget(self.stabilization_intensity_slider)
+        stabilization_layout.addWidget(self.stabilization_smoothing_slider)
+        stabilization_layout.addWidget(self.stabilization_edit_button)
+        stabilization_layout.addWidget(self.stabilization_reset_button)
+        stabilization_layout.addWidget(self.stabilization_auto_crop_checkbox)
+        stabilization_layout.addWidget(self.stabilization_zoom_out_checkbox)
+        stabilization_layout.addWidget(self.stabilization_info_label)
+
+        return self._wrap_tab_content(stabilization_group)
+
     def _build_geometry_tab(self) -> QScrollArea:
+        orientation_group = QGroupBox("Orientacao")
+        orientation_layout = QVBoxLayout(orientation_group)
+        orientation_layout.setSpacing(12)
+        orientation_form = QFormLayout()
+        orientation_form.addRow("Rotacao", self.rotation_combo)
+        orientation_layout.addLayout(orientation_form)
+        orientation_layout.addWidget(self.flip_horizontal_checkbox)
+        orientation_layout.addWidget(self.flip_vertical_checkbox)
+
         crop_group = QGroupBox("Enquadramento")
         crop_layout = QVBoxLayout(crop_group)
         crop_layout.setSpacing(14)
@@ -1426,7 +1613,7 @@ class MainWindow(QMainWindow):
         crop_layout.addWidget(self.crop_reset_button)
         crop_layout.addWidget(self.crop_info_label)
 
-        return self._wrap_tab_content(crop_group)
+        return self._wrap_tab_content(orientation_group, crop_group)
 
     def _build_noise_tab(self) -> QScrollArea:
         noise_group = QGroupBox("Limpeza e reducao de ruido")
@@ -1464,7 +1651,6 @@ class MainWindow(QMainWindow):
         processing_layout.setSpacing(14)
         processing_form = QFormLayout()
         processing_form.addRow("Escala de saida", self.scale_combo)
-        processing_form.addRow("Aceleracao", self.acceleration_combo)
         processing_form.addRow(self.thread_label, self.thread_combo)
         processing_layout.addLayout(processing_form)
 
@@ -1510,6 +1696,8 @@ class MainWindow(QMainWindow):
         self.preview_zoom_out_button.clicked.connect(lambda: self._step_preview_zoom(-1))
         self.preview_zoom_in_button.clicked.connect(lambda: self._step_preview_zoom(1))
         self.preview_zoom_combo.currentIndexChanged.connect(self._handle_preview_zoom_changed)
+        self.preview_render_mode_combo.currentIndexChanged.connect(self._handle_preview_render_mode_changed)
+        self.preview_frame_skip_combo.currentIndexChanged.connect(self._handle_preview_frame_skip_changed)
         self.frame_slider.valueChanged.connect(self._load_frame)
         self.go_first_button.clicked.connect(self._go_to_first_frame)
         self.prev_frame_button.clicked.connect(self._go_to_previous_frame)
@@ -1517,8 +1705,18 @@ class MainWindow(QMainWindow):
         self.next_frame_button.clicked.connect(self._go_to_next_frame)
         self.go_last_button.clicked.connect(self._go_to_last_frame)
         self.preset_combo.currentIndexChanged.connect(self._handle_preset_changed)
+        self.rotation_combo.currentIndexChanged.connect(self._handle_filter_control_change)
+        self.flip_horizontal_checkbox.toggled.connect(self._handle_filter_control_change)
+        self.flip_vertical_checkbox.toggled.connect(self._handle_filter_control_change)
         self.crop_mode_combo.currentIndexChanged.connect(self._handle_crop_mode_changed)
         self.crop_reset_button.clicked.connect(self._reset_crop_rect)
+        self.stabilization_mode_combo.currentIndexChanged.connect(self._handle_stabilization_mode_changed)
+        self.stabilization_intensity_slider.valueChanged.connect(self._handle_stabilization_control_change)
+        self.stabilization_smoothing_slider.valueChanged.connect(self._handle_stabilization_control_change)
+        self.stabilization_edit_button.toggled.connect(self._handle_stabilization_edit_toggled)
+        self.stabilization_reset_button.clicked.connect(self._reset_stabilization_rect)
+        self.stabilization_auto_crop_checkbox.toggled.connect(self._handle_stabilization_control_change)
+        self.stabilization_zoom_out_checkbox.toggled.connect(self._handle_stabilization_zoom_out_toggled)
         self.denoise_mode_combo.currentIndexChanged.connect(self._handle_denoise_mode_changed)
         self.denoise_template_combo.currentIndexChanged.connect(self._handle_filter_control_change)
         self.denoise_search_combo.currentIndexChanged.connect(self._handle_filter_control_change)
@@ -1526,7 +1724,6 @@ class MainWindow(QMainWindow):
         self.denoise_sample_reset_button.clicked.connect(self._reset_denoise_sample_rect)
         self.filter_intensity_slider.valueChanged.connect(self._handle_filter_intensity_changed)
         self.scale_combo.currentIndexChanged.connect(self._handle_filter_control_change)
-        self.acceleration_combo.currentIndexChanged.connect(self._handle_acceleration_mode_changed)
         self.mark_start_button.clicked.connect(self._mark_clip_start)
         self.mark_end_button.clicked.connect(self._mark_clip_end)
         self.reset_range_button.clicked.connect(self._reset_clip_range)
@@ -1563,6 +1760,13 @@ class MainWindow(QMainWindow):
             self.play_button,
             self.next_frame_button,
             self.go_last_button,
+            self.stabilization_mode_combo,
+            self.stabilization_intensity_slider,
+            self.stabilization_smoothing_slider,
+            self.stabilization_edit_button,
+            self.stabilization_reset_button,
+            self.stabilization_auto_crop_checkbox,
+            self.stabilization_zoom_out_checkbox,
             self.denoise_mode_combo,
             self.denoise_strength_slider,
             self.denoise_color_slider,
@@ -1578,10 +1782,12 @@ class MainWindow(QMainWindow):
             self.saturation_slider,
             self.temperature_slider,
             self.preset_combo,
+            self.rotation_combo,
+            self.flip_horizontal_checkbox,
+            self.flip_vertical_checkbox,
             self.crop_mode_combo,
             self.crop_reset_button,
             self.scale_combo,
-            self.acceleration_combo,
             self.mark_start_button,
             self.mark_end_button,
             self.reset_range_button,
@@ -1590,6 +1796,7 @@ class MainWindow(QMainWindow):
         for button in self.filter_preset_buttons.values():
             button.setEnabled(enabled)
         self._update_denoise_controls_state()
+        self._update_stabilization_controls_state()
         self._update_filter_description()
 
     def _select_video(self) -> None:
@@ -1616,6 +1823,8 @@ class MainWindow(QMainWindow):
 
         self.video_path = path
         self.capture = capture
+        self._opencl_checked = False
+        self._opencl_failed = False
         self.frame_count = max(1, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
         self.fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1627,6 +1836,10 @@ class MainWindow(QMainWindow):
         self.clip_end_frame = self.frame_count - 1
         self.crop_rect_norm = self._default_crop_rect(self._normalized_crop_aspect_ratio())
         self.denoise_sample_rect_norm = self._default_denoise_sample_rect()
+        self.stabilization_rect_norm = self._default_stabilization_rect()
+        self.stabilization_reference_frame = None
+        self.stabilization_reference_frame_index = 0
+        self._reset_preview_auto_stabilization_state()
         self.file_label.setText(f"{path.name} | {width}x{height} @ {self.fps:.2f} fps")
         self.frame_slider.setRange(0, self.frame_count - 1)
         midpoint = min(self.frame_count - 1, self.frame_count // 2)
@@ -1637,7 +1850,9 @@ class MainWindow(QMainWindow):
         self._update_range_label()
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
+        self._sync_stabilization_preview()
         self._update_crop_info_label()
+        self._update_stabilization_info_label()
         self.status_label.setText("Arraste o divisor na imagem e os sliders ao lado para comparar o resultado.")
 
         self.frame_slider.blockSignals(True)
@@ -1649,6 +1864,15 @@ class MainWindow(QMainWindow):
         zoom_percent = int(self.preview_zoom_combo.currentData() or 100)
         self.preview.set_zoom_factor(zoom_percent / 100.0)
         self._update_preview_zoom_controls()
+
+    def _handle_preview_render_mode_changed(self, _index: int) -> None:
+        self.preview.set_render_quality(self._preview_render_mode() != "fast")
+        self._reset_preview_auto_stabilization_state()
+        self._schedule_preview_refresh(immediate=True)
+
+    def _handle_preview_frame_skip_changed(self, _index: int) -> None:
+        if self.playback_timer.isActive():
+            self.playback_timer.start(self._playback_interval_ms())
 
     def _step_preview_zoom(self, step: int) -> None:
         current_index = self.preview_zoom_combo.currentIndex()
@@ -1664,6 +1888,76 @@ class MainWindow(QMainWindow):
         self.preview_zoom_out_button.setEnabled(current_index > 0)
         self.preview_zoom_in_button.setEnabled(current_index < max_index)
 
+    def _preview_render_mode(self) -> str:
+        return str(self.preview_render_mode_combo.currentData() or "high")
+
+    def _preview_frame_skip(self) -> int:
+        return int(self.preview_frame_skip_combo.currentData() or 0)
+
+    def _preview_processing_scale_limit(self) -> Optional[int]:
+        mode = self._preview_render_mode()
+        if mode == "fast":
+            return 960
+        if mode == "balanced":
+            return 1280
+        return None
+
+    def _preview_output_scale_factor(self, current_scale_factor: float) -> float:
+        mode = self._preview_render_mode()
+        if mode == "high":
+            return current_scale_factor
+        if mode == "balanced":
+            return min(1.0, current_scale_factor)
+        return 1.0
+
+    def _preview_refresh_delay_ms(self) -> int:
+        mode = self._preview_render_mode()
+        if mode == "fast":
+            return 20
+        if mode == "balanced":
+            return 35
+        return 50
+
+    def _schedule_preview_refresh(self, *, immediate: bool = False) -> None:
+        if immediate:
+            if self._preview_refresh_timer.isActive():
+                self._preview_refresh_timer.stop()
+            self._refresh_preview_impl()
+            return
+
+        self._preview_refresh_timer.start(self._preview_refresh_delay_ms())
+
+    def _schedule_filter_thumbnails_refresh(self) -> None:
+        if self.playback_timer.isActive():
+            return
+        self._thumbnail_refresh_timer.start(140)
+
+    def _prepare_preview_frame(self, frame: np.ndarray) -> tuple[np.ndarray, Optional[np.ndarray], float]:
+        size_limit = self._preview_processing_scale_limit()
+        if size_limit is None:
+            return frame, self.stabilization_reference_frame, 1.0
+
+        height, width = frame.shape[:2]
+        largest_dimension = max(width, height)
+        if largest_dimension <= 0:
+            return frame, self.stabilization_reference_frame, 1.0
+
+        input_scale = min(1.0, size_limit / largest_dimension)
+        if input_scale >= 0.999:
+            return frame, self.stabilization_reference_frame, 1.0
+
+        preview_frame = cv2.resize(frame, None, fx=input_scale, fy=input_scale, interpolation=cv2.INTER_AREA)
+        reference_override = None
+        if self.stabilization_reference_frame is not None:
+            reference_override = cv2.resize(
+                self.stabilization_reference_frame,
+                None,
+                fx=input_scale,
+                fy=input_scale,
+                interpolation=cv2.INTER_AREA,
+            )
+        return preview_frame, reference_override, input_scale
+
     def _image_filter_preset(self, filter_id: str) -> ImageFilterPreset:
         for preset in self.IMAGE_FILTER_PRESETS:
             if preset.filter_id == filter_id:
@@ -1678,12 +1972,56 @@ class MainWindow(QMainWindow):
         self.active_image_filter_id = filter_id
         self._update_filter_selection_ui()
         self._update_filter_description()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
 
     def _handle_filter_intensity_changed(self, value: int) -> None:
         self.active_image_filter_intensity = value
         self._update_filter_description()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
+
+    def _current_stabilization_mode(self) -> str:
+        return str(self.stabilization_mode_combo.currentData())
+
+    def _stabilization_enabled(self) -> bool:
+        return self._current_stabilization_mode() != "off"
+
+    def _stabilization_zoom_out_enabled(self) -> bool:
+        return self.stabilization_zoom_out_checkbox.isChecked()
+
+    def _stabilization_uses_focal_point(self) -> bool:
+        return self._current_stabilization_mode() in {"camera_lock", "hybrid"}
+
+    def _stabilization_uses_auto_motion(self) -> bool:
+        return self._current_stabilization_mode() in {"auto", "similarity", "perspective"}
+
+    def _stabilization_uses_hybrid_motion(self) -> bool:
+        return self._current_stabilization_mode() == "hybrid"
+
+    def _stabilization_requires_sequential_processing(self) -> bool:
+        return (
+            self._stabilization_uses_auto_motion()
+            or self._stabilization_uses_hybrid_motion()
+            or self._stabilization_temporal_smoothing() > 0.0
+        )
+
+    def _new_auto_stabilization_state(self) -> dict[str, object]:
+        return {
+            "prev_gray": None,
+            "prev_frame_index": None,
+            "last_shift": None,
+            "last_shift_index": None,
+            "last_transform": None,
+            "last_transform_index": None,
+            "smoothed_transform": None,
+            "smoothed_frame_index": None,
+            "hybrid_fallback_bias": 0.0,
+        }
+
+    def _reset_preview_auto_stabilization_state(self) -> None:
+        self._preview_auto_stabilization_state = self._new_auto_stabilization_state()
+
+    def _default_stabilization_rect(self) -> QRectF:
+        return QRectF(0.4, 0.3, 0.2, 0.2)
 
     def _update_filter_selection_ui(self) -> None:
         for filter_id, button in self.filter_preset_buttons.items():
@@ -1703,6 +2041,9 @@ class MainWindow(QMainWindow):
         if self.playback_timer.isActive():
             return
 
+        if self._thumbnail_refresh_timer.isActive():
+            self._thumbnail_refresh_timer.stop()
+
         if self.current_frame is None:
             for button in self.filter_preset_buttons.values():
                 button.setIcon(QIcon())
@@ -1710,12 +2051,16 @@ class MainWindow(QMainWindow):
 
         settings = replace(self._current_settings(), scale_factor=1.0)
         thumbnail_source = self._thumbnail_source_frame(self.current_frame)
+        thumbnail_reference_override = None
+        if self.stabilization_reference_frame is not None:
+            thumbnail_reference_override = self._thumbnail_source_frame(self.stabilization_reference_frame)
         for preset in self.IMAGE_FILTER_PRESETS:
             thumbnail_frame = self._render_filtered_frame(
                 thumbnail_source,
                 settings,
                 preset.filter_id,
                 1.0,
+                stabilization_reference_override=thumbnail_reference_override,
             )
             thumbnail_image = self._thumbnail_qimage(thumbnail_frame)
             self.filter_preset_buttons[preset.filter_id].setIcon(
@@ -1753,6 +2098,8 @@ class MainWindow(QMainWindow):
         self.current_frame = frame
         self.frame_label.setText(f"Frame {frame_index + 1} / {self.frame_count}")
         self._update_denoise_controls_state()
+        self._update_stabilization_controls_state()
+        self._update_stabilization_info_label()
         self._refresh_preview()
 
     def _go_to_first_frame(self) -> None:
@@ -1813,7 +2160,8 @@ class MainWindow(QMainWindow):
         if self.frame_slider.value() >= self.playback_end_frame:
             self._stop_playback()
             return
-        self.frame_slider.setValue(self.frame_slider.value() + 1)
+        frame_step = 1 + self._preview_frame_skip()
+        self.frame_slider.setValue(min(self.playback_end_frame, self.frame_slider.value() + frame_step))
 
     def _playback_interval_ms(self) -> int:
         preview_fps = min(max(self.fps, 1.0), 12.0)
@@ -1930,7 +2278,7 @@ class MainWindow(QMainWindow):
         self._sync_crop_preview()
         self._update_crop_info_label()
         self._update_denoise_controls_state()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
 
     def _handle_preview_crop_changed(self, rect: object) -> None:
         if isinstance(rect, QRectF):
@@ -1948,26 +2296,84 @@ class MainWindow(QMainWindow):
             self.denoise_sample_rect_norm = QRectF(rect)
             self._sync_denoise_sample_preview()
             self._update_denoise_sample_info_label()
-            self._refresh_preview_impl()
+            self._schedule_preview_refresh()
+
+    def _handle_preview_stabilization_changed(self, rect: object) -> None:
+        if isinstance(rect, QRectF):
+            self.stabilization_rect_norm = QRectF(rect)
+            self._capture_stabilization_reference_from_current_frame()
+            self._reset_preview_auto_stabilization_state()
+            self._sync_stabilization_preview()
+            self._update_stabilization_info_label()
+            self._schedule_preview_refresh()
 
     def _reset_crop_rect(self) -> None:
         self.crop_rect_norm = self._default_crop_rect(self._normalized_crop_aspect_ratio())
         self._sync_crop_preview()
         self._update_crop_info_label()
         self._update_denoise_controls_state()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
 
     def _default_denoise_sample_rect(self) -> QRectF:
         return QRectF(0.33, 0.33, 0.34, 0.34)
 
     def _handle_denoise_sample_edit_toggled(self, checked: bool) -> None:
+        if checked and self.stabilization_edit_button.isChecked():
+            self.stabilization_edit_button.blockSignals(True)
+            self.stabilization_edit_button.setChecked(False)
+            self.stabilization_edit_button.blockSignals(False)
+            self._sync_stabilization_preview(editing_override=False)
         self._sync_denoise_sample_preview(editing_override=checked)
+
+    def _handle_stabilization_mode_changed(self, *_args) -> None:
+        self._reset_preview_auto_stabilization_state()
+        if self._stabilization_uses_focal_point():
+            self._capture_stabilization_reference_from_current_frame()
+        if not self._stabilization_uses_focal_point() and self.stabilization_edit_button.isChecked():
+            self.stabilization_edit_button.blockSignals(True)
+            self.stabilization_edit_button.setChecked(False)
+            self.stabilization_edit_button.blockSignals(False)
+        self._update_stabilization_controls_state()
+        self._sync_stabilization_preview()
+        self._update_stabilization_info_label()
+        self._schedule_preview_refresh()
+
+    def _handle_stabilization_edit_toggled(self, checked: bool) -> None:
+        if checked and self.denoise_sample_edit_button.isChecked():
+            self.denoise_sample_edit_button.blockSignals(True)
+            self.denoise_sample_edit_button.setChecked(False)
+            self.denoise_sample_edit_button.blockSignals(False)
+            self._sync_denoise_sample_preview(editing_override=False)
+        if checked:
+            self._capture_stabilization_reference_from_current_frame()
+        self._sync_stabilization_preview(editing_override=checked)
+
+    def _handle_stabilization_zoom_out_toggled(self, checked: bool) -> None:
+        if checked and self.stabilization_auto_crop_checkbox.isChecked():
+            self.stabilization_auto_crop_checkbox.blockSignals(True)
+            self.stabilization_auto_crop_checkbox.setChecked(False)
+            self.stabilization_auto_crop_checkbox.blockSignals(False)
+        self._handle_stabilization_control_change()
+
+    def _handle_stabilization_control_change(self, *_args) -> None:
+        self._reset_preview_auto_stabilization_state()
+        self._update_stabilization_controls_state()
+        self._update_stabilization_info_label()
+        self._schedule_preview_refresh()
 
     def _reset_denoise_sample_rect(self) -> None:
         self.denoise_sample_rect_norm = self._default_denoise_sample_rect()
         self._sync_denoise_sample_preview()
         self._update_denoise_sample_info_label()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
+
+    def _reset_stabilization_rect(self) -> None:
+        self.stabilization_rect_norm = self._default_stabilization_rect()
+        self._capture_stabilization_reference_from_current_frame()
+        self._reset_preview_auto_stabilization_state()
+        self._sync_stabilization_preview()
+        self._update_stabilization_info_label()
+        self._schedule_preview_refresh()
 
     def _sync_crop_preview(self) -> None:
         self.preview.set_crop_state(self._crop_enabled(), self.crop_rect_norm, self._normalized_crop_aspect_ratio())
@@ -1977,6 +2383,11 @@ class MainWindow(QMainWindow):
         sample_enabled = self.frame_count > 0 and denoise_mode == "sample"
         editing = self.denoise_sample_edit_button.isChecked() if editing_override is None else editing_override
         self.preview.set_sample_state(sample_enabled, self.denoise_sample_rect_norm, editing)
+
+    def _sync_stabilization_preview(self, editing_override: Optional[bool] = None) -> None:
+        enabled = self.frame_count > 0 and self._stabilization_uses_focal_point()
+        editing = self.stabilization_edit_button.isChecked() if editing_override is None else editing_override
+        self.preview.set_stabilization_state(enabled, self.stabilization_rect_norm, editing)
 
     def _update_denoise_sample_info_label(self) -> None:
         if self.frame_count <= 0:
@@ -1995,6 +2406,71 @@ class MainWindow(QMainWindow):
 
         self.denoise_sample_info_label.setText(
             f"Amostra: {width_ratio * 100:.0f}% x {height_ratio * 100:.0f}%"
+        )
+
+    def _capture_stabilization_reference_from_current_frame(self) -> None:
+        if self.current_frame is None:
+            return
+        self.stabilization_reference_frame = self.current_frame.copy()
+        self.stabilization_reference_frame_index = self.current_frame_index
+
+    def _update_stabilization_info_label(self) -> None:
+        if self.frame_count <= 0:
+            self.stabilization_info_label.setText("Estabilizacao: carregue um video para definir o ponto focal.")
+            return
+
+        if not self._stabilization_enabled():
+            self.stabilization_info_label.setText("Estabilizacao desativada.")
+            return
+
+        crop_mode = "ligado" if self.stabilization_auto_crop_checkbox.isChecked() else "desligado"
+        zoom_out_mode = "ligado" if self._stabilization_zoom_out_enabled() else "desligado"
+        smoothing = int(self._stabilization_temporal_smoothing() * 100)
+        mode = self._current_stabilization_mode()
+        if mode == "auto":
+            self.stabilization_info_label.setText(
+                "Automatico por translacao: acompanha o deslocamento global entre frames consecutivos. "
+                f"Crop automatico: {crop_mode}. Zoom out: {zoom_out_mode}. Suavizacao temporal: {smoothing}%. Exportacao usa processamento sequencial nesse modo."
+            )
+            return
+
+        if mode == "similarity":
+            self.stabilization_info_label.setText(
+                "Automatico por similaridade: compensa translacao, rotacao leve e pequenas variacoes de escala "
+                "entre frames consecutivos. "
+                f"Crop automatico: {crop_mode}. Zoom out: {zoom_out_mode}. Suavizacao temporal: {smoothing}%. Exportacao usa processamento sequencial nesse modo."
+            )
+            return
+
+        if mode == "perspective":
+            self.stabilization_info_label.setText(
+                "Automatico por perspectiva: estima uma homografia global para lidar melhor com parallax leve "
+                "e mudancas de perspectiva pequenas. "
+                f"Crop automatico: {crop_mode}. Zoom out: {zoom_out_mode}. Suavizacao temporal: {smoothing}%. Exportacao usa processamento sequencial nesse modo."
+            )
+            return
+
+        region_pixels = self._stabilization_rect_pixels(self.source_size[0], self.source_size[1])
+        if region_pixels is None:
+            self.stabilization_info_label.setText("Estabilizacao: selecione um ponto ou regiao focal no preview.")
+            return
+
+        _, _, region_width, region_height = region_pixels
+        reference_frame = self.stabilization_reference_frame_index + 1
+        if mode == "hybrid":
+            self.stabilization_info_label.setText(
+                "Hibrido ativo. Tenta prender a regiao verde com camera lock e, se perder o alvo, faz fallback "
+                "progressivo para estabilizacao global. "
+                f"Referencia: frame {reference_frame}. Regiao: {region_width}x{region_height}. "
+                f"Crop automatico: {crop_mode}. Zoom out: {zoom_out_mode}. Suavizacao temporal: {smoothing}%."
+            )
+            return
+
+        self.stabilization_info_label.setText(
+            "Camera lock ativo. Usa features da regiao verde para estimar uma transformacao robusta e tenta "
+            "manter esse enquadramento preso ao frame de referencia. "
+            f"Referencia: frame {reference_frame}. Regiao: {region_width}x{region_height}. "
+            f"Crop automatico: {crop_mode}. Zoom out: {zoom_out_mode}. Suavizacao temporal: {smoothing}%."
         )
 
     def _update_crop_info_label(self) -> None:
@@ -2095,12 +2571,12 @@ class MainWindow(QMainWindow):
     def _handle_preset_changed(self, index: int) -> None:
         preset = self.preset_combo.itemData(index)
         if preset is None:
-            self._refresh_preview_impl()
+            self._schedule_preview_refresh()
             return
 
         self.active_preset_settings = preset
         self._apply_settings_to_controls(preset)
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
         if self.current_frame is not None:
             self.status_label.setText("Preset aplicado. Ajuste os sliders se quiser um refinamento manual.")
 
@@ -2124,7 +2600,7 @@ class MainWindow(QMainWindow):
         target_settings = self.active_preset_settings or self.DEFAULT_FILTER_SETTINGS
         self._apply_settings_to_controls(target_settings)
         self._sync_preset_selection()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
         if self.current_frame is not None:
             self.status_label.setText("Ajustes restaurados para o preset ativo.")
 
@@ -2183,15 +2659,16 @@ class MainWindow(QMainWindow):
     def _handle_filter_control_change(self, *_args) -> None:
         self._sync_preset_selection()
         self._update_denoise_controls_state()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
 
     def _handle_denoise_mode_changed(self, *_args) -> None:
         self._sync_preset_selection()
         self._update_denoise_controls_state()
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh()
 
     def _update_denoise_controls_state(self) -> None:
         denoise_mode = str(self.denoise_mode_combo.currentData())
+        denoise_off = denoise_mode == "off"
         manual_mode = denoise_mode == "manual"
         sample_mode = denoise_mode == "sample"
         controls_enabled = self.frame_count > 0 and self.denoise_mode_combo.isEnabled()
@@ -2206,6 +2683,12 @@ class MainWindow(QMainWindow):
         self._sync_denoise_sample_preview()
         self._update_denoise_sample_info_label()
         sample_source = self._denoise_source_description(denoise_mode)
+        if denoise_off:
+            self.denoise_info_label.setText(
+                "Denoise desativado: o preview e a exportacao pulam esta etapa para poupar processamento."
+            )
+            return
+
         if manual_mode:
             self.denoise_info_label.setText(
                 "Manual: ajuste forca de luminancia, forca de cor e o tamanho das janelas do filtro."
@@ -2221,7 +2704,27 @@ class MainWindow(QMainWindow):
             f"{sample_source} Estimativa atual: luminancia {estimated_luma:.1f} | cor {estimated_color:.1f}."
         )
 
+    def _update_stabilization_controls_state(self) -> None:
+        controls_enabled = self.frame_count > 0 and self.stabilization_mode_combo.isEnabled()
+        stabilization_enabled = controls_enabled and self._stabilization_enabled()
+        self.stabilization_intensity_slider.setEnabled(stabilization_enabled)
+        self.stabilization_smoothing_slider.setEnabled(stabilization_enabled)
+        zoom_out_enabled = stabilization_enabled and self.stabilization_zoom_out_checkbox.isChecked()
+        self.stabilization_auto_crop_checkbox.setEnabled(stabilization_enabled and not zoom_out_enabled)
+        self.stabilization_zoom_out_checkbox.setEnabled(stabilization_enabled)
+        focal_mode = stabilization_enabled and self._stabilization_uses_focal_point()
+        self.stabilization_edit_button.setEnabled(focal_mode)
+        self.stabilization_reset_button.setEnabled(focal_mode)
+        if not focal_mode and self.stabilization_edit_button.isChecked():
+            self.stabilization_edit_button.blockSignals(True)
+            self.stabilization_edit_button.setChecked(False)
+            self.stabilization_edit_button.blockSignals(False)
+        self._sync_stabilization_preview()
+        self._update_stabilization_info_label()
+
     def _denoise_source_description(self, denoise_mode: str) -> str:
+        if denoise_mode == "off":
+            return "Desativado: nao aplica reducao de ruido."
         if denoise_mode == "auto":
             return "Auto: calcula a intensidade com base no frame atual inteiro."
         if denoise_mode == "sample":
@@ -2244,26 +2747,36 @@ class MainWindow(QMainWindow):
 
     def _refresh_preview_impl(self) -> None:
         if self.current_frame is None:
-            self._refresh_filter_thumbnails()
+            self._schedule_filter_thumbnails_refresh()
             return
 
         settings = self._current_settings()
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
+        self._sync_stabilization_preview()
+        preview_source, _reference_override, _input_scale = self._prepare_preview_frame(self.current_frame)
+        preview_before = self._apply_geometry_transforms(preview_source)
         processed = self._render_preview_frame(self.current_frame, settings)
-        self.preview.set_images(frame_to_qimage(self.current_frame), frame_to_qimage(processed))
-        self._refresh_filter_thumbnails()
+        self.preview.set_images(frame_to_qimage(preview_before), frame_to_qimage(processed))
+        self._schedule_filter_thumbnails_refresh()
 
     def _refresh_preview(self, *_args) -> None:
-        self._refresh_preview_impl()
-
-    def _handle_acceleration_mode_changed(self, *_args) -> None:
-        if self._gpu_acceleration_enabled():
-            self._opencl_failed = False
-        self._refresh_preview_impl()
+        self._schedule_preview_refresh(immediate=True)
 
     def _render_preview_frame(self, frame: np.ndarray, settings: FilterSettings) -> np.ndarray:
-        return self._render_filtered_frame(frame, settings, self.active_image_filter_id)
+        preview_frame, reference_override, _input_scale = self._prepare_preview_frame(frame)
+        preview_settings = replace(
+            settings,
+            scale_factor=self._preview_output_scale_factor(settings.scale_factor),
+        )
+        return self._render_filtered_frame(
+            preview_frame,
+            preview_settings,
+            self.active_image_filter_id,
+            stabilization_frame_index=self.current_frame_index,
+            stabilization_state=self._preview_auto_stabilization_state,
+            stabilization_reference_override=reference_override,
+        )
 
     def _render_filtered_frame(
         self,
@@ -2271,14 +2784,49 @@ class MainWindow(QMainWindow):
         settings: FilterSettings,
         image_filter_id: str,
         intensity: Optional[float] = None,
+        stabilization_frame_index: Optional[int] = None,
+        stabilization_state: Optional[dict[str, object]] = None,
+        stabilization_reference_override: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        processing_context = self._build_processing_context(settings, frame)
-        processed = self._apply_opencv_filters(frame, processing_context)
+        stabilized_frame = self._apply_stabilization(
+            frame,
+            stabilization_frame_index,
+            stabilization_state,
+            stabilization_reference_override,
+        )
+        processing_context = self._build_processing_context(settings, stabilized_frame)
+        processed = self._apply_opencv_filters(stabilized_frame, processing_context)
         target_intensity = self._image_filter_intensity() if intensity is None else intensity
-        return self._apply_image_filter_preset(processed, image_filter_id, target_intensity)
+        processed = self._apply_image_filter_preset(processed, image_filter_id, target_intensity)
+        return self._apply_geometry_transforms(processed)
 
     def _image_filter_intensity(self) -> float:
         return max(0.0, min(1.0, self.active_image_filter_intensity / 100.0))
+
+    def _current_rotation_mode(self) -> str:
+        return str(self.rotation_combo.currentData() or "none")
+
+    def _apply_geometry_transforms(self, frame: np.ndarray) -> np.ndarray:
+        transformed = frame
+        rotation_mode = self._current_rotation_mode()
+        if rotation_mode == "90":
+            transformed = cv2.rotate(transformed, cv2.ROTATE_90_CLOCKWISE)
+        elif rotation_mode == "180":
+            transformed = cv2.rotate(transformed, cv2.ROTATE_180)
+        elif rotation_mode == "270":
+            transformed = cv2.rotate(transformed, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        if self.flip_horizontal_checkbox.isChecked():
+            transformed = cv2.flip(transformed, 1)
+        if self.flip_vertical_checkbox.isChecked():
+            transformed = cv2.flip(transformed, 0)
+        return transformed
+
+    def _stabilization_intensity(self) -> float:
+        return max(0.0, min(1.0, self.stabilization_intensity_slider.value() / 100.0))
+
+    def _stabilization_temporal_smoothing(self) -> float:
+        return max(0.0, min(1.0, self.stabilization_smoothing_slider.value() / 100.0))
 
     def _build_processing_context(
         self,
@@ -2292,7 +2840,7 @@ class MainWindow(QMainWindow):
                 denoise_strength = max(1.0, settings.denoise_strength / 7.5)
             if settings.denoise_color_strength > 0:
                 denoise_color_strength = max(1.0, settings.denoise_color_strength / 7.5)
-        elif reference_frame is not None:
+        elif settings.denoise_mode in {"auto", "sample"} and reference_frame is not None:
             denoise_strength, denoise_color_strength = self._estimate_denoise_strengths(
                 reference_frame,
                 settings.denoise_mode,
@@ -2375,8 +2923,794 @@ class MainWindow(QMainWindow):
         start_y = max(0, (frame_height - sample_height) // 2)
         return frame[start_y : start_y + sample_height, start_x : start_x + sample_width]
 
+    def _apply_stabilization(
+        self,
+        frame: np.ndarray,
+        frame_index: Optional[int] = None,
+        runtime_state: Optional[dict[str, object]] = None,
+        reference_frame_override: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        if not self._stabilization_enabled():
+            return frame
+
+        intensity = self._stabilization_intensity()
+        if intensity <= 0.0:
+            return frame
+
+        transform = self._estimate_stabilization_transform(
+            frame,
+            frame_index,
+            runtime_state,
+            reference_frame_override,
+        )
+        if transform is None:
+            return frame
+
+        transform = self._smooth_stabilization_transform(transform, frame_index, runtime_state)
+
+        blended_transform = self._blend_stabilization_transform(transform, intensity)
+        if self._stabilization_zoom_out_enabled():
+            blended_transform = self._fit_stabilization_transform_with_zoom_out(blended_transform, frame.shape)
+        if self._stabilization_transform_is_negligible(blended_transform):
+            return frame
+
+        stabilized = self._warp_stabilized_frame(frame, blended_transform)
+
+        if self.stabilization_auto_crop_checkbox.isChecked():
+            stabilized = self._auto_crop_stabilized_frame(stabilized, blended_transform)
+        return stabilized
+
+    def _estimate_stabilization_transform(
+        self,
+        frame: np.ndarray,
+        frame_index: Optional[int],
+        runtime_state: Optional[dict[str, object]],
+        reference_frame_override: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        mode = self._current_stabilization_mode()
+        if mode == "auto":
+            if runtime_state is None:
+                return None
+            shift = self._estimate_automatic_stabilization_shift(frame, frame_index, runtime_state)
+            if shift is None:
+                return None
+            return self._translation_to_affine(shift[0], shift[1])
+
+        if mode in {"similarity", "perspective"}:
+            if runtime_state is None:
+                return None
+            return self._estimate_automatic_geometric_transform(frame, frame_index, runtime_state, mode)
+
+        if mode == "camera_lock":
+            reference_frame = self.stabilization_reference_frame if reference_frame_override is None else reference_frame_override
+            if reference_frame is None:
+                return None
+            return self._estimate_camera_lock_transform(frame, reference_frame)
+
+        if mode == "hybrid":
+            reference_frame = self.stabilization_reference_frame if reference_frame_override is None else reference_frame_override
+            return self._estimate_hybrid_stabilization_transform(frame, frame_index, runtime_state, reference_frame)
+
+        return None
+
+    def _estimate_hybrid_stabilization_transform(
+        self,
+        frame: np.ndarray,
+        frame_index: Optional[int],
+        runtime_state: Optional[dict[str, object]],
+        reference_frame: Optional[np.ndarray],
+    ) -> Optional[np.ndarray]:
+        if runtime_state is None:
+            return None
+
+        fallback_bias = float(runtime_state.get("hybrid_fallback_bias", 0.0) or 0.0)
+        lock_transform = None
+        if reference_frame is not None:
+            lock_transform = self._estimate_camera_lock_transform(frame, reference_frame)
+
+        similarity_transform = self._estimate_automatic_geometric_transform(frame, frame_index, runtime_state, "similarity")
+        translation_shift = self._estimate_automatic_stabilization_shift(frame, frame_index, runtime_state)
+        translation_transform = None
+        if translation_shift is not None:
+            translation_transform = self._translation_to_affine(translation_shift[0], translation_shift[1])
+
+        if lock_transform is not None:
+            fallback_bias = max(0.0, fallback_bias - 0.22)
+            runtime_state["hybrid_fallback_bias"] = fallback_bias
+            if similarity_transform is not None and fallback_bias > 0.01:
+                return self._mix_transforms(lock_transform, similarity_transform, min(0.35, fallback_bias * 0.5))
+            return lock_transform
+
+        fallback_bias = min(1.0, fallback_bias + 0.28)
+        runtime_state["hybrid_fallback_bias"] = fallback_bias
+
+        if similarity_transform is not None and translation_transform is not None and fallback_bias > 0.55:
+            translation_weight = min(0.55, (fallback_bias - 0.55) / 0.45)
+            return self._mix_transforms(similarity_transform, translation_transform, translation_weight)
+        if similarity_transform is not None:
+            return similarity_transform
+        return translation_transform
+
+    def _smooth_stabilization_transform(
+        self,
+        transform: np.ndarray,
+        frame_index: Optional[int],
+        runtime_state: Optional[dict[str, object]],
+    ) -> np.ndarray:
+        smoothing = self._stabilization_temporal_smoothing()
+        if runtime_state is None or smoothing <= 0.0:
+            return transform
+
+        previous_transform = runtime_state.get("smoothed_transform")
+        previous_frame_index = runtime_state.get("smoothed_frame_index")
+        if (
+            previous_transform is None
+            or not isinstance(previous_transform, np.ndarray)
+            or frame_index is None
+            or previous_frame_index is None
+            or int(previous_frame_index) != (frame_index - 1)
+        ):
+            runtime_state["smoothed_transform"] = transform
+            runtime_state["smoothed_frame_index"] = frame_index
+            return transform
+
+        current_weight = max(0.08, 1.0 - (smoothing * 0.92))
+        smoothed_transform = self._mix_transforms(previous_transform, transform, current_weight)
+        runtime_state["smoothed_transform"] = smoothed_transform
+        runtime_state["smoothed_frame_index"] = frame_index
+        return smoothed_transform
+
+    def _automatic_stabilization_gray(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
+        height, width = frame.shape[:2]
+        if width <= 0 or height <= 0:
+            return np.empty((0, 0), dtype=np.uint8), 1.0
+
+        scale = min(1.0, 480.0 / max(width, height))
+        if scale < 0.999:
+            resized = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        else:
+            resized = frame
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        return gray, scale
+
+    def _estimate_automatic_stabilization_shift(
+        self,
+        frame: np.ndarray,
+        frame_index: Optional[int],
+        runtime_state: dict[str, object],
+    ) -> Optional[tuple[float, float]]:
+        current_gray, scale = self._automatic_stabilization_gray(frame)
+        if current_gray.size == 0:
+            return None
+
+        previous_gray = runtime_state.get("prev_gray")
+        previous_frame_index = runtime_state.get("prev_frame_index")
+        last_shift_index = runtime_state.get("last_shift_index")
+        last_shift = runtime_state.get("last_shift")
+
+        if frame_index is not None and last_shift_index == frame_index and isinstance(last_shift, tuple):
+            return last_shift
+
+        if previous_gray is None or not isinstance(previous_gray, np.ndarray):
+            runtime_state["prev_gray"] = current_gray
+            runtime_state["prev_frame_index"] = frame_index
+            runtime_state["last_shift"] = None
+            runtime_state["last_shift_index"] = frame_index
+            return None
+
+        if frame_index is not None and previous_frame_index is not None and frame_index != (int(previous_frame_index) + 1):
+            runtime_state["prev_gray"] = current_gray
+            runtime_state["prev_frame_index"] = frame_index
+            runtime_state["last_shift"] = None
+            runtime_state["last_shift_index"] = frame_index
+            return None
+
+        features = cv2.goodFeaturesToTrack(
+            previous_gray,
+            maxCorners=160,
+            qualityLevel=0.01,
+            minDistance=18,
+            blockSize=5,
+        )
+        shift: Optional[tuple[float, float]] = None
+        if features is not None and len(features) >= 8:
+            next_points, status, _errors = cv2.calcOpticalFlowPyrLK(previous_gray, current_gray, features, None)
+            if next_points is not None and status is not None:
+                valid_mask = status.reshape(-1) == 1
+                if np.count_nonzero(valid_mask) >= 6:
+                    valid_previous = features.reshape(-1, 2)[valid_mask]
+                    valid_next = next_points.reshape(-1, 2)[valid_mask]
+                    deltas = valid_next - valid_previous
+                    delta_x = float(np.median(deltas[:, 0]))
+                    delta_y = float(np.median(deltas[:, 1]))
+                    shift = (-delta_x / scale, -delta_y / scale)
+
+        if shift is None:
+            phase_shift, response = cv2.phaseCorrelate(previous_gray.astype(np.float32), current_gray.astype(np.float32))
+            if response >= 0.05:
+                shift = (-float(phase_shift[0]) / scale, -float(phase_shift[1]) / scale)
+
+        runtime_state["prev_gray"] = current_gray
+        runtime_state["prev_frame_index"] = frame_index
+        runtime_state["last_shift"] = shift
+        runtime_state["last_shift_index"] = frame_index
+        return shift
+
+    def _estimate_automatic_geometric_transform(
+        self,
+        frame: np.ndarray,
+        frame_index: Optional[int],
+        runtime_state: dict[str, object],
+        mode: str,
+    ) -> Optional[np.ndarray]:
+        current_gray, scale = self._automatic_stabilization_gray(frame)
+        if current_gray.size == 0:
+            return None
+
+        previous_gray = runtime_state.get("prev_gray")
+        previous_frame_index = runtime_state.get("prev_frame_index")
+        last_transform = runtime_state.get("last_transform")
+        last_transform_index = runtime_state.get("last_transform_index")
+
+        if frame_index is not None and last_transform_index == frame_index and isinstance(last_transform, np.ndarray):
+            return last_transform
+
+        if previous_gray is None or not isinstance(previous_gray, np.ndarray):
+            runtime_state["prev_gray"] = current_gray
+            runtime_state["prev_frame_index"] = frame_index
+            runtime_state["last_transform"] = None
+            runtime_state["last_transform_index"] = frame_index
+            return None
+
+        if frame_index is not None and previous_frame_index is not None and frame_index != (int(previous_frame_index) + 1):
+            runtime_state["prev_gray"] = current_gray
+            runtime_state["prev_frame_index"] = frame_index
+            runtime_state["last_transform"] = None
+            runtime_state["last_transform_index"] = frame_index
+            return None
+
+        transform = self._estimate_geometric_transform_from_gray(
+            previous_gray,
+            current_gray,
+            scale,
+            frame.shape,
+            mode,
+        )
+
+        runtime_state["prev_gray"] = current_gray
+        runtime_state["prev_frame_index"] = frame_index
+        runtime_state["last_transform"] = transform
+        runtime_state["last_transform_index"] = frame_index
+        return transform
+
+    def _estimate_geometric_transform_from_gray(
+        self,
+        previous_gray: np.ndarray,
+        current_gray: np.ndarray,
+        scale: float,
+        frame_shape: tuple[int, ...],
+        mode: str,
+    ) -> Optional[np.ndarray]:
+        features = cv2.goodFeaturesToTrack(
+            previous_gray,
+            maxCorners=220,
+            qualityLevel=0.01,
+            minDistance=14,
+            blockSize=5,
+        )
+        if features is None or len(features) < 10:
+            return None
+
+        next_points, status, _errors = cv2.calcOpticalFlowPyrLK(
+            previous_gray,
+            current_gray,
+            features,
+            None,
+            winSize=(21, 21),
+            maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        )
+        if next_points is None or status is None:
+            return None
+
+        valid_mask = status.reshape(-1) == 1
+        if np.count_nonzero(valid_mask) < 8:
+            return None
+
+        previous_points = features.reshape(-1, 2)[valid_mask]
+        current_points = next_points.reshape(-1, 2)[valid_mask]
+
+        if mode == "perspective":
+            perspective_transform = self._estimate_perspective_transform(
+                current_points,
+                previous_points,
+                scale,
+                frame_shape,
+            )
+            if perspective_transform is not None:
+                return perspective_transform
+
+        return self._estimate_similarity_transform(
+            current_points,
+            previous_points,
+            scale,
+            frame_shape,
+        )
+
+    def _estimate_similarity_transform(
+        self,
+        source_points: np.ndarray,
+        destination_points: np.ndarray,
+        scale: float,
+        frame_shape: tuple[int, ...],
+    ) -> Optional[np.ndarray]:
+        if len(source_points) < 6 or len(destination_points) < 6:
+            return None
+
+        transform, inliers = cv2.estimateAffinePartial2D(
+            source_points,
+            destination_points,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=3.0,
+            maxIters=3000,
+            confidence=0.99,
+            refineIters=10,
+        )
+        if transform is None or inliers is None or int(np.count_nonzero(inliers)) < 6:
+            return None
+
+        scaled_transform = self._rescale_affine_transform(transform, scale)
+        if not self._stabilization_transform_is_reasonable(scaled_transform, frame_shape):
+            return None
+        return scaled_transform
+
+    def _estimate_perspective_transform(
+        self,
+        source_points: np.ndarray,
+        destination_points: np.ndarray,
+        scale: float,
+        frame_shape: tuple[int, ...],
+    ) -> Optional[np.ndarray]:
+        if len(source_points) < 8 or len(destination_points) < 8:
+            return None
+
+        transform, inliers = cv2.findHomography(
+            source_points,
+            destination_points,
+            cv2.RANSAC,
+            3.0,
+        )
+        if transform is None or inliers is None or int(np.count_nonzero(inliers)) < 8:
+            return None
+
+        scaled_transform = self._rescale_homography(transform, scale)
+        if not self._stabilization_transform_is_reasonable(scaled_transform, frame_shape, allow_perspective=True):
+            return None
+        return scaled_transform
+
+    def _estimate_camera_lock_transform(
+        self,
+        frame: np.ndarray,
+        reference_frame: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        reference_source = self.stabilization_reference_frame if reference_frame is None else reference_frame
+        if reference_source is None:
+            return None
+
+        reference_height, reference_width = reference_source.shape[:2]
+        current_height, current_width = frame.shape[:2]
+        reference_pixels = self._stabilization_rect_pixels(reference_width, reference_height)
+        current_pixels = self._stabilization_rect_pixels(current_width, current_height)
+        if reference_pixels is None or current_pixels is None:
+            return None
+
+        scale = min(1.0, 720.0 / max(reference_width, reference_height, current_width, current_height))
+        reference_gray = self._scaled_gray_frame(reference_source, scale)
+        current_gray = self._scaled_gray_frame(frame, scale)
+        if reference_gray.size == 0 or current_gray.size == 0:
+            return None
+
+        reference_mask = np.zeros_like(reference_gray, dtype=np.uint8)
+        current_mask = np.zeros_like(current_gray, dtype=np.uint8)
+        ref_x, ref_y, ref_width, ref_height = self._scaled_rect(reference_pixels, scale, reference_gray.shape[1], reference_gray.shape[0])
+        cur_search_rect = self._expanded_search_rect(current_pixels, current_width, current_height, 2.6)
+        cur_x, cur_y, cur_width, cur_height = self._scaled_rect(cur_search_rect, scale, current_gray.shape[1], current_gray.shape[0])
+        reference_mask[ref_y : ref_y + ref_height, ref_x : ref_x + ref_width] = 255
+        current_mask[cur_y : cur_y + cur_height, cur_x : cur_x + cur_width] = 255
+
+        transform = self._estimate_camera_lock_feature_transform(
+            reference_gray,
+            current_gray,
+            reference_mask,
+            current_mask,
+            scale,
+            frame.shape,
+        )
+        if transform is not None:
+            return transform
+
+        transform = self._estimate_camera_lock_feature_transform(
+            reference_gray,
+            current_gray,
+            reference_mask,
+            None,
+            scale,
+            frame.shape,
+        )
+        if transform is not None:
+            return transform
+
+        shift = self._estimate_stabilization_shift(frame, reference_source)
+        if shift is None:
+            return None
+        return self._translation_to_affine(shift[0], shift[1])
+
+    def _estimate_camera_lock_feature_transform(
+        self,
+        reference_gray: np.ndarray,
+        current_gray: np.ndarray,
+        reference_mask: np.ndarray,
+        current_mask: Optional[np.ndarray],
+        scale: float,
+        frame_shape: tuple[int, ...],
+    ) -> Optional[np.ndarray]:
+        orb = cv2.ORB_create(
+            nfeatures=900,
+            scaleFactor=1.2,
+            nlevels=8,
+            edgeThreshold=15,
+            patchSize=31,
+            fastThreshold=10,
+        )
+        reference_keypoints, reference_descriptors = orb.detectAndCompute(reference_gray, reference_mask)
+        current_keypoints, current_descriptors = orb.detectAndCompute(current_gray, current_mask)
+        if (
+            reference_descriptors is None
+            or current_descriptors is None
+            or reference_keypoints is None
+            or current_keypoints is None
+            or len(reference_keypoints) < 8
+            or len(current_keypoints) < 8
+        ):
+            return None
+
+        matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+        raw_matches = matcher.knnMatch(reference_descriptors, current_descriptors, k=2)
+        good_matches = []
+        for pair in raw_matches:
+            if len(pair) < 2:
+                continue
+            first, second = pair
+            if first.distance < (0.78 * second.distance):
+                good_matches.append(first)
+
+        if len(good_matches) < 8:
+            return None
+
+        good_matches.sort(key=lambda match: match.distance)
+        good_matches = good_matches[:120]
+        reference_points = np.float32([reference_keypoints[match.queryIdx].pt for match in good_matches])
+        current_points = np.float32([current_keypoints[match.trainIdx].pt for match in good_matches])
+        return self._estimate_similarity_transform(current_points, reference_points, scale, frame_shape)
+
+    def _estimate_stabilization_shift(
+        self,
+        frame: np.ndarray,
+        reference_frame: Optional[np.ndarray] = None,
+    ) -> Optional[tuple[float, float]]:
+        reference_source = self.stabilization_reference_frame if reference_frame is None else reference_frame
+        if reference_source is None:
+            return None
+
+        reference_height, reference_width = reference_source.shape[:2]
+        current_height, current_width = frame.shape[:2]
+        reference_pixels = self._stabilization_rect_pixels(reference_width, reference_height)
+        current_pixels = self._stabilization_rect_pixels(current_width, current_height)
+        if reference_pixels is None or current_pixels is None:
+            return None
+
+        ref_x, ref_y, ref_width, ref_height = reference_pixels
+        cur_x, cur_y, cur_width, cur_height = current_pixels
+        template = reference_source[ref_y : ref_y + ref_height, ref_x : ref_x + ref_width]
+        if template.size == 0:
+            return None
+
+        search_margin_x = max(32, int(cur_width * 1.6))
+        search_margin_y = max(32, int(cur_height * 1.6))
+        search_left = max(0, cur_x - search_margin_x)
+        search_top = max(0, cur_y - search_margin_y)
+        search_right = min(current_width, cur_x + cur_width + search_margin_x)
+        search_bottom = min(current_height, cur_y + cur_height + search_margin_y)
+        search_region = frame[search_top:search_bottom, search_left:search_right]
+        if (
+            search_region.shape[0] < template.shape[0]
+            or search_region.shape[1] < template.shape[1]
+        ):
+            return None
+
+        search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        result = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+        _, max_value, _, max_loc = cv2.minMaxLoc(result)
+        if max_value < 0.28:
+            return None
+
+        match_x = search_left + max_loc[0]
+        match_y = search_top + max_loc[1]
+        reference_center_x = ref_x + (ref_width / 2.0)
+        reference_center_y = ref_y + (ref_height / 2.0)
+        match_center_x = match_x + (ref_width / 2.0)
+        match_center_y = match_y + (ref_height / 2.0)
+        return (reference_center_x - match_center_x, reference_center_y - match_center_y)
+
+    def _translation_to_affine(self, shift_x: float, shift_y: float) -> np.ndarray:
+        return np.array([[1.0, 0.0, shift_x], [0.0, 1.0, shift_y]], dtype=np.float32)
+
+    def _scaled_gray_frame(self, frame: np.ndarray, scale: float) -> np.ndarray:
+        if scale < 0.999:
+            resized = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        else:
+            resized = frame
+        return cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+
+    def _scaled_rect(
+        self,
+        rect: tuple[int, int, int, int],
+        scale: float,
+        width: int,
+        height: int,
+    ) -> tuple[int, int, int, int]:
+        x, y, rect_width, rect_height = rect
+        scaled_x = max(0, min(int(round(x * scale)), max(0, width - 2)))
+        scaled_y = max(0, min(int(round(y * scale)), max(0, height - 2)))
+        scaled_width = max(2, min(int(round(rect_width * scale)), width - scaled_x))
+        scaled_height = max(2, min(int(round(rect_height * scale)), height - scaled_y))
+        return (scaled_x, scaled_y, scaled_width, scaled_height)
+
+    def _expanded_search_rect(
+        self,
+        rect: tuple[int, int, int, int],
+        width: int,
+        height: int,
+        multiplier: float,
+    ) -> tuple[int, int, int, int]:
+        x, y, rect_width, rect_height = rect
+        margin_x = max(40, int(rect_width * multiplier))
+        margin_y = max(40, int(rect_height * multiplier))
+        left = max(0, x - margin_x)
+        top = max(0, y - margin_y)
+        right = min(width, x + rect_width + margin_x)
+        bottom = min(height, y + rect_height + margin_y)
+        return (left, top, max(2, right - left), max(2, bottom - top))
+
+    def _affine_to_homography(self, transform: np.ndarray) -> np.ndarray:
+        if transform.shape == (3, 3):
+            return transform.astype(np.float32)
+        return np.vstack([transform, np.array([0.0, 0.0, 1.0], dtype=np.float32)]).astype(np.float32)
+
+    def _rescale_affine_transform(self, transform: np.ndarray, scale: float) -> np.ndarray:
+        if abs(scale - 1.0) < 1e-3:
+            return transform.astype(np.float32)
+        homography = self._affine_to_homography(transform)
+        scaled = self._rescale_homography(homography, scale)
+        return scaled[:2, :].astype(np.float32)
+
+    def _rescale_homography(self, transform: np.ndarray, scale: float) -> np.ndarray:
+        homography = self._affine_to_homography(transform)
+        if abs(scale - 1.0) < 1e-3:
+            normalized = homography.astype(np.float32)
+        else:
+            scaling_matrix = np.array([[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+            inverse_scaling = np.array(
+                [[1.0 / scale, 0.0, 0.0], [0.0, 1.0 / scale, 0.0], [0.0, 0.0, 1.0]],
+                dtype=np.float32,
+            )
+            normalized = inverse_scaling @ homography @ scaling_matrix
+        if abs(float(normalized[2, 2])) > 1e-6:
+            normalized = normalized / float(normalized[2, 2])
+        return normalized.astype(np.float32)
+
+    def _blend_stabilization_transform(self, transform: np.ndarray, intensity: float) -> np.ndarray:
+        if transform.shape == (2, 3):
+            identity = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+            return ((identity * (1.0 - intensity)) + (transform.astype(np.float32) * intensity)).astype(np.float32)
+
+        identity = np.eye(3, dtype=np.float32)
+        blended = (identity * (1.0 - intensity)) + (transform.astype(np.float32) * intensity)
+        if abs(float(blended[2, 2])) > 1e-6:
+            blended = blended / float(blended[2, 2])
+        return blended.astype(np.float32)
+
+    def _mix_transforms(
+        self,
+        first_transform: np.ndarray,
+        second_transform: np.ndarray,
+        second_weight: float,
+    ) -> np.ndarray:
+        weight = max(0.0, min(1.0, second_weight))
+        if first_transform.shape == (2, 3) and second_transform.shape == (2, 3):
+            return (
+                (first_transform.astype(np.float32) * (1.0 - weight))
+                + (second_transform.astype(np.float32) * weight)
+            ).astype(np.float32)
+
+        first_h = self._affine_to_homography(first_transform)
+        second_h = self._affine_to_homography(second_transform)
+        mixed = (first_h * (1.0 - weight)) + (second_h * weight)
+        if abs(float(mixed[2, 2])) > 1e-6:
+            mixed = mixed / float(mixed[2, 2])
+        return mixed.astype(np.float32)
+
+    def _stabilization_transform_is_negligible(self, transform: np.ndarray) -> bool:
+        if transform.shape == (2, 3):
+            translation = float(max(abs(transform[0, 2]), abs(transform[1, 2])))
+            rotation_scale_delta = float(np.max(np.abs(transform[:, :2] - np.eye(2, dtype=np.float32))))
+            return translation < 0.5 and rotation_scale_delta < 0.004
+
+        translation = float(max(abs(transform[0, 2]), abs(transform[1, 2])))
+        matrix_delta = float(np.max(np.abs(transform - np.eye(3, dtype=np.float32))))
+        return translation < 0.5 and matrix_delta < 0.006
+
+    def _stabilization_transform_is_reasonable(
+        self,
+        transform: np.ndarray,
+        frame_shape: tuple[int, ...],
+        allow_perspective: bool = False,
+    ) -> bool:
+        height, width = frame_shape[:2]
+        if width <= 0 or height <= 0:
+            return False
+
+        corners = np.array(
+            [[[0.0, 0.0]], [[width - 1.0, 0.0]], [[width - 1.0, height - 1.0]], [[0.0, height - 1.0]]],
+            dtype=np.float32,
+        )
+        if transform.shape == (2, 3):
+            projected = cv2.transform(corners, transform)
+        else:
+            projected = cv2.perspectiveTransform(corners, transform)
+        if not np.isfinite(projected).all():
+            return False
+
+        projected_points = projected.reshape(-1, 2)
+        original_points = corners.reshape(-1, 2)
+        displacement = np.linalg.norm(projected_points - original_points, axis=1)
+        if float(np.median(displacement)) > (max(width, height) * 0.35):
+            return False
+
+        bbox_width = float(projected_points[:, 0].max() - projected_points[:, 0].min())
+        bbox_height = float(projected_points[:, 1].max() - projected_points[:, 1].min())
+        if bbox_width < (width * 0.55) or bbox_width > (width * 1.45):
+            return False
+        if bbox_height < (height * 0.55) or bbox_height > (height * 1.45):
+            return False
+
+        if allow_perspective:
+            projected_area = abs(float(cv2.contourArea(projected_points.astype(np.float32))))
+            original_area = float(max(1, width * height))
+            if projected_area < (original_area * 0.45) or projected_area > (original_area * 1.8):
+                return False
+
+        return True
+
+    def _fit_stabilization_transform_with_zoom_out(
+        self,
+        transform: np.ndarray,
+        frame_shape: tuple[int, ...],
+    ) -> np.ndarray:
+        height, width = frame_shape[:2]
+        if width <= 0 or height <= 0:
+            return transform
+
+        corners = np.array(
+            [[[0.0, 0.0]], [[width - 1.0, 0.0]], [[width - 1.0, height - 1.0]], [[0.0, height - 1.0]]],
+            dtype=np.float32,
+        )
+        if transform.shape == (2, 3):
+            projected = cv2.transform(corners, transform)
+        else:
+            projected = cv2.perspectiveTransform(corners, transform)
+
+        if not np.isfinite(projected).all():
+            return transform
+
+        projected_points = projected.reshape(-1, 2)
+        min_x = float(projected_points[:, 0].min())
+        max_x = float(projected_points[:, 0].max())
+        min_y = float(projected_points[:, 1].min())
+        max_y = float(projected_points[:, 1].max())
+        bbox_width = max(1.0, max_x - min_x)
+        bbox_height = max(1.0, max_y - min_y)
+
+        safe_width = max(1.0, width * 0.98)
+        safe_height = max(1.0, height * 0.98)
+        if min_x >= 0.0 and min_y >= 0.0 and max_x <= (width - 1.0) and max_y <= (height - 1.0):
+            if bbox_width <= safe_width and bbox_height <= safe_height:
+                return transform
+
+        fit_scale = min(1.0, safe_width / bbox_width, safe_height / bbox_height)
+        bbox_center_x = (min_x + max_x) / 2.0
+        bbox_center_y = (min_y + max_y) / 2.0
+        output_center_x = (width - 1.0) / 2.0
+        output_center_y = (height - 1.0) / 2.0
+        adjust = np.array(
+            [
+                [fit_scale, 0.0, output_center_x - (bbox_center_x * fit_scale)],
+                [0.0, fit_scale, output_center_y - (bbox_center_y * fit_scale)],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        composed = adjust @ self._affine_to_homography(transform)
+        if abs(float(composed[2, 2])) > 1e-6:
+            composed = composed / float(composed[2, 2])
+        if transform.shape == (2, 3):
+            return composed[:2, :].astype(np.float32)
+        return composed.astype(np.float32)
+
+    def _warp_stabilized_frame(self, frame: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        height, width = frame.shape[:2]
+        if transform.shape == (2, 3):
+            return cv2.warpAffine(
+                frame,
+                transform,
+                (width, height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+        return cv2.warpPerspective(
+            frame,
+            transform,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT,
+        )
+
+    def _auto_crop_stabilized_frame(self, frame: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        height, width = frame.shape[:2]
+        mask = np.full((height, width), 255, dtype=np.uint8)
+        if transform.shape == (2, 3):
+            valid_mask = cv2.warpAffine(
+                mask,
+                transform,
+                (width, height),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+        else:
+            valid_mask = cv2.warpPerspective(
+                mask,
+                transform,
+                (width, height),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+
+        erosion_size = max(1, int(round(min(width, height) * 0.015)))
+        if erosion_size > 1:
+            kernel = np.ones((erosion_size, erosion_size), dtype=np.uint8)
+            valid_mask = cv2.erode(valid_mask, kernel, iterations=1)
+
+        non_zero = cv2.findNonZero(valid_mask)
+        if non_zero is None:
+            return frame
+
+        left, top, cropped_width, cropped_height = cv2.boundingRect(non_zero)
+        if cropped_width >= (width - 2) and cropped_height >= (height - 2):
+            return frame
+        if cropped_width < max(16, int(width * 0.55)) or cropped_height < max(16, int(height * 0.55)):
+            return frame
+
+        cropped = frame[top : top + cropped_height, left : left + cropped_width]
+        if cropped.size == 0:
+            return frame
+        return cv2.resize(cropped, (width, height), interpolation=cv2.INTER_CUBIC)
+
     def _gpu_acceleration_enabled(self) -> bool:
-        return self.acceleration_combo.currentData() == "gpu"
+        return True
 
     def _ensure_opencl_available(self) -> bool:
         if self._opencl_checked:
@@ -2646,13 +3980,20 @@ class MainWindow(QMainWindow):
             return
 
         worker_count = self._export_worker_count()
+        if self._stabilization_requires_sequential_processing():
+            worker_count = 1
+        self._opencl_checked = False
+        self._opencl_failed = False
         encoder_args, encoder_label = self._resolve_export_encoder(ffmpeg_path)
         self._current_export_backend_label = (
             f"{self._current_processing_backend_label()} + {encoder_label}"
         )
+        export_note = ""
+        if self._stabilization_requires_sequential_processing():
+            export_note = " | estabilizacao temporal usa processamento sequencial"
         self._begin_export_ui(
             "Exportando video frame a frame com OpenCV... "
-            f"usando {worker_count} thread(s) | {self._current_export_backend_label}."
+            f"usando {worker_count} thread(s) | {self._current_export_backend_label}{export_note}."
         )
         success, detail = self._export_video_with_opencv(
             Path(output_path),
@@ -2754,14 +4095,22 @@ class MainWindow(QMainWindow):
 
         return parsed_value if parsed_value in {1, 2, 4, 6, 8} else 1
 
-    def _process_export_frame(self, frame: np.ndarray, processing_context: ProcessingContext) -> np.ndarray:
-        processed = self._apply_opencv_filters(frame, processing_context)
+    def _process_export_frame(
+        self,
+        frame: np.ndarray,
+        processing_context: ProcessingContext,
+        frame_index: Optional[int] = None,
+        stabilization_state: Optional[dict[str, object]] = None,
+    ) -> np.ndarray:
+        processed = self._apply_stabilization(frame, frame_index, stabilization_state)
+        processed = self._apply_opencv_filters(processed, processing_context)
         processed = self._apply_image_filter_preset(
             processed,
             self.active_image_filter_id,
             self._image_filter_intensity(),
         )
-        return self._apply_crop_to_frame(processed)
+        processed = self._apply_crop_to_frame(processed)
+        return self._apply_geometry_transforms(processed)
 
     def _available_ffmpeg_encoders(self, ffmpeg_path: str) -> set[str]:
         if self._ffmpeg_encoder_cache_path == ffmpeg_path and self._ffmpeg_encoder_cache is not None:
@@ -2906,8 +4255,9 @@ class MainWindow(QMainWindow):
             capture.release()
             return (False, "Nao foi possivel ler o frame inicial do corte selecionado.")
 
+        export_stabilization_state = self._new_auto_stabilization_state()
         processing_context = self._build_processing_context(settings, frame)
-        first_processed = self._process_export_frame(frame, processing_context)
+        first_processed = self._process_export_frame(frame, processing_context, start_frame, export_stabilization_state)
         height, width = first_processed.shape[:2]
         duration_seconds = self._selected_duration_seconds()
         start_seconds = self._selected_start_seconds()
@@ -2980,7 +4330,13 @@ class MainWindow(QMainWindow):
                         read_failed = True
                         break
 
-                    processed_frame = self._process_export_frame(next_frame, processing_context)
+                    next_frame_index = start_frame + processed_frames
+                    processed_frame = self._process_export_frame(
+                        next_frame,
+                        processing_context,
+                        next_frame_index,
+                        export_stabilization_state,
+                    )
                     if process.stdin is None:
                         raise BrokenPipeError("FFmpeg stdin indisponivel.")
                     process.stdin.write(processed_frame.tobytes())
@@ -3004,7 +4360,13 @@ class MainWindow(QMainWindow):
                                 read_failed = True
                                 break
                             pending_futures.append(
-                                executor.submit(self._process_export_frame, next_frame, processing_context)
+                                executor.submit(
+                                    self._process_export_frame,
+                                    next_frame,
+                                    processing_context,
+                                    start_frame + submitted_frames,
+                                    None,
+                                )
                             )
                             submitted_frames += 1
 
@@ -3061,6 +4423,21 @@ class MainWindow(QMainWindow):
         sample_width = max(2, min(sample_width, width - x))
         sample_height = max(2, min(sample_height, height - y))
         return (x, y, sample_width, sample_height)
+
+    def _stabilization_rect_pixels(self, width: int, height: int) -> Optional[tuple[int, int, int, int]]:
+        if width <= 0 or height <= 0:
+            return None
+
+        x = int(round(self.stabilization_rect_norm.x() * width))
+        y = int(round(self.stabilization_rect_norm.y() * height))
+        region_width = int(round(self.stabilization_rect_norm.width() * width))
+        region_height = int(round(self.stabilization_rect_norm.height() * height))
+
+        x = max(0, min(x, width - 2))
+        y = max(0, min(y, height - 2))
+        region_width = max(2, min(region_width, width - x))
+        region_height = max(2, min(region_height, height - y))
+        return (x, y, region_width, region_height)
 
     def _crop_rect_pixels(self, width: int, height: int) -> Optional[tuple[int, int, int, int]]:
         if not self._crop_enabled() or width <= 0 or height <= 0:

@@ -105,28 +105,27 @@ Se depois voce quiser uma experiencia mais moderna e rapida, a alternativa natur
 - permite navegar pelos frames com um slider
 - inclui botoes para ir ao inicio, voltar um frame, avancar um frame, ir ao final e reproduzir a visualizacao quadro a quadro
 - permite redimensionar a area de preview com zoom por botoes e percentual de exibicao
-- organiza os ajustes laterais em abas tematicas para cor e detalhe, geometria, ruido e exportacao
+- organiza os ajustes laterais em abas tematicas para cor e detalhe, filtros, geometria, ruido, estabilizacao e midia
 - inclui uma aba `Filtros` com presets de imagem em miniatura baseados no frame selecionado, atualizados quando o preview esta pausado, e um controle de intensidade do preset atual
 - inclui barra de menu superior com secoes como `Arquivo`, `Editar`, `Reproducao` e `Ajuda`
 - exibe comparacao antes/depois com divisor arrastavel
 - inclui crop interativo sobre o preview, com presets de proporcao e modo livre
+- oferece rotacao predefinida em 90, 180 e 270 graus, alem de espelhamento horizontal e vertical na aba de geometria
 - aplica a melhoria sempre com OpenCV frame a frame no preview e na exportacao
 - oferece presets de melhoria para partir de um ajuste base
 - permite resetar cada slider para o valor do preset ativo
-- ajusta denoise com modo manual, auto ou baseado em uma amostra independente escolhida no preview, alem de nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
+- ajusta denoise com modo desativado, manual, auto ou baseado em uma amostra independente escolhida no preview, alem de nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
+- inclui estabilizacao com modo automatico por movimento global entre frames ou por ponto/regiao focal com selecao direta no preview, intensidade de compensacao e crop automatico para esconder bordas
 - oferece filtros iniciais para equilibrio de sombras, realces, varias camadas de contraste local e atenuacao seletiva de cores quentes ou frias em cenas com faixa dinamica dificil
 - permite marcar frame inicial e final na aba de exportacao para exportar apenas um corte do video, com indicadores visuais no slider
 - mostra barra de progresso durante a exportacao
 - permite cancelar uma exportacao em andamento sem fechar o programa
 - exporta um novo arquivo localmente, usando FFmpeg apenas para encode final e mux do audio original
-- inclui modo de aceleracao "GPU automatica", que tenta usar OpenCL no processamento e encoder por hardware no FFmpeg
+- tenta usar aceleracao GPU automaticamente no processamento e na exportacao, com fallback para CPU quando necessario
 
 ## Aceleracao por GPU
 
-Na interface agora existe a opcao `Aceleracao` com dois modos:
-
-- `CPU`: usa o caminho tradicional, mais previsivel
-- `GPU automatica`: tenta usar OpenCL no processamento dos frames e, na exportacao, prioriza `h264_nvenc` (NVIDIA) ou `h264_vaapi` (Linux) quando o FFmpeg oferecer suporte
+O app agora tenta usar aceleracao GPU automaticamente sempre que houver suporte:
 
 Importante:
 
