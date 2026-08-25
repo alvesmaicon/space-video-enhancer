@@ -82,6 +82,11 @@ PREVIEW_MAX_FPS = 12.0
 PREVIEW_MIN_INTERVAL_MS = 40
 THUMBNAIL_REFRESH_DELAY_MS = 140
 PREVIEW_SIZE_LIMIT = {PreviewRenderMode.FAST: 960, PreviewRenderMode.BALANCED: 1280}
+INTERACTIVE_DENOISE_SIZE_LIMIT = 640
+"""While scrubbing or playing with denoise on, NLMeans runs on a frame no larger than this (cost ~ pixels)."""
+IDLE_REFRESH_DELAY_MS = 250
+"""After the last interactive render, the resting frame is re-rendered at full quality."""
+INTERACTIVE_REASONS = ("scrub", "playback")
 PREVIEW_REFRESH_DELAY_MS = {PreviewRenderMode.FAST: 20, PreviewRenderMode.BALANCED: 35, PreviewRenderMode.HIGH: 50}
 PREVIEW_ZOOM_STEPS = (25, 50, 100, 200, 400)
 """Fixed zoom levels; 100% shows one output pixel per logical screen pixel. "Ajustar" (fit) is the default."""
@@ -170,6 +175,9 @@ class MainWindow(QMainWindow):
         self._thumbnail_refresh_timer = QTimer(self)
         self._thumbnail_refresh_timer.setSingleShot(True)
         self._thumbnail_refresh_timer.timeout.connect(self._refresh_filter_thumbnails)
+        self._idle_refresh_timer = QTimer(self)
+        self._idle_refresh_timer.setSingleShot(True)
+        self._idle_refresh_timer.timeout.connect(self._refresh_preview_at_full_quality)
 
         self._create_widgets()
         self._create_actions()
@@ -848,6 +856,12 @@ class MainWindow(QMainWindow):
                 settings.filters, scale_factor=self._preview_output_scale_factor(settings.filters.scale_factor)
             ),
         )
+        size_limit = PREVIEW_SIZE_LIMIT.get(self._preview_render_mode())
+        interactive = (
+            self._pending_preview_reason in INTERACTIVE_REASONS and settings.filters.denoise_mode is not DenoiseMode.OFF
+        )
+        if interactive:
+            size_limit = min(size_limit or INTERACTIVE_DENOISE_SIZE_LIMIT, INTERACTIVE_DENOISE_SIZE_LIMIT)
         self._preview_generation += 1
         self.status.set_render_busy(True)
         self._preview_controller.submit_preview(
@@ -856,13 +870,23 @@ class MainWindow(QMainWindow):
                 frame=None,  # decoded on the render thread
                 frame_index=self.current_frame_index,
                 settings=preview_settings,
-                size_limit=PREVIEW_SIZE_LIMIT.get(self._preview_render_mode()),
+                size_limit=size_limit,
                 stabilization_reference=self.stabilization_reference_frame,
                 stabilization_epoch=self._stabilization_epoch,
                 reason=self._pending_preview_reason,
             )
         )
         self._pending_preview_reason = "settings"
+        if interactive:
+            self._idle_refresh_timer.start(IDLE_REFRESH_DELAY_MS)
+        else:
+            self._idle_refresh_timer.stop()
+
+    def _refresh_preview_at_full_quality(self) -> None:
+        """The frame the user stopped on gets a render without the interactive size limit."""
+        if self.video is None or self.playback_timer.isActive():
+            return
+        self._schedule_preview_refresh(immediate=True, reason="idle")
 
     def _log_settings(self, settings: RenderSettings) -> None:
         """Full snapshot after opening a video; afterwards only the fields that changed."""
@@ -906,6 +930,7 @@ class MainWindow(QMainWindow):
         """Results still in flight for the previous video must not land on the new one."""
         self._applied_preview_generation = self._preview_generation
         self._applied_thumbnail_generation = self._thumbnail_generation
+        self._idle_refresh_timer.stop()
         self.status.set_render_busy(False)
 
     def _refresh_filter_thumbnails(self) -> None:
@@ -1038,7 +1063,11 @@ class MainWindow(QMainWindow):
         trace = self._last_preview.trace if self._last_preview is not None else {}
         estimate = trace.get("denoise.h")
         if trace.get("denoise.mode") == mode.value and isinstance(estimate, (list, tuple)) and len(estimate) == 2:
-            self.noise_tab.set_info(f"{source} Último render: luminância {estimate[0]:.1f} | cor {estimate[1]:.1f}.")
+            sigma = trace.get("denoise.sigma")
+            noise = f"ruído σ {sigma[0]:.1f} → " if isinstance(sigma, (list, tuple)) and len(sigma) == 2 else ""
+            self.noise_tab.set_info(
+                f"{source} Último render: {noise}luminância {estimate[0]:.1f} | cor {estimate[1]:.1f}."
+            )
         else:
             self.noise_tab.set_info(f"{source} Aguardando o render para mostrar a estimativa…")
 

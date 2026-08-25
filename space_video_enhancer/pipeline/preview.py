@@ -45,7 +45,7 @@ class PreviewRequest:
     stabilization_epoch: int
     """Changes whenever the inter-frame stabilization memory must start over."""
     reason: str = "settings"
-    """Why the UI asked: open | scrub | playback | settings | mode. Drives log verbosity."""
+    """Why the UI asked: open | scrub | playback | settings | mode | idle. Drives log verbosity."""
     requested_at: float = field(default_factory=time.perf_counter)
 
 

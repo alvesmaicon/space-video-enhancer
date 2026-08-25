@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
+from space_video_enhancer.pipeline.denoise import estimate_denoise_strengths, estimate_noise_sigma
 from space_video_enhancer.pipeline.filters import (
     OpenCLBackend,
     apply_basic_filters,
@@ -62,7 +63,39 @@ def test_auto_denoise_needs_reference_frame(textured_frame: np.ndarray) -> None:
     with_frame = build_processing_context(
         FilterSettings(denoise_mode=DenoiseMode.AUTO), textured_frame, NormalizedRect(0, 0, 1, 1)
     )
-    assert with_frame.denoise_strength is not None and with_frame.denoise_strength > 1.0
+    assert with_frame.denoise_strength is not None and with_frame.denoise_strength >= 1.0  # clean frame: floor
+
+
+def _with_noise(frame: np.ndarray, sigma: float) -> np.ndarray:
+    rng = np.random.default_rng(int(sigma * 10))
+    noise = rng.normal(0.0, sigma, frame.shape[:2])[..., None] + rng.normal(0.0, sigma * 0.5, frame.shape)
+    return np.clip(frame.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+
+def _smooth_frame() -> np.ndarray:
+    """Gradients plus a few hard edges and no noise (the textured fixture carries synthetic noise on purpose)."""
+    rows = np.linspace(30, 220, 240, dtype=np.float32)[:, None]
+    cols = np.linspace(0, 60, 320, dtype=np.float32)[None, :]
+    frame = np.stack([rows + cols, rows * 0.8 + 20 + 0 * cols, 250 - rows + 0 * cols], axis=2)
+    frame[60:120, 40:140] = (200, 40, 90)
+    frame[150:200, 180:300] = (30, 180, 60)
+    return np.clip(frame, 0, 255).astype(np.uint8)
+
+
+def test_noise_estimate_tracks_the_actual_noise() -> None:
+    clean = _smooth_frame()
+    assert estimate_noise_sigma(cv2.cvtColor(clean, cv2.COLOR_BGR2GRAY)) < 1.0
+    for sigma in (3.0, 6.0, 12.0):
+        noisy_gray = cv2.cvtColor(_with_noise(clean, sigma), cv2.COLOR_BGR2GRAY)
+        assert estimate_noise_sigma(noisy_gray) == pytest.approx(sigma, abs=1.0)
+    everything = NormalizedRect(0, 0, 1, 1)
+    strengths = [
+        estimate_denoise_strengths(_with_noise(clean, sigma), DenoiseMode.AUTO, everything)
+        for sigma in (3.0, 6.0, 12.0)
+    ]
+    assert strengths[0][0] < strengths[1][0] < strengths[2][0]
+    assert strengths[1][0] == pytest.approx(0.8 * 6.0, abs=1.0)
+    assert estimate_noise_sigma(np.zeros((4, 4), dtype=np.uint8)) == 0.0  # too small to say anything
 
 
 def test_denoise_reduces_noise(textured_frame: np.ndarray) -> None:
