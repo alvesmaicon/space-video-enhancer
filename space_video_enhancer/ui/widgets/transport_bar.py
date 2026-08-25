@@ -11,7 +11,7 @@ import re
 from collections.abc import Sequence
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from space_video_enhancer.ui.format import format_timecode
@@ -55,6 +55,8 @@ class TransportBar(QWidget):
     cutSelected = Signal(int)
     cutRemoveRequested = Signal(int)
     cutToggleRequested = Signal()
+    thumbnailsRequested = Signal(object, int, float)
+    """Filmstrip cells missing from the timeline view: ``(frames, height_device_px, device_pixel_ratio)``."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -112,6 +114,7 @@ class TransportBar(QWidget):
         self.timeline.cutRemoveRequested.connect(self.cutRemoveRequested.emit)
         self.timeline.cutToggleRequested.connect(self.cutToggleRequested.emit)
         self.timeline.zoomChanged.connect(self._update_zoom_buttons)
+        self.timeline.thumbnailsRequested.connect(self.thumbnailsRequested.emit)
         self.zoom_out_button.clicked.connect(self.timeline.zoom_out)
         self.zoom_fit_button.clicked.connect(self.timeline.zoom_to_fit)
         self.zoom_in_button.clicked.connect(self.timeline.zoom_in)
@@ -159,10 +162,10 @@ class TransportBar(QWidget):
     def maximum(self) -> int:
         return self.timeline.maximum()
 
-    def set_frame_count(self, frame_count: int, fps: float) -> None:
+    def set_frame_count(self, frame_count: int, fps: float, aspect_ratio: float = 16 / 9) -> None:
         self._frame_count = max(0, frame_count)
         self._fps = fps if fps > 0 else 30.0
-        self.timeline.set_media(self._frame_count, self._fps)
+        self.timeline.set_media(self._frame_count, self._fps, aspect_ratio)
         self._fit_labels()
         self.set_position(self.timeline.value())
 
@@ -226,3 +229,6 @@ class TransportBar(QWidget):
 
     def select_cut(self, index: int) -> None:
         self.timeline.select_cut(index)
+
+    def set_thumbnail(self, frame: int, image: QImage) -> None:
+        self.timeline.set_thumbnail(frame, image)

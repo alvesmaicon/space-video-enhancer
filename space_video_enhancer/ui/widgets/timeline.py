@@ -8,14 +8,17 @@ its edges, the clip markers and the playhead are grabbed in pixel distance from 
 
 from __future__ import annotations
 
+import bisect
 import math
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QContextMenuEvent,
+    QImage,
     QMouseEvent,
     QNativeGestureEvent,
     QPainter,
@@ -47,6 +50,10 @@ MARKER_GRAB_PX = 7
 FOLLOW_LEAD_FRACTION = 0.1
 """When the playhead leaves the view it is brought back this far from the left edge."""
 TICK_FRAMES = (1, 2, 5, 10)
+THUMBNAIL_REQUEST_DELAY_MS = 60
+"""Zoom/scroll settle for this long before the missing filmstrip thumbnails are requested."""
+THUMBNAIL_CACHE_SIZE = 600
+DEFAULT_ASPECT_RATIO = 16 / 9
 TICK_SECONDS = (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600)
 
 BACKGROUND_COLOR = QColor("#fcfaf7")
@@ -227,11 +234,21 @@ class TimelineWidget(QWidget):
     cutToggleRequested = Signal()
     """Context menu: start or finish a cut at the playhead (moved there first)."""
     zoomChanged = Signal()
+    thumbnailsRequested = Signal(object, int, float)
+    """``(frames, height_device_px, device_pixel_ratio)``: filmstrip thumbnails missing from the view."""
 
     def __init__(self) -> None:
         super().__init__()
         self.scale = TimelineScale()
         self._fps = 30.0
+        self._aspect_ratio = DEFAULT_ASPECT_RATIO
+        self._thumbnails: OrderedDict[int, QImage] = OrderedDict()
+        self._thumbnail_frames: list[int] = []
+        """Sorted keys of ``_thumbnails`` for the nearest-neighbour fallback while new ones decode."""
+        self._thumbnail_key: tuple[int, float] | None = None
+        self._thumbnail_timer = QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.timeout.connect(self.request_missing_thumbnails)
         self._value = 0
         self._clip = (0, 0)
         self._show_clip = False
@@ -290,10 +307,12 @@ class TimelineWidget(QWidget):
         self._view_changed()
 
     # --- model in ------------------------------------------------------------------------
-    def set_media(self, frame_count: int, fps: float) -> None:
-        """A new video: fit the whole clip in the view and forget the selection."""
+    def set_media(self, frame_count: int, fps: float, aspect_ratio: float = DEFAULT_ASPECT_RATIO) -> None:
+        """A new video: fit the whole clip in the view, forget the selection and the filmstrip."""
         self.scale.frame_count = max(0, frame_count)
         self._fps = fps if fps > 0 else 30.0
+        self._aspect_ratio = aspect_ratio if aspect_ratio > 0 else DEFAULT_ASPECT_RATIO
+        self.clear_thumbnails()
         self.scale.fit()
         self._value = 0
         self._selected_cut = -1
@@ -401,6 +420,7 @@ class TimelineWidget(QWidget):
         self._sync_scrollbar()
         self.update()
         self.zoomChanged.emit()
+        self._thumbnail_timer.start(THUMBNAIL_REQUEST_DELAY_MS)
 
     def _sync_scrollbar(self) -> None:
         self._syncing_scrollbar = True
@@ -420,6 +440,7 @@ class TimelineWidget(QWidget):
         self.scale.scroll_to(float(value))
         self.update()
         self.zoomChanged.emit()
+        self._thumbnail_timer.start(THUMBNAIL_REQUEST_DELAY_MS)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         if self.frame_count <= 0:
@@ -453,6 +474,71 @@ class TimelineWidget(QWidget):
             self.zoom_by(1.0 + event.value(), event.position().x())  # trackpad pinch
             return True
         return super().event(event)
+
+    # --- filmstrip ------------------------------------------------------------------------
+    def thumbnail_size(self) -> tuple[int, int]:
+        """Logical (width, height) of one filmstrip cell: the track height at the video's aspect ratio."""
+        height = VIDEO_TRACK_HEIGHT
+        return max(1, round(height * self._aspect_ratio)), height
+
+    def thumbnail_slots(self) -> tuple[tuple[int, float], ...]:
+        """``(frame, x)`` of every filmstrip cell in view; cells are anchored to frame 0, so scrolling reuses them."""
+        if self.frame_count <= 0 or self.width() <= 0:
+            return ()
+        width, _height = self.thumbnail_size()
+        ppf = self.scale.pixels_per_frame
+        content_left = self.scale.scroll * ppf
+        first = math.floor(content_left / width)
+        last = math.floor((content_left + self.width()) / width)
+        slots = []
+        for slot in range(first, last + 1):
+            frame = int(_clamp(math.floor(slot * width / ppf), 0, self.frame_count - 1))
+            slots.append((frame, slot * width - content_left))
+        return tuple(slots)
+
+    def request_missing_thumbnails(self) -> None:
+        """Ask for the visible cells that have no exact thumbnail yet (emits nothing when complete)."""
+        self._thumbnail_timer.stop()
+        if self.frame_count <= 0:
+            return
+        ratio = self.devicePixelRatioF()
+        _width, height = self.thumbnail_size()
+        key = (round(height * ratio), ratio)
+        if self._thumbnail_key != key:
+            self.clear_thumbnails()
+            self._thumbnail_key = key
+        missing = tuple(dict.fromkeys(frame for frame, _x in self.thumbnail_slots() if frame not in self._thumbnails))
+        if missing:
+            self.thumbnailsRequested.emit(missing, key[0], ratio)
+
+    def set_thumbnail(self, frame: int, image: QImage) -> None:
+        if frame in self._thumbnails:
+            self._thumbnails.move_to_end(frame)
+        else:
+            bisect.insort(self._thumbnail_frames, frame)
+            while len(self._thumbnails) >= THUMBNAIL_CACHE_SIZE:
+                evicted, _image = self._thumbnails.popitem(last=False)
+                del self._thumbnail_frames[bisect.bisect_left(self._thumbnail_frames, evicted)]
+        self._thumbnails[frame] = image
+        self.update()
+
+    def clear_thumbnails(self) -> None:
+        self._thumbnails.clear()
+        self._thumbnail_frames.clear()
+        self.update()
+
+    def thumbnail_count(self) -> int:
+        return len(self._thumbnails)
+
+    def nearest_thumbnail(self, frame: int, tolerance: float) -> QImage | None:
+        """The exact thumbnail, else the closest cached one within ``tolerance`` frames."""
+        exact = self._thumbnails.get(frame)
+        if exact is not None or not self._thumbnail_frames:
+            return exact
+        position = bisect.bisect_left(self._thumbnail_frames, frame)
+        candidates = self._thumbnail_frames[max(0, position - 1) : position + 1]
+        best = min(candidates, key=lambda cached: abs(cached - frame))
+        return self._thumbnails[best] if abs(best - frame) <= tolerance else None
 
     # --- hit testing and mouse -----------------------------------------------------------
     def hit_test(self, pos: QPointF) -> Hit:
@@ -610,6 +696,7 @@ class TimelineWidget(QWidget):
             )
             return
         self._paint_ruler(painter)
+        self._paint_filmstrip(painter)
         self._paint_tracks(painter)
         self._paint_cuts(painter)
         self._paint_clip_markers(painter)
@@ -640,13 +727,27 @@ class TimelineWidget(QWidget):
                 )
             frame += minor
 
+    def _paint_filmstrip(self, painter: QPainter) -> None:
+        if not self._thumbnails:
+            return
+        track = self.video_track_rect()
+        width, height = self.thumbnail_size()
+        tolerance = width / self.scale.pixels_per_frame  # one cell of frames
+        painter.setClipRect(track)
+        for frame, x in self.thumbnail_slots():
+            image = self.nearest_thumbnail(frame, tolerance)
+            if image is not None:
+                painter.drawImage(QRectF(x, track.top(), width, height), image)
+        painter.setClipping(False)
+
     def _paint_tracks(self, painter: QPainter) -> None:
         track = self.video_track_rect()
         if not self._show_clip:
             return
         start_x = self.scale.x_of(self._clip[0])
         end_x = self.scale.x_of(self._clip[1] + 1)
-        painter.fillRect(self._span_rect(track, start_x, end_x), RANGE_COLOR)
+        if not self._thumbnails:  # with a filmstrip the kept range is the untinted part
+            painter.fillRect(self._span_rect(track, start_x, end_x), RANGE_COLOR)
         painter.fillRect(self._span_rect(track, self.scale.x_of(0), start_x), TRACK_OUTSIDE_CLIP_COLOR)
         painter.fillRect(self._span_rect(track, end_x, self.scale.x_of(self.frame_count)), TRACK_OUTSIDE_CLIP_COLOR)
 

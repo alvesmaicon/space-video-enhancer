@@ -18,7 +18,7 @@ from typing import Any
 import cv2
 import numpy as np
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeyEvent, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QImage, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -75,6 +75,7 @@ from space_video_enhancer.ui.tabs.grade import ColorGradeTab
 from space_video_enhancer.ui.tabs.noise import NoiseTab
 from space_video_enhancer.ui.tabs.stabilization import StabilizationTab
 from space_video_enhancer.ui.theme import load_stylesheet
+from space_video_enhancer.ui.timeline_media import FilmstripController
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
 from space_video_enhancer.ui.widgets.status_panel import StatusPanel
 from space_video_enhancer.ui.widgets.transport_bar import TransportBar
@@ -148,6 +149,8 @@ class MainWindow(QMainWindow):
         self._preview_controller = PreviewController(self._backend, self)
         self._preview_controller.previewReady.connect(self._on_preview_ready)
         self._preview_controller.thumbnailsReady.connect(self._on_thumbnails_ready)
+        self._filmstrip = FilmstripController(self)  # its own decoder thread: timeline seeks never stall the preview
+        self._filmstrip.thumbnailReady.connect(self._on_filmstrip_thumbnail)
         self._preview_controller.renderFailed.connect(self._on_render_failed)
         self._preview_generation = 0
         self._applied_preview_generation = -1
@@ -460,6 +463,7 @@ class MainWindow(QMainWindow):
         self.transport.cutRemoveRequested.connect(self._remove_cut)
         self.transport.cutToggleRequested.connect(self._toggle_cut_mark)
         self.export_tab.cutSelectionChanged.connect(self.transport.select_cut)
+        self.transport.thumbnailsRequested.connect(self._request_filmstrip)
 
         self.color_tab.presetChanged.connect(self._handle_preset_changed)
         self.color_tab.valueChanged.connect(self._handle_filter_control_change)
@@ -607,7 +611,8 @@ class MainWindow(QMainWindow):
         self._stabilization_epoch += 1
         self.status.set_video_info(f"{path.name} · {width}x{height} · {self.fps:.2f} fps · {self.frame_count} frames")
         self.setWindowTitle(f"{path.name} — Space Video Enhancer")
-        self.transport.set_frame_count(self.frame_count, self.fps)
+        self.transport.set_frame_count(self.frame_count, self.fps, width / height if height else 16 / 9)
+        self._filmstrip.set_video(path)
         self.preview.set_display_reference_size(*self._displayed_size())
         self._set_controls_enabled(True)
         self._update_timeline_markers()
@@ -830,6 +835,13 @@ class MainWindow(QMainWindow):
             index = self.export_tab.selected_cut()
         if index >= 0:
             self._remove_cut(index)
+
+    def _request_filmstrip(self, frames: Sequence[int], height: int, device_pixel_ratio: float) -> None:
+        if self.frame_count > 0:
+            self._filmstrip.request(tuple(frames), height, device_pixel_ratio)
+
+    def _on_filmstrip_thumbnail(self, _generation: int, frame: int, image: QImage) -> None:
+        self.transport.set_thumbnail(frame, image)
 
     def _set_cuts_from_timeline(self, cuts: Sequence[tuple[int, int]], finished: bool) -> None:
         """A cut edge or body dragged on the timeline; logged once, when the drag ends."""
@@ -1690,6 +1702,7 @@ class MainWindow(QMainWindow):
         if self._export_controller is not None:
             self._export_controller.stop()
             self._export_controller = None
+        self._filmstrip.stop()
         self._preview_controller.stop()  # also releases the video it owns
         self.video = None
         super().closeEvent(event)
