@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+from collections.abc import Sequence
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics
@@ -176,3 +177,9 @@ class TransportBar(QWidget):
 
     def set_markers(self, start: int, end: int, show: bool) -> None:
         self.frame_slider.set_markers(start, end, show)
+
+    def set_cuts(self, cuts: Sequence[tuple[int, int]]) -> None:
+        self.frame_slider.set_cuts(cuts)
+
+    def set_pending_cut(self, frame: int | None) -> None:
+        self.frame_slider.set_pending_cut(frame)

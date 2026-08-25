@@ -84,8 +84,9 @@ Regras da arquitetura:
 - O MP4 sai em `yuv420p` com `+faststart` e dimensoes pares, para tocar em QuickTime, iOS e decoders de hardware.
 - Layout: toolbar (Abrir, Exportar, zoom, qualidade, metricas) + `QSplitter` com o preview a esquerda e as abas a direita + barra de status persistente (mensagens, indicador de render, progresso/cancelamento da exportacao, info do video). A largura minima do painel de abas e calculada a partir do conteudo real (`MainWindow._fit_settings_panel`), entao nada e cortado nem escondido atras de setas; `tests/test_ui_layout.py` verifica isso offscreen.
 - Zoom do preview: "Ajustar" (padrao) preenche a area disponivel; os percentuais sao pixels do frame de saida por pixel logico da tela (100% = 1:1). Ctrl+0 ajusta, Ctrl++/Ctrl+- mudam de nivel.
-- Teclado: Espaco, Home/End, setas e I/O controlam a reproducao e o corte, mas so quando o widget focado nao usa a tecla (um slider focado mantem as setas, um botao focado mantem o Espaco). Clicar no preview da o foco a ele; abrir um video tambem.
+- Teclado: Espaco, Home/End, setas, I/O e X controlam a reproducao e os cortes, mas so quando o widget focado nao usa a tecla (um slider focado mantem as setas, um botao focado mantem o Espaco). Clicar no preview da o foco a ele; abrir um video tambem.
 - Overlays: o crop aparece sempre que estiver ativo, mas so e editavel na aba Geometria; a amostra de ruido e o ponto focal aparecem apenas nas abas Ruido e Estabilizar, editaveis direto no preview (nao existe modo "editar").
+- Cortes internos (`timeline.py`): alem do inicio/fim (I/O), a aba Exportar guarda uma lista de trechos removidos — X marca inicio e fim no frame atual, ou digite os tempos (`mm:ss`, `h:mm:ss`, `mm:ss.ff`). Os trechos aparecem em vermelho no slider, o playback pula por cima deles e o export le so os trechos mantidos (com seek entre eles) concatenando o audio correspondente (`atrim`/`concat`); fontes sem audio saem mudas em vez de falhar.
 - Cores (aba HSL, `pipeline/grade.py`): balanco de branco por ganhos B/G/R (calculados de uma regiao que deveria ser cinza — retangulo roxo no preview — ou do frame inteiro, gray world) mais tint verde/magenta, aplicados antes da curva tonal; e ajustes de matiz/saturacao/luminancia por oito faixas de matiz interpoladas linearmente no circulo de cores (hue vs hue / sat / lum). Tudo vira tabelas (`cv2.LUT`) resolvidas uma vez por `ProcessingContext`; os ganhos ficam gravados nas settings, entao a exportacao usa exatamente o que o preview mostra.
 
 ## Desenvolvimento
@@ -137,6 +138,7 @@ print(pd.json_normalize(renders.stages).describe())
 - zoom do preview por botoes e percentual, com modos de qualidade (alta, balanceado, rapido) e pulo de frames na reproducao
 - comparacao antes/depois com divisor arrastavel
 - abas tematicas: cor e detalhe, HSL (balanco de branco e ajuste por cor), filtros (presets com miniaturas do frame atual), estabilizacao, geometria, ruido e midia
+- corte temporal com inicio/fim e uma lista de trechos removidos de dentro do video (video e audio)
 - presets de melhoria e reset por slider para o valor do preset ativo
 - denoise desativado, manual, auto ou por amostra escolhida no preview; nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
 - estabilizacao por translacao, similaridade, perspectiva, camera lock por regiao focal ou hibrida, com intensidade, suavizacao temporal, crop automatico e zoom out

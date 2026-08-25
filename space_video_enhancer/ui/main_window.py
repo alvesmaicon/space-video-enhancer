@@ -63,7 +63,8 @@ from space_video_enhancer.settings import (
 from space_video_enhancer.telemetry.diff import diff as diff_settings
 from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
 from space_video_enhancer.telemetry.stats import RollingStats
-from space_video_enhancer.ui.format import format_duration, format_timecode
+from space_video_enhancer.timeline import FrameRange, frame_count, kept_segments, next_kept_frame, normalize_cuts
+from space_video_enhancer.ui.format import format_duration, format_timecode, parse_timecode
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo, select_combo_data
 from space_video_enhancer.ui.tabs.color import ColorTab
@@ -126,6 +127,9 @@ class MainWindow(QMainWindow):
         self.clip_start_frame = 0
         self.clip_end_frame = 0
         self.playback_end_frame = 0
+        self.cuts: list[tuple[int, int]] = []
+        """Frame ranges removed from inside the clip (inclusive, absolute); see timeline.py."""
+        self._pending_cut_start: int | None = None
         self.current_frame: np.ndarray | None = None
 
         # --- editing state -----------------------------------------------------------------
@@ -273,6 +277,7 @@ class MainWindow(QMainWindow):
         self.last_frame_action = self._make_action("Último frame", self._go_to_last_frame, "End")
         self.mark_start_action = self._make_action("Marcar início do corte", self._mark_clip_start, "I")
         self.mark_end_action = self._make_action("Marcar fim do corte", self._mark_clip_end, "O")
+        self.cut_toggle_action = self._make_action("Iniciar/terminar corte aqui", self._toggle_cut_mark, "X")
         # Bare keys must not steal arrows from sliders or Space from buttons: as QAction shortcuts they
         # only fire while the preview has focus; everywhere else keyPressEvent handles what widgets left.
         for action in self._transport_actions():
@@ -411,6 +416,7 @@ class MainWindow(QMainWindow):
         playback_menu.addSeparator()
         playback_menu.addAction(self.mark_start_action)
         playback_menu.addAction(self.mark_end_action)
+        playback_menu.addAction(self.cut_toggle_action)
 
         view_menu = menu_bar.addMenu("Exibir")
         view_menu.addAction(self.zoom_fit_action)
@@ -468,6 +474,11 @@ class MainWindow(QMainWindow):
         self.export_tab.markStartRequested.connect(self._mark_clip_start)
         self.export_tab.markEndRequested.connect(self._mark_clip_end)
         self.export_tab.resetRangeRequested.connect(self._reset_clip_range)
+        self.export_tab.cutToggleRequested.connect(self._toggle_cut_mark)
+        self.export_tab.cutAddRequested.connect(self._add_cut_from_text)
+        self.export_tab.cutRemoveRequested.connect(self._remove_cut)
+        self.export_tab.cutsClearRequested.connect(self._clear_cuts)
+        self.export_tab.cutActivated.connect(self._go_to_cut)
 
     def _filter_sliders(self) -> dict[str, Any]:
         return {**self.color_tab.sliders, **self.noise_tab.sliders}
@@ -574,6 +585,8 @@ class MainWindow(QMainWindow):
         self.current_frame_index = 0
         self.clip_start_frame = 0
         self.clip_end_frame = self.frame_count - 1
+        self.cuts = []
+        self._pending_cut_start = None
         self.crop_rect_norm = self._default_crop_rect(self._normalized_crop_aspect_ratio())
         self.denoise_sample_rect_norm = norm_to_qrect(DEFAULT_DENOISE_SAMPLE_RECT)
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
@@ -650,6 +663,13 @@ class MainWindow(QMainWindow):
             self.transport.set_value(current_frame)
 
         self.playback_end_frame = end_frame if not full_video_selected else self.transport.maximum()
+        kept = next_kept_frame(current_frame, self.cuts, self.playback_end_frame)
+        if kept is None:
+            self.status.show_message("Os cortes removem tudo daqui até o fim do trecho selecionado.")
+            return
+        if kept != current_frame:
+            current_frame = kept
+            self.transport.set_value(current_frame)
         if current_frame >= self.playback_end_frame:
             self._stop_playback()
             return
@@ -705,7 +725,12 @@ class MainWindow(QMainWindow):
             self._stop_playback()
             return
         frame_step = 1 + int(self.preview_frame_skip_combo.currentData() or 0)
-        self.transport.set_value(min(self.playback_end_frame, self.transport.value() + frame_step))
+        next_frame = min(self.playback_end_frame, self.transport.value() + frame_step)
+        kept = next_kept_frame(next_frame, self.cuts, self.playback_end_frame)  # jump over removed ranges
+        if kept is None:
+            self._stop_playback()
+            return
+        self.transport.set_value(kept)
 
     def _playback_interval_ms(self) -> int:
         preview_fps = min(max(self.fps, 1.0), PREVIEW_MAX_FPS)
@@ -735,8 +760,80 @@ class MainWindow(QMainWindow):
             return
         self.clip_start_frame = 0
         self.clip_end_frame = self.frame_count - 1
+        self.cuts = []
+        self._pending_cut_start = None
         self._update_frame_slider_markers()
         self._update_range_label()
+
+    # --- cuts inside the clip -----------------------------------------------------------------
+    def _toggle_cut_mark(self) -> None:
+        """First press marks where a removed range starts, second press where it ends."""
+        if self.frame_count <= 0:
+            return
+        if self._pending_cut_start is None:
+            self._pending_cut_start = self.current_frame_index
+            self.status.show_message(
+                f"Início do corte em {format_timecode(self.current_frame_index, self.fps)} — "
+                "vá até o fim do trecho e pressione X de novo."
+            )
+        else:
+            start, self._pending_cut_start = self._pending_cut_start, None
+            self._add_cut(start, self.current_frame_index)
+        self._update_frame_slider_markers()
+        self._update_range_label()
+
+    def _add_cut(self, start: int, end: int) -> None:
+        bounds = FrameRange(0, self.frame_count - 1)
+        self.cuts = [(cut.start, cut.end) for cut in normalize_cuts([*self.cuts, (start, end)], bounds)]
+        log_event(LOG, "ui.cuts", action="add", start=min(start, end), end=max(start, end), cuts=self.cuts)
+        self._update_frame_slider_markers()
+        self._update_range_label()
+        self.status.show_message(
+            f"Trecho {format_timecode(min(start, end), self.fps)} → {format_timecode(max(start, end) + 1, self.fps)} "
+            "removido da exportação."
+        )
+
+    def _add_cut_from_text(self, start_text: str, end_text: str) -> None:
+        if self.frame_count <= 0:
+            return
+        start = parse_timecode(start_text, self.fps)
+        end = parse_timecode(end_text, self.fps)
+        if start is None or end is None:
+            self.status.show_message("Tempos inválidos: use mm:ss, h:mm:ss ou mm:ss.ff (ff = frames).")
+            return
+        if start == end:
+            self.status.show_message("O fim do corte precisa ser diferente do início.")
+            return
+        self._add_cut(start, max(start, end) - 1 if end > start else end)  # "até 2:15" excludes 2:15 itself
+        self.export_tab.clear_typed_cut()
+
+    def _remove_cut(self, index: int) -> None:
+        if 0 <= index < len(self.cuts):
+            removed = self.cuts.pop(index)
+            log_event(LOG, "ui.cuts", action="remove", start=removed[0], end=removed[1], cuts=self.cuts)
+            self._update_frame_slider_markers()
+            self._update_range_label()
+
+    def _clear_cuts(self) -> None:
+        if not self.cuts and self._pending_cut_start is None:
+            return
+        self.cuts = []
+        self._pending_cut_start = None
+        log_event(LOG, "ui.cuts", action="clear", cuts=[])
+        self._update_frame_slider_markers()
+        self._update_range_label()
+
+    def _go_to_cut(self, index: int) -> None:
+        if 0 <= index < len(self.cuts):
+            self._stop_playback()
+            self.transport.set_value(self.cuts[index][0])
+
+    def _cut_items(self) -> list[str]:
+        return [
+            f"{number}. {format_timecode(start, self.fps)} → {format_timecode(end + 1, self.fps)} "
+            f"({end - start + 1} frames)"
+            for number, (start, end) in enumerate(self.cuts, start=1)
+        ]
 
     def _selected_frame_range(self) -> tuple[int, int]:
         if self.frame_count <= 0:
@@ -748,18 +845,30 @@ class MainWindow(QMainWindow):
         return (start_frame, end_frame)
 
     def _update_range_label(self) -> None:
+        self.export_tab.set_cuts(self._cut_items())
+        self.export_tab.set_pending_cut(self._pending_cut_start is not None)
         if self.frame_count <= 0:
             self.export_tab.set_range_text("Corte: vídeo inteiro")
             return
         start_frame, end_frame = self._selected_frame_range()
-        frame_count = end_frame - start_frame + 1
-        duration_seconds = frame_count / self.fps if self.fps > 0 else 0.0
-        self.export_tab.set_range_text(
+        clip = FrameRange(start_frame, end_frame)
+        segments = kept_segments(clip, self.cuts)
+        exported = frame_count(segments)
+        text = (
             f"Corte: {format_timecode(start_frame, self.fps)} → {format_timecode(end_frame + 1, self.fps)} "
-            f"(frames {start_frame + 1}–{end_frame + 1}, {duration_seconds:.2f} s)"
+            f"(frames {start_frame + 1}–{end_frame + 1}, {clip.count / self.fps:.2f} s)"
         )
+        if self.cuts:
+            removed = clip.count - exported
+            text += (
+                f" · {len(self.cuts)} trecho(s) removido(s), {format_duration(removed / self.fps)} · "
+                f"exporta {exported} frames ({format_duration(exported / self.fps)})"
+            )
+        self.export_tab.set_range_text(text)
 
     def _update_frame_slider_markers(self) -> None:
+        self.transport.set_cuts(self.cuts)
+        self.transport.set_pending_cut(self._pending_cut_start)
         if self.frame_count <= 0:
             self.transport.set_markers(0, 0, False)
             return
@@ -1416,6 +1525,7 @@ class MainWindow(QMainWindow):
             ffmpeg_path=ffmpeg_path,
             encoder=encoder,
             stabilization_reference=self.stabilization_reference_frame,
+            cuts=tuple(self.cuts),
         )
         self._export_backend_label = f"{self._backend.label} + {encoder.label}"
         self._export_output_path = Path(output_path)
@@ -1505,6 +1615,7 @@ class MainWindow(QMainWindow):
             self.last_frame_action,
             self.mark_start_action,
             self.mark_end_action,
+            self.cut_toggle_action,
         )
 
     def _bare_key_handlers(self) -> dict[int, Callable[[], None]]:
@@ -1516,6 +1627,7 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_End: self._go_to_last_frame,
             Qt.Key.Key_I: self._mark_clip_start,
             Qt.Key.Key_O: self._mark_clip_end,
+            Qt.Key.Key_X: self._toggle_cut_mark,
         }
 
     def keyPressEvent(self, event: QKeyEvent) -> None:

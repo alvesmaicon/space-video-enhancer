@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+
+TIMECODE_PATTERN = re.compile(r"^\s*(?:(\d+):)?(?:(\d+):)?(\d+)(?:\.(\d{1,2}))?\s*$")
+
 
 def format_timecode(frame_index: int, fps: float, *, force_hours: bool = False) -> str:
     """``mm:ss.ff`` (frames, not milliseconds) for ``frame_index`` at ``fps``.
@@ -34,3 +38,19 @@ def format_signed(value: int, center: int = 50) -> str:
 
 def format_percent(value: int) -> str:
     return f"{value}%"
+
+
+def parse_timecode(text: str, fps: float) -> int | None:
+    """Frame index for ``[h:][m:]s[.ff]`` (``ff`` = frames, as displayed) or plain seconds; ``None`` if invalid."""
+    match = TIMECODE_PATTERN.match(text)
+    if match is None or fps <= 0:
+        return None
+    first, second, seconds_text, frames_text = match.groups()
+    hours = minutes = 0
+    if first is not None and second is not None:
+        hours, minutes = int(first), int(second)
+    elif first is not None:
+        minutes = int(first)
+    total_seconds = hours * 3600 + minutes * 60 + int(seconds_text)
+    frames = int(frames_text) if frames_text else 0
+    return round(total_seconds * fps) + frames
