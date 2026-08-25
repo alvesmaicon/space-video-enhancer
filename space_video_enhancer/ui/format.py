@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 
-def format_timecode(frame_index: int, fps: float) -> str:
-    """``mm:ss.ff`` (frames, not milliseconds) for ``frame_index`` at ``fps``; hours appear only when needed."""
+def format_timecode(frame_index: int, fps: float, *, force_hours: bool = False) -> str:
+    """``mm:ss.ff`` (frames, not milliseconds) for ``frame_index`` at ``fps``.
+
+    Hours appear when needed, or always with ``force_hours`` so a position and the clip
+    duration it is shown next to keep the same width.
+    """
     if fps <= 0:
-        return "00:00.00"
+        return "0:00:00.00" if force_hours else "00:00.00"
     frames_per_second = max(1, round(fps))
     total_seconds, frame = divmod(max(0, int(frame_index)), frames_per_second)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    if hours:
+    if hours or force_hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}.{frame:02d}"
     return f"{minutes:02d}:{seconds:02d}.{frame:02d}"
 

@@ -156,6 +156,25 @@ def test_overlays_are_editable_only_on_their_tab(app: QApplication, window: Main
 # --- transport ---------------------------------------------------------------------------------
 
 
+def test_transport_labels_never_move_the_slider(app: QApplication, window: MainWindow) -> None:
+    """Regression: changing digit counts/widths used to push the slider left and right."""
+    bar = window.transport
+    bar.set_frame_count(1500, 30.0)
+    pump(app, 0.05)
+    geometries = set()
+    for index in (0, 1, 9, 10, 99, 100, 111, 999, 1000, 1111, 1499):
+        bar.set_value_silently(index)
+        bar.set_position(index)
+        pump(app, 0.01)
+        geometries.add((bar.frame_slider.x(), bar.frame_slider.width()))
+        assert bar.frame_label.text() == f"frame {index + 1} / 1500"
+    assert len(geometries) == 1, f"slider moved: {sorted(geometries)}"
+
+    bar.set_frame_count(30 * 3600 + 30, 30.0)  # over an hour: position and duration keep the same shape
+    bar.set_position(5)
+    assert bar.timecode_label.text() == "0:00:00.05 / 1:00:01.00"
+
+
 def test_transport_shows_timecode_and_jumps_to_clicks(app: QApplication, window: MainWindow, ui_video: Path) -> None:
     open_video(app, window, ui_video)
     assert window.transport.timecode_label.text() == "00:00.06 / 00:00.12"

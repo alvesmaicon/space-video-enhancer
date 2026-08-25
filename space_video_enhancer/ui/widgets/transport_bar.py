@@ -1,9 +1,16 @@
-"""Timecode, frame slider with clip markers and the transport buttons, below the preview."""
+"""Timecode, frame slider with clip markers and the transport buttons, below the preview.
+
+The two labels flanking the slider have fixed widths sized for the widest text they can
+show for the open video, so changing digits never pushes the slider sideways.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor
+import contextlib
+import re
+
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from space_video_enhancer.ui.format import format_timecode
@@ -16,6 +23,21 @@ BUTTON_SIZE = QSize(42, 38)
 PLAY_BUTTON_SIZE = QSize(54, 40)
 ICON_SIZE = QSize(18, 18)
 PLAY_ICON_SIZE = QSize(22, 22)
+LABEL_SLACK_PX = 4
+SECONDS_PER_HOUR = 3600
+
+
+def widest_digits_width(metrics: QFontMetrics, template: str) -> int:
+    """Width of ``template`` with every digit replaced by the widest digit of the font."""
+    return max(metrics.horizontalAdvance(re.sub(r"\d", digit, template)) for digit in "0123456789")
+
+
+def with_tabular_digits(font: QFont) -> QFont:
+    """Ask for equal-width digits (OpenType ``tnum``) when the font supports it."""
+    tabular = QFont(font)
+    with contextlib.suppress(AttributeError, TypeError):
+        tabular.setFeature(QFont.Tag("tnum"), 1)
+    return tabular
 
 
 class TransportBar(QWidget):
@@ -32,8 +54,10 @@ class TransportBar(QWidget):
         self._frame_count = 0
         self.timecode_label = QLabel()
         self.timecode_label.setObjectName("timecodeLabel")
+        self.timecode_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.frame_label = QLabel()
         self.frame_label.setObjectName("frameLabel")
+        self.frame_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.frame_slider = FrameRangeSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setRange(0, 0)
 
@@ -91,6 +115,7 @@ class TransportBar(QWidget):
         layout.setSpacing(10)
         layout.addLayout(frame_row)
         layout.addLayout(button_row)
+        self._fit_labels()
         self.set_position(0)
 
     def value(self) -> int:
@@ -103,6 +128,7 @@ class TransportBar(QWidget):
         self._frame_count = max(0, frame_count)
         self._fps = fps if fps > 0 else 30.0
         self.frame_slider.setRange(0, max(0, frame_count - 1))
+        self._fit_labels()
         self.set_position(self.frame_slider.value())
 
     def set_value(self, index: int) -> None:
@@ -115,10 +141,34 @@ class TransportBar(QWidget):
 
     def set_position(self, frame_index: int) -> None:
         """Timecode of ``frame_index`` next to the clip duration, plus the frame counter."""
-        duration = format_timecode(self._frame_count, self._fps)
-        self.timecode_label.setText(f"{format_timecode(frame_index, self._fps)} / {duration}")
+        hours = self._shows_hours()
+        position = format_timecode(frame_index, self._fps, force_hours=hours)
+        duration = format_timecode(self._frame_count, self._fps, force_hours=hours)
+        self.timecode_label.setText(f"{position} / {duration}")
         shown = frame_index + 1 if self._frame_count else 0
         self.frame_label.setText(f"frame {shown} / {self._frame_count}")
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._fit_labels()
+
+    def _shows_hours(self) -> bool:
+        return self._frame_count / self._fps >= SECONDS_PER_HOUR
+
+    def _fit_labels(self) -> None:
+        """Fixed label widths for the widest text this video can produce, so the slider never moves."""
+        for label in (self.timecode_label, self.frame_label):
+            label.setFont(with_tabular_digits(label.font()))
+        hours = self._shows_hours()
+        duration = format_timecode(self._frame_count, self._fps, force_hours=hours)
+        timecode_template = f"{duration} / {duration}"
+        frame_template = f"frame {self._frame_count} / {self._frame_count}"
+        metrics = self.timecode_label.fontMetrics()
+        self.timecode_label.setFixedWidth(widest_digits_width(metrics, timecode_template) + LABEL_SLACK_PX)
+        self.frame_label.setFixedWidth(
+            widest_digits_width(self.frame_label.fontMetrics(), frame_template) + LABEL_SLACK_PX
+        )
 
     def set_playing(self, playing: bool) -> None:
         self.play_button.setIcon(self._pause_icon if playing else self._play_icon)
