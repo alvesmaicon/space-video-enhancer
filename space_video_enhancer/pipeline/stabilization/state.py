@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from space_video_enhancer.pipeline.stabilization import transforms
+
 
 @dataclass
 class StabilizationState:
@@ -22,6 +24,9 @@ class StabilizationState:
     correction: np.ndarray | None = None
     """Full-strength correction (before the intensity blend) of the last processed frame."""
     correction_frame_index: int | None = None
+    correction_width: int | None = None
+    """Width of the frame ``correction`` is expressed in. The preview renders the same sequence at
+    different sizes (interactive 640 px, full-size idle render), so corrections are rescaled on reuse."""
     lock_lost_frames: int = 0
     """Hybrid: recent frames without a camera-lock match (capped); eases the re-acquisition."""
 
@@ -46,18 +51,34 @@ class StabilizationState:
         self.last_transform = transform
         self.last_transform_index = frame_index
 
-    def remember_correction(self, correction: np.ndarray | None, frame_index: int | None) -> None:
+    def remember_correction(self, correction: np.ndarray | None, frame_index: int | None, width: int) -> None:
         self.correction = correction
         self.correction_frame_index = frame_index
+        self.correction_width = width
 
-    def cached_correction(self, frame_index: int | None) -> np.ndarray | None:
+    def adopt_frame_width(self, width: int) -> None:
+        """Estimator caches hold pixel values of the previous size; drop them when the size changes."""
+        if self.correction_width is not None and self.correction_width != width:
+            self.last_shift_index = None
+            self.last_transform_index = None
+
+    def cached_correction(self, frame_index: int | None, width: int) -> np.ndarray | None:
         """The correction already computed for ``frame_index`` (a re-render of the same frame)."""
         if frame_index is None or self.correction_frame_index != frame_index:
             return None
-        return self.correction
+        return self._correction_in_units_of(width)
 
-    def previous_correction(self, frame_index: int | None) -> np.ndarray | None:
+    def previous_correction(self, frame_index: int | None, width: int) -> np.ndarray | None:
         """The correction of the frame right before ``frame_index``, if that is what was processed last."""
         if frame_index is None or self.correction_frame_index != frame_index - 1:
             return None
-        return self.correction
+        return self._correction_in_units_of(width)
+
+    def _correction_in_units_of(self, width: int) -> np.ndarray | None:
+        if self.correction is None or self.correction_width in (None, width):
+            return self.correction
+        assert self.correction_width is not None
+        scale = self.correction_width / width  # the stored correction lives on a frame ``scale`` times this one
+        if transforms.is_affine(self.correction):
+            return transforms.rescale_affine(self.correction, scale)
+        return transforms.rescale_homography(self.correction, scale)

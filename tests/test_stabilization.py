@@ -147,6 +147,30 @@ def test_sequence_break_restarts_the_path(textured_frame: np.ndarray, previous_f
     assert state.correction is None and state.correction_frame_index == 30
 
 
+def test_corrections_are_rescaled_when_the_same_sequence_is_rendered_at_another_size() -> None:
+    """The preview renders scrub/playback frames at 640 px and the resting frame in full size."""
+    frames, _positions = shaky_sequence(count=8)
+    small = [cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA) for frame in frames]
+    settings = StabilizationSettings(mode=StabilizationMode.AUTO, temporal_smoothing=0.5, auto_crop=False)
+
+    reference = StabilizationState()
+    for index, frame in enumerate(frames):
+        expected = estimate_correction(frame, settings, index, reference, None)
+    assert expected is not None
+
+    state = StabilizationState()
+    for index, frame in enumerate(small):
+        estimate_correction(frame, settings, index, state, None)
+    idle = estimate_correction(frames[-1], settings, len(frames) - 1, state, None)  # same index, full size
+    assert idle is not None
+    assert idle[:, 2] == pytest.approx(expected[:, 2], abs=1.0)
+    assert state.correction_width == frames[-1].shape[1]
+
+    # And the other way round: continuing a full-size sequence with a small frame keeps the units.
+    resumed = estimate_correction(small[-1], settings, len(frames) - 1, state, None)
+    assert resumed is not None and resumed[:, 2] == pytest.approx(expected[:, 2] / 2.0, abs=0.5)
+
+
 def test_camera_lock_holds_the_last_correction_when_the_target_is_lost() -> None:
     frames, _positions = shaky_sequence(count=6)
     settings = StabilizationSettings(mode=StabilizationMode.CAMERA_LOCK, focus_rect=CENTER, auto_crop=False)

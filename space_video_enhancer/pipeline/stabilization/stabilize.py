@@ -102,10 +102,13 @@ def estimate_correction(
     reference_frame: np.ndarray | None,
 ) -> np.ndarray | None:
     """Full-strength correction for ``frame`` (before the intensity blend), or ``None``."""
+    width = int(frame.shape[1])
     if state is not None:
-        cached = state.cached_correction(frame_index)
+        state.adopt_frame_width(width)
+        cached = state.cached_correction(frame_index, width)
         if cached is not None:
             note("stabilization.estimator", "cached")
+            state.remember_correction(cached, frame_index, width)  # keep the stored units current
             return cached
 
     mode = settings.mode
@@ -119,7 +122,7 @@ def estimate_correction(
         correction = None
 
     if state is not None:
-        state.remember_correction(correction, frame_index)
+        state.remember_correction(correction, frame_index, width)
     return correction
 
 
@@ -132,7 +135,7 @@ def follow_smoothed_path(
     if state is None:
         return None
     delta = estimators.estimate_inter_frame_transform(frame, frame_index, state, settings.mode)
-    previous = state.previous_correction(frame_index)
+    previous = state.previous_correction(frame_index, frame.shape[1])
     if delta is None:
         if previous is None:
             note("stabilization.path", "start")
@@ -165,7 +168,7 @@ def camera_lock(
     lock = None
     if reference_frame is not None:
         lock = estimators.estimate_camera_lock_transform(frame, reference_frame, settings.focus_rect)
-    previous = state.previous_correction(frame_index) if state is not None else None
+    previous = state.previous_correction(frame_index, frame.shape[1]) if state is not None else None
     if lock is None:
         if previous is None:
             return None
@@ -194,7 +197,7 @@ def hybrid(
     delta = estimators.estimate_inter_frame_transform(
         frame, frame_index, state, StabilizationMode.SIMILARITY, translation_fallback=True
     )
-    previous = state.previous_correction(frame_index)
+    previous = state.previous_correction(frame_index, frame.shape[1])
 
     if lock is not None:
         if previous is None:
