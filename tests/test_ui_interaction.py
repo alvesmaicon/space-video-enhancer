@@ -166,7 +166,7 @@ def test_transport_labels_never_move_the_slider(app: QApplication, window: MainW
         bar.set_value_silently(index)
         bar.set_position(index)
         pump(app, 0.01)
-        geometries.add((bar.frame_slider.x(), bar.frame_slider.width()))
+        geometries.add((bar.timeline.x(), bar.timeline.width()))
         assert bar.frame_label.text() == f"frame {index + 1} / 1500"
     assert len(geometries) == 1, f"slider moved: {sorted(geometries)}"
 
@@ -180,7 +180,7 @@ def test_transport_shows_timecode_and_jumps_to_clicks(app: QApplication, window:
     assert window.transport.timecode_label.text() == "00:00.06 / 00:00.12"
     assert window.transport.frame_label.text() == f"frame 7 / {UI_VIDEO_FRAMES}"
 
-    slider = window.transport.frame_slider
+    slider = window.transport.timeline
     QTest.mouseClick(slider, Qt.MouseButton.LeftButton, pos=QPoint(slider.width() - 4, slider.height() // 2))
     wait_for_preview(app, window)
     assert slider.value() >= UI_VIDEO_FRAMES - 2, "clicking the groove jumps there instead of paging"

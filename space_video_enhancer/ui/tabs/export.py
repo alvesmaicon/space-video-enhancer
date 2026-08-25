@@ -46,6 +46,8 @@ class ExportTab(TabPage):
     cutsClearRequested = Signal()
     cutActivated = Signal(int)
     """Double-click on a cut: jump to it."""
+    cutSelectionChanged = Signal(int)
+    """Selected row (``-1`` for none), so the timeline highlights the same cut."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -102,6 +104,7 @@ class ExportTab(TabPage):
         self.cut_to_edit.returnPressed.connect(self._emit_add_from_text)
         self.cut_list.itemDoubleClicked.connect(lambda item: self.cutActivated.emit(self.cut_list.row(item)))
         self.cut_list.itemSelectionChanged.connect(self._update_cut_buttons)
+        self.cut_list.itemSelectionChanged.connect(lambda: self.cutSelectionChanged.emit(self.selected_cut()))
 
         range_buttons = QHBoxLayout()
         range_buttons.setSpacing(10)
@@ -170,12 +173,28 @@ class ExportTab(TabPage):
             'Nenhum trecho removido. Use "Iniciar corte aqui" (X) nas duas pontas do trecho, '
             "ou digite os tempos e adicione."
             if not items
-            else "Duplo clique em um corte para ir até ele. O playback pula os trechos removidos."
+            else "Duplo clique em um corte para ir até ele; Delete remove o selecionado. "
+            "Na linha do tempo, arraste as bordas ou o corpo de um corte para ajustá-lo."
         )
         self._update_cut_buttons()
 
     def selected_cut(self) -> int:
         return self.cut_list.currentRow() if self.cut_list.selectedItems() else -1
+
+    def select_cut(self, index: int) -> None:
+        """Mirror the timeline's selection without echoing it back."""
+        if index == self.selected_cut():
+            return
+        self.cut_list.blockSignals(True)
+        try:
+            if 0 <= index < self.cut_list.count():
+                self.cut_list.setCurrentRow(index)
+            else:
+                self.cut_list.clearSelection()
+                self.cut_list.setCurrentRow(-1)
+        finally:
+            self.cut_list.blockSignals(False)
+        self._update_cut_buttons()
 
     def set_pending_cut(self, pending: bool) -> None:
         self.cut_toggle_button.setText("Terminar corte aqui" if pending else "Iniciar corte aqui")

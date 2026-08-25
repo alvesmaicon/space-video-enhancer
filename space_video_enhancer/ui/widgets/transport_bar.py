@@ -1,7 +1,7 @@
-"""Timecode, frame slider with clip markers and the transport buttons, below the preview.
+"""Timecode, the zoomable timeline with clip markers and cuts, and the transport buttons, below the preview.
 
-The two labels flanking the slider have fixed widths sized for the widest text they can
-show for the open video, so changing digits never pushes the slider sideways.
+The two labels above the timeline have fixed widths sized for the widest text they can show
+for the open video, so changing digits never moves anything.
 """
 
 from __future__ import annotations
@@ -12,11 +12,11 @@ from collections.abc import Sequence
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from space_video_enhancer.ui.format import format_timecode
 from space_video_enhancer.ui.icons import glyph_icon
-from space_video_enhancer.ui.widgets.frame_range_slider import FrameRangeSlider
+from space_video_enhancer.ui.widgets.timeline import TimelineWidget
 
 PRIMARY_COLOR = QColor("#0f766e")
 ON_PRIMARY_COLOR = QColor("#ffffff")
@@ -48,6 +48,13 @@ class TransportBar(QWidget):
     playToggled = Signal()
     nextRequested = Signal()
     lastRequested = Signal()
+    cutsEdited = Signal(object, bool)
+    """``(cuts, finished)`` from dragging a cut's edge or body on the timeline."""
+    clipRangeEdited = Signal(int, int, bool)
+    """``(start, end, finished)`` from dragging a clip marker on the timeline."""
+    cutSelected = Signal(int)
+    cutRemoveRequested = Signal(int)
+    cutToggleRequested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -59,8 +66,20 @@ class TransportBar(QWidget):
         self.frame_label = QLabel()
         self.frame_label.setObjectName("frameLabel")
         self.frame_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.frame_slider = FrameRangeSlider(Qt.Orientation.Horizontal)
-        self.frame_slider.setRange(0, 0)
+        self.timeline = TimelineWidget()
+
+        self.zoom_out_button = QToolButton()
+        self.zoom_out_button.setText("−")
+        self.zoom_out_button.setToolTip("Diminuir zoom da linha do tempo (Ctrl+roda do mouse ou pinça)")
+        self.zoom_fit_button = QToolButton()
+        self.zoom_fit_button.setText("Ajustar")
+        self.zoom_fit_button.setToolTip("Mostrar o vídeo inteiro na linha do tempo")
+        self.zoom_in_button = QToolButton()
+        self.zoom_in_button.setText("+")
+        self.zoom_in_button.setToolTip("Aumentar zoom da linha do tempo (Ctrl+roda do mouse ou pinça)")
+        for zoom_button in (self.zoom_out_button, self.zoom_fit_button, self.zoom_in_button):
+            zoom_button.setObjectName("previewZoomButton")
+            zoom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self._play_icon = glyph_icon("play", ON_PRIMARY_COLOR)
         self._pause_icon = glyph_icon("pause", ON_PRIMARY_COLOR)
@@ -86,59 +105,74 @@ class TransportBar(QWidget):
         self.play_button.setIcon(self._play_icon)
         self.play_button.setToolTip("Reproduzir ou pausar (Espaço)")
 
-        self.frame_slider.valueChanged.connect(self.frameChanged.emit)
+        self.timeline.valueChanged.connect(self.frameChanged.emit)
+        self.timeline.cutsEdited.connect(self.cutsEdited.emit)
+        self.timeline.clipRangeEdited.connect(self.clipRangeEdited.emit)
+        self.timeline.cutSelected.connect(self.cutSelected.emit)
+        self.timeline.cutRemoveRequested.connect(self.cutRemoveRequested.emit)
+        self.timeline.cutToggleRequested.connect(self.cutToggleRequested.emit)
+        self.timeline.zoomChanged.connect(self._update_zoom_buttons)
+        self.zoom_out_button.clicked.connect(self.timeline.zoom_out)
+        self.zoom_fit_button.clicked.connect(self.timeline.zoom_to_fit)
+        self.zoom_in_button.clicked.connect(self.timeline.zoom_in)
         self.go_first_button.clicked.connect(self.firstRequested.emit)
         self.prev_frame_button.clicked.connect(self.previousRequested.emit)
         self.play_button.clicked.connect(self.playToggled.emit)
         self.next_frame_button.clicked.connect(self.nextRequested.emit)
         self.go_last_button.clicked.connect(self.lastRequested.emit)
 
-        frame_row = QHBoxLayout()
-        frame_row.setSpacing(12)
-        frame_row.addWidget(self.timecode_label)
-        frame_row.addWidget(self.frame_slider, 1)
-        frame_row.addWidget(self.frame_label)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
+        header_row.addWidget(self.timecode_label)
+        header_row.addStretch(1)
+        header_row.addWidget(self.zoom_out_button)
+        header_row.addWidget(self.zoom_fit_button)
+        header_row.addWidget(self.zoom_in_button)
+        header_row.addStretch(1)
+        header_row.addWidget(self.frame_label)
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
         button_row.addStretch(1)
-        for button in (
+        for transport_button in (
             self.go_first_button,
             self.prev_frame_button,
             self.play_button,
             self.next_frame_button,
             self.go_last_button,
         ):
-            button_row.addWidget(button)
+            button_row.addWidget(transport_button)
         button_row.addStretch(1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        layout.addLayout(frame_row)
+        layout.setSpacing(8)
+        layout.addLayout(header_row)
+        layout.addWidget(self.timeline)
         layout.addLayout(button_row)
         self._fit_labels()
+        self._update_zoom_buttons()
         self.set_position(0)
 
     def value(self) -> int:
-        return self.frame_slider.value()
+        return self.timeline.value()
 
     def maximum(self) -> int:
-        return self.frame_slider.maximum()
+        return self.timeline.maximum()
 
     def set_frame_count(self, frame_count: int, fps: float) -> None:
         self._frame_count = max(0, frame_count)
         self._fps = fps if fps > 0 else 30.0
-        self.frame_slider.setRange(0, max(0, frame_count - 1))
+        self.timeline.set_media(self._frame_count, self._fps)
         self._fit_labels()
-        self.set_position(self.frame_slider.value())
+        self.set_position(self.timeline.value())
 
     def set_value(self, index: int) -> None:
-        self.frame_slider.setValue(index)
+        self.timeline.setValue(index)
 
     def set_value_silently(self, index: int) -> None:
-        self.frame_slider.blockSignals(True)
-        self.frame_slider.setValue(index)
-        self.frame_slider.blockSignals(False)
+        self.timeline.blockSignals(True)
+        self.timeline.setValue(index)
+        self.timeline.blockSignals(False)
 
     def set_position(self, frame_index: int) -> None:
         """Timecode of ``frame_index`` next to the clip duration, plus the frame counter."""
@@ -158,7 +192,7 @@ class TransportBar(QWidget):
         return self._frame_count / self._fps >= SECONDS_PER_HOUR
 
     def _fit_labels(self) -> None:
-        """Fixed label widths for the widest text this video can produce, so the slider never moves."""
+        """Fixed label widths for the widest text this video can produce, so nothing shifts as digits change."""
         for label in (self.timecode_label, self.frame_label):
             label.setFont(with_tabular_digits(label.font()))
         hours = self._shows_hours()
@@ -171,15 +205,24 @@ class TransportBar(QWidget):
             widest_digits_width(self.frame_label.fontMetrics(), frame_template) + LABEL_SLACK_PX
         )
 
+    def _update_zoom_buttons(self) -> None:
+        loaded = self.timeline.frame_count > 1
+        self.zoom_in_button.setEnabled(loaded and not self.timeline.is_max_zoom())
+        self.zoom_out_button.setEnabled(loaded and not self.timeline.is_fit())
+        self.zoom_fit_button.setEnabled(loaded and not self.timeline.is_fit())
+
     def set_playing(self, playing: bool) -> None:
         self.play_button.setIcon(self._pause_icon if playing else self._play_icon)
         self.play_button.setToolTip("Pausar (Espaço)" if playing else "Reproduzir (Espaço)")
 
     def set_markers(self, start: int, end: int, show: bool) -> None:
-        self.frame_slider.set_markers(start, end, show)
+        self.timeline.set_clip_range(start, end, show)
 
     def set_cuts(self, cuts: Sequence[tuple[int, int]]) -> None:
-        self.frame_slider.set_cuts(cuts)
+        self.timeline.set_cuts(cuts)
 
     def set_pending_cut(self, frame: int | None) -> None:
-        self.frame_slider.set_pending_cut(frame)
+        self.timeline.set_pending_cut(frame)
+
+    def select_cut(self, index: int) -> None:
+        self.timeline.select_cut(index)

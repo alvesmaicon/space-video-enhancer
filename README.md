@@ -67,7 +67,7 @@ space_video_enhancer/
     main_window.py         # orquestra toolbar, splitter, status bar e abas; produz RenderSettings; nao processa imagem
     tabs/                  # uma classe por aba: Cor, HSL, Filtros, Estabilizar, Geometria, Ruido, Exportar
     preview_worker.py      # QThread que decodifica e renderiza preview e miniaturas; a UI nunca bloqueia
-    widgets/               # ComparePreview (+ SelectionOverlay), TransportBar, StatusPanel, LabeledSlider, FrameRangeSlider
+    widgets/               # ComparePreview (+ SelectionOverlay), TransportBar, TimelineWidget, StatusPanel, LabeledSlider
     theme.qss              # estilo (icones em ui/icons/)
 tests/                     # pytest; roda sem display (o pipeline nao depende de Qt)
 ```
@@ -86,7 +86,8 @@ Regras da arquitetura:
 - Zoom do preview: "Ajustar" (padrao) preenche a area disponivel; os percentuais sao pixels do frame de saida por pixel logico da tela (100% = 1:1). Ctrl+0 ajusta, Ctrl++/Ctrl+- mudam de nivel.
 - Teclado: Espaco, Home/End, setas, I/O e X controlam a reproducao e os cortes, mas so quando o widget focado nao usa a tecla (um slider focado mantem as setas, um botao focado mantem o Espaco). Clicar no preview da o foco a ele; abrir um video tambem.
 - Overlays: o crop aparece sempre que estiver ativo, mas so e editavel na aba Geometria; a amostra de ruido e o ponto focal aparecem apenas nas abas Ruido e Estabilizar, editaveis direto no preview (nao existe modo "editar").
-- Cortes internos (`timeline.py`): alem do inicio/fim (I/O), a aba Exportar guarda uma lista de trechos removidos — X marca inicio e fim no frame atual, ou digite os tempos (`mm:ss`, `h:mm:ss`, `mm:ss.ff`). Os trechos aparecem em vermelho no slider, o playback pula por cima deles e o export le so os trechos mantidos (com seek entre eles) concatenando o audio correspondente (`atrim`/`concat`); fontes sem audio saem mudas em vez de falhar.
+- Cortes internos (`timeline.py`): alem do inicio/fim (I/O), a aba Exportar guarda uma lista de trechos removidos — X marca inicio e fim no frame atual, ou digite os tempos (`mm:ss`, `h:mm:ss`, `mm:ss.ff`). Os trechos aparecem em vermelho na linha do tempo, o playback pula por cima deles e o export le so os trechos mantidos (com seek entre eles) concatenando o audio correspondente (`atrim`/`concat`); fontes sem audio saem mudas em vez de falhar.
+- Linha do tempo (`widgets/timeline.py`): regua + trilhas com zoom (Ctrl+roda, pinca do trackpad, botoes −/Ajustar/+) e rolagem (roda, barra). `TimelineScale` faz a conversao frame<->pixel (zoom = pixels por frame, scroll = primeiro frame visivel) e todo hit-test usa a mesma conversao. Um corte `(inicio, fim)` ocupa os pixels de `x_of(inicio)` a `x_of(fim + 1)`; arrastar uma borda redimensiona, arrastar o corpo move, clicar seleciona (Delete remove; a selecao e a mesma da lista na aba Exportar), botao direito abre o menu. Os marcadores I/O sao arrastados na regua. Enquanto um corte esta sendo arrastado, o widget ignora `set_cuts` (o arraste e a fonte da verdade) e so na soltura o modelo normalizado volta para ele. Na reproducao, quando o playhead sai da area visivel a vista rola para deixa-lo a 10% da borda esquerda.
 - Cores (aba HSL, `pipeline/grade.py`): balanco de branco por ganhos B/G/R (calculados de uma regiao que deveria ser cinza — retangulo roxo no preview — ou do frame inteiro, gray world) mais tint verde/magenta, aplicados antes da curva tonal; e ajustes de matiz/saturacao/luminancia por oito faixas de matiz interpoladas linearmente no circulo de cores (hue vs hue / sat / lum). Tudo vira tabelas (`cv2.LUT`) resolvidas uma vez por `ProcessingContext`; os ganhos ficam gravados nas settings, entao a exportacao usa exatamente o que o preview mostra.
 
 ## Desenvolvimento
@@ -134,7 +135,7 @@ print(pd.json_normalize(renders.stages).describe())
 
 ## O que o MVP faz
 
-- seleciona um video local e navega pelos frames com slider, botoes de transporte e reproducao quadro a quadro
+- seleciona um video local e navega pelos frames com a linha do tempo (zoom e rolagem), botoes de transporte e reproducao quadro a quadro
 - zoom do preview por botoes e percentual, com modos de qualidade (alta, balanceado, rapido) e pulo de frames na reproducao
 - comparacao antes/depois com divisor arrastavel
 - abas tematicas: cor e detalhe, HSL (balanco de branco e ajuste por cor), filtros (presets com miniaturas do frame atual), estabilizacao, geometria, ruido e midia
@@ -144,7 +145,7 @@ print(pd.json_normalize(renders.stages).describe())
 - estabilizacao por translacao, similaridade, perspectiva, camera lock por regiao focal ou hibrida, com intensidade, suavizacao temporal, crop automatico e zoom out
 - filtros tonais para sombras, realces, contraste local e atenuacao de cores quentes/frias
 - crop interativo com presets de proporcao e modo livre; rotacao 90/180/270 e espelhamento
-- corte temporal por frame inicial/final com marcadores no slider
+- corte temporal por frame inicial/final com marcadores arrastaveis na linha do tempo
 - exportacao local com barra de progresso e cancelamento, usando FFmpeg apenas para encode e mux do audio original
 - tenta encoders de hardware (NVENC, VAAPI) e OpenCL quando disponiveis, com fallback automatico para CPU/libx264
 

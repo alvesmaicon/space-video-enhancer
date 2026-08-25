@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -278,6 +278,8 @@ class MainWindow(QMainWindow):
         self.mark_start_action = self._make_action("Marcar início do corte", self._mark_clip_start, "I")
         self.mark_end_action = self._make_action("Marcar fim do corte", self._mark_clip_end, "O")
         self.cut_toggle_action = self._make_action("Iniciar/terminar corte aqui", self._toggle_cut_mark, "X")
+        self.remove_cut_action = self._make_action("Remover corte selecionado", self._remove_selected_cut, "Del")
+        self.remove_cut_action.setShortcuts([QKeySequence("Del"), QKeySequence("Backspace")])
         # Bare keys must not steal arrows from sliders or Space from buttons: as QAction shortcuts they
         # only fire while the preview has focus; everywhere else keyPressEvent handles what widgets left.
         for action in self._transport_actions():
@@ -417,6 +419,7 @@ class MainWindow(QMainWindow):
         playback_menu.addAction(self.mark_start_action)
         playback_menu.addAction(self.mark_end_action)
         playback_menu.addAction(self.cut_toggle_action)
+        playback_menu.addAction(self.remove_cut_action)
 
         view_menu = menu_bar.addMenu("Exibir")
         view_menu.addAction(self.zoom_fit_action)
@@ -451,6 +454,12 @@ class MainWindow(QMainWindow):
         self.transport.playToggled.connect(self._toggle_playback)
         self.transport.nextRequested.connect(self._go_to_next_frame)
         self.transport.lastRequested.connect(self._go_to_last_frame)
+        self.transport.cutsEdited.connect(self._set_cuts_from_timeline)
+        self.transport.clipRangeEdited.connect(self._set_clip_range_from_timeline)
+        self.transport.cutSelected.connect(self.export_tab.select_cut)
+        self.transport.cutRemoveRequested.connect(self._remove_cut)
+        self.transport.cutToggleRequested.connect(self._toggle_cut_mark)
+        self.export_tab.cutSelectionChanged.connect(self.transport.select_cut)
 
         self.color_tab.presetChanged.connect(self._handle_preset_changed)
         self.color_tab.valueChanged.connect(self._handle_filter_control_change)
@@ -601,7 +610,7 @@ class MainWindow(QMainWindow):
         self.transport.set_frame_count(self.frame_count, self.fps)
         self.preview.set_display_reference_size(*self._displayed_size())
         self._set_controls_enabled(True)
-        self._update_frame_slider_markers()
+        self._update_timeline_markers()
         self._update_range_label()
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
@@ -743,7 +752,7 @@ class MainWindow(QMainWindow):
         self.clip_start_frame = self.current_frame_index
         self.clip_end_frame = max(self.clip_end_frame, self.clip_start_frame)
         log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="start")
-        self._update_frame_slider_markers()
+        self._update_timeline_markers()
         self._update_range_label()
 
     def _mark_clip_end(self) -> None:
@@ -752,7 +761,7 @@ class MainWindow(QMainWindow):
         self.clip_end_frame = self.current_frame_index
         self.clip_start_frame = min(self.clip_start_frame, self.clip_end_frame)
         log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="end")
-        self._update_frame_slider_markers()
+        self._update_timeline_markers()
         self._update_range_label()
 
     def _reset_clip_range(self) -> None:
@@ -762,7 +771,7 @@ class MainWindow(QMainWindow):
         self.clip_end_frame = self.frame_count - 1
         self.cuts = []
         self._pending_cut_start = None
-        self._update_frame_slider_markers()
+        self._update_timeline_markers()
         self._update_range_label()
 
     # --- cuts inside the clip -----------------------------------------------------------------
@@ -779,14 +788,14 @@ class MainWindow(QMainWindow):
         else:
             start, self._pending_cut_start = self._pending_cut_start, None
             self._add_cut(start, self.current_frame_index)
-        self._update_frame_slider_markers()
+        self._update_timeline_markers()
         self._update_range_label()
 
     def _add_cut(self, start: int, end: int) -> None:
         bounds = FrameRange(0, self.frame_count - 1)
         self.cuts = [(cut.start, cut.end) for cut in normalize_cuts([*self.cuts, (start, end)], bounds)]
         log_event(LOG, "ui.cuts", action="add", start=min(start, end), end=max(start, end), cuts=self.cuts)
-        self._update_frame_slider_markers()
+        self._update_timeline_markers()
         self._update_range_label()
         self.status.show_message(
             f"Trecho {format_timecode(min(start, end), self.fps)} → {format_timecode(max(start, end) + 1, self.fps)} "
@@ -811,8 +820,36 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(self.cuts):
             removed = self.cuts.pop(index)
             log_event(LOG, "ui.cuts", action="remove", start=removed[0], end=removed[1], cuts=self.cuts)
-            self._update_frame_slider_markers()
+            self._update_timeline_markers()
             self._update_range_label()
+
+    def _remove_selected_cut(self) -> None:
+        """Delete/Backspace: the cut selected on the timeline (or in the export list)."""
+        index = self.transport.timeline.selected_cut()
+        if index < 0:
+            index = self.export_tab.selected_cut()
+        if index >= 0:
+            self._remove_cut(index)
+
+    def _set_cuts_from_timeline(self, cuts: Sequence[tuple[int, int]], finished: bool) -> None:
+        """A cut edge or body dragged on the timeline; logged once, when the drag ends."""
+        if self.frame_count <= 0:
+            return
+        bounds = FrameRange(0, self.frame_count - 1)
+        self.cuts = [(cut.start, cut.end) for cut in normalize_cuts(cuts, bounds)]
+        if finished:
+            log_event(LOG, "ui.cuts", action="drag", cuts=self.cuts)
+        self._update_timeline_markers()
+        self._update_range_label()
+
+    def _set_clip_range_from_timeline(self, start: int, end: int, finished: bool) -> None:
+        if self.frame_count <= 0:
+            return
+        self.clip_start_frame, self.clip_end_frame = start, end
+        if finished:
+            log_event(LOG, "ui.clip_range", start=start, end=end, edge="drag")
+        self._update_timeline_markers()
+        self._update_range_label()
 
     def _clear_cuts(self) -> None:
         if not self.cuts and self._pending_cut_start is None:
@@ -820,7 +857,7 @@ class MainWindow(QMainWindow):
         self.cuts = []
         self._pending_cut_start = None
         log_event(LOG, "ui.cuts", action="clear", cuts=[])
-        self._update_frame_slider_markers()
+        self._update_timeline_markers()
         self._update_range_label()
 
     def _go_to_cut(self, index: int) -> None:
@@ -866,7 +903,7 @@ class MainWindow(QMainWindow):
             )
         self.export_tab.set_range_text(text)
 
-    def _update_frame_slider_markers(self) -> None:
+    def _update_timeline_markers(self) -> None:
         self.transport.set_cuts(self.cuts)
         self.transport.set_pending_cut(self._pending_cut_start)
         if self.frame_count <= 0:
@@ -1616,6 +1653,7 @@ class MainWindow(QMainWindow):
             self.mark_start_action,
             self.mark_end_action,
             self.cut_toggle_action,
+            self.remove_cut_action,
         )
 
     def _bare_key_handlers(self) -> dict[int, Callable[[], None]]:
@@ -1628,6 +1666,8 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_I: self._mark_clip_start,
             Qt.Key.Key_O: self._mark_clip_end,
             Qt.Key.Key_X: self._toggle_cut_mark,
+            Qt.Key.Key_Delete: self._remove_selected_cut,
+            Qt.Key.Key_Backspace: self._remove_selected_cut,
         }
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
