@@ -36,6 +36,8 @@ def wait_until(app: QApplication, condition: Callable[[], bool], timeout: float 
 
 
 def wait_for_preview(app: QApplication, window: MainWindow) -> None:
+    """Wait for the debounced refresh to be requested and for its render to land."""
+    wait_until(app, lambda: not window._preview_refresh_timer.isActive(), what="preview refresh debounce")
     wait_until(
         app,
         lambda: window._preview_generation > 0 and window._applied_preview_generation == window._preview_generation,

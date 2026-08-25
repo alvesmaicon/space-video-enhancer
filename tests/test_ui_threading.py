@@ -20,7 +20,7 @@ from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from space_video_enhancer.ui.tabs.filters import FiltersTab
 from space_video_enhancer.video import VideoSource
-from tests.qt_helpers import pump, wait_for_preview
+from tests.qt_helpers import wait_for_preview, wait_until
 
 
 def test_frames_are_decoded_on_the_render_thread(
@@ -78,9 +78,7 @@ def test_denoise_estimate_is_read_from_the_render_trace(
     wait_for_preview(app, window)
     select_combo_data(window.noise_tab.mode_combo, DenoiseMode.AUTO.value)
     wait_for_preview(app, window)
-    pump(app, 0.05)
-
-    assert "luminância" in window.noise_tab.info_label.text()
+    wait_until(app, lambda: "luminância" in window.noise_tab.info_label.text(), what="denoise estimate label")
     assert estimate_threads, "the pipeline still estimates (on the worker)"
     assert threading.main_thread().name not in estimate_threads
 
