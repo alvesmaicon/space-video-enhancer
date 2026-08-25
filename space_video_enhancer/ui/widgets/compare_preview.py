@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 HANDLE_SIZE = 10.0
@@ -18,6 +18,11 @@ PLACEHOLDER_TEXT_COLOR = QColor("#4b5563")
 SPLIT_LINE_COLOR = QColor("#ffffff")
 CAPTION_COLOR = QColor("#111827")
 DIM_COLOR = QColor(17, 24, 39, 120)
+HUD_BACKGROUND = QColor(17, 24, 39, 178)
+HUD_TEXT_COLOR = QColor("#e5e7eb")
+HUD_PADDING = 8
+HUD_LINE_HEIGHT = 15
+HUD_FONT_SIZE = 10
 
 _ANCHOR_CORNER = {
     "top_left": QRectF.bottomRight,
@@ -268,6 +273,8 @@ class ComparePreview(QWidget):
         self._base_size = QSize(self.DEFAULT_BASE_SIZE)
         self._zoom_factor = 1.0
         self._smooth_transform_enabled = True
+        self._hud_visible = False
+        self._hud_lines: list[str] = []
 
         self.crop = SelectionOverlay(CROP_STYLE, QRectF(0.1, 0.1, 0.8, 0.8), self.cropChanged.emit)
         self.sample = SelectionOverlay(SAMPLE_STYLE, QRectF(0.33, 0.33, 0.34, 0.34), self.sampleChanged.emit)
@@ -319,6 +326,15 @@ class ComparePreview(QWidget):
         self.update()
 
     # --- state ---------------------------------------------------------------------------
+    def set_hud_visible(self, visible: bool) -> None:
+        self._hud_visible = visible
+        self.update()
+
+    def set_hud_lines(self, lines: list[str]) -> None:
+        self._hud_lines = list(lines)
+        if self._hud_visible:
+            self.update()
+
     def set_images(self, before: QImage | None, after: QImage | None) -> None:
         self._before = before
         self._after = after
@@ -384,6 +400,9 @@ class ComparePreview(QWidget):
             if overlay.enabled:
                 overlay.paint(painter, self._image_rect)
 
+        if self._hud_visible and self._hud_lines:
+            self._draw_hud(painter)
+
     # --- mouse ---------------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -447,3 +466,24 @@ class ComparePreview(QWidget):
         ratio = (mouse_x - self._image_rect.left()) / self._image_rect.width()
         self._split_ratio = min(1.0, max(0.0, ratio))
         self.update()
+
+    def _draw_hud(self, painter: QPainter) -> None:
+        """Metrics box (render/decode timings, queue, backend) in the bottom-left corner of the image."""
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(HUD_FONT_SIZE)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        width = max(metrics.horizontalAdvance(line) for line in self._hud_lines) + (HUD_PADDING * 2)
+        height = (HUD_LINE_HEIGHT * len(self._hud_lines)) + (HUD_PADDING * 2)
+        left = self._image_rect.left() + 12
+        top = self._image_rect.bottom() - height - 12
+        box = QRectF(left, top, width, height)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(HUD_BACKGROUND)
+        painter.drawRoundedRect(box, 6, 6)
+        painter.setPen(HUD_TEXT_COLOR)
+        baseline = top + HUD_PADDING + metrics.ascent()
+        for line in self._hud_lines:
+            painter.drawText(int(left + HUD_PADDING), int(baseline), line)
+            baseline += HUD_LINE_HEIGHT
+        painter.setFont(QFont())

@@ -90,6 +90,37 @@ pytest
 
 Os testes de exportacao ponta a ponta usam o `ffmpeg` do `PATH` e sao pulados se ele nao existir.
 
+## Telemetria e logs
+
+O app grava eventos estruturados (uma linha JSON por evento) em `~/.space-video-enhancer/logs/app.jsonl`, com rotacao em 10 MB x 5. Nada sai do computador: os logs servem para medir e melhorar algoritmos e interface. Nomes de arquivo aparecem sem o diretorio.
+
+Variaveis de ambiente: `SVE_LOG_DIR` (pasta), `SVE_LOG_LEVEL` (`INFO` padrao; `DEBUG` inclui `frame.decode` e `preview.render` durante a reproducao), `SVE_LOG_STDERR=1` (espelha no terminal). O menu `Ajuda > Abrir pasta de logs` abre a pasta; `Exibir > Mostrar metricas no preview` (Ctrl+M) mostra um HUD com tempo de render por estagio, fila, decode, estabilizacao e backend.
+
+Eventos principais:
+
+| Evento | Quando | Campos uteis |
+|---|---|---|
+| `app.start` / `app.stop` | inicio/fim | versoes, CPU, OpenCL (dispositivo), ffmpeg |
+| `video.open` | abrir video | dimensoes, fps, frames, codec, `open_ms` |
+| `settings.snapshot` / `settings.change` | primeiro render de um video / cada ajuste | `changes`: `{"filters.contrast": [50, 62]}` |
+| `preview.render` | cada render do preview (playback em DEBUG) | `total_ms`, `stages` (`stabilize`, `context`, `filters`, `filters.denoise`, `preset`, `geometry`), `queue_wait_ms`, `dropped_total`, notas do pipeline |
+| `playback.start` / `playback.stop` | reproducao | `effective_fps`, `frames_shown`, `seeks`, `sequential_reads`, `decode_ms` |
+| `export.start` / `export.progress` / `export.finish` / `export.cancelled` / `export.failed` | exportacao | `fps`, `elapsed_s`, `render` (estatisticas por estagio), `stabilization` (histograma de estimadores/resultados), `encoder`, `backend`, `output_bytes`, `stderr_tail` |
+| `ui.*` | interacoes (`ui.tab`, `ui.preset`, `ui.render_mode`, `ui.preview_zoom`, `ui.clip_range`, `ui.hud`) | |
+| `session.summary` | fechar a janela | renders, descartados, exports, erros |
+| `preview.error`, `export.error`, `app.unhandled`, `qt.message` | falhas | `exception`, `settings` |
+
+Notas do pipeline registradas em cada render (`preview.render`) e agregadas no export: `stabilization.mode`, `stabilization.estimator` (`lk_translation`, `phase_correlate`, `lk_similarity`, `lk_perspective`, `orb_masked`, `orb_unmasked`, `template_match`, `primed`, `sequence_break`, `cached`, `none`), `stabilization.result` (`applied`, `negligible`, `no_transform`), `stabilization.inliers`, `stabilization.tracked_points`, `stabilization.rejected`, `stabilization.translation_px`, `stabilization.hybrid_path`, `denoise.mode`, `denoise.h`, `filters.backend`.
+
+Analise rapida com pandas:
+
+```python
+import pandas as pd
+df = pd.read_json("~/.space-video-enhancer/logs/app.jsonl", lines=True)
+renders = df[df.event == "preview.render"]
+print(pd.json_normalize(renders.stages).describe())
+```
+
 ## O que o MVP faz
 
 - seleciona um video local e navega pelos frames com slider, botoes de transporte e reproducao quadro a quadro

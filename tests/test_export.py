@@ -129,6 +129,10 @@ def test_end_to_end_export_produces_playable_yuv420p(tmp_path: Path, workers: in
 
     assert result.success, result.message
     assert result.processed_frames == 12
+    assert result.metrics["frames"] == 12 and result.metrics["workers"] == workers
+    assert result.metrics["render"]["total"]["count"] == 12
+    assert set(result.metrics["render"]["stages"]) >= {"filters", "preset", "geometry", "crop"}
+    assert result.metrics["fps"] is not None and result.metrics["output_bytes"] > 0
     assert progress and progress[-1] == (12, 12)
     stream = _probe_video(output)
     assert stream["pix_fmt"] == "yuv420p"

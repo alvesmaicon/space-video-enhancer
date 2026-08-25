@@ -6,16 +6,19 @@ exactly once per render into an immutable snapshot (see :mod:`space_video_enhanc
 
 from __future__ import annotations
 
+import logging
 import os
+import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QPixmap
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -69,6 +72,9 @@ from space_video_enhancer.settings import (
     StabilizationSettings,
     clamp_unit,
 )
+from space_video_enhancer.telemetry.diff import diff as diff_settings
+from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
+from space_video_enhancer.telemetry.stats import RollingStats
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.theme import load_stylesheet
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
@@ -77,6 +83,8 @@ from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 from space_video_enhancer.video import VideoOpenError, VideoSource
 
 E = TypeVar("E", DenoiseMode, StabilizationMode, RotationMode, PreviewRenderMode)
+
+LOG = get_logger("ui")
 
 THREAD_OPTIONS = (1, 2, 4, 6, 8)
 PREVIEW_MAX_FPS = 12.0
@@ -184,6 +192,17 @@ class MainWindow(QMainWindow):
         self._thumbnail_generation = 0
         self._applied_thumbnail_generation = -1
         self.last_preview_render_ms = 0.0
+        self._last_preview: PreviewImages | None = None
+        self._last_logged_settings: RenderSettings | None = None
+        self._pending_preview_reason = "settings"
+        self._session_started = time.monotonic()
+        self._counters: Counter[str] = Counter()
+        self._playback_started_at: float | None = None
+        self._playback_frames_shown = 0
+        self._playback_intervals = RollingStats(window=60)
+        self._playback_last_frame_at: float | None = None
+        self._playback_video_counters = (0, 0)
+        self._hud_visible = False
         self._ffmpeg_probe: FfmpegProbe | None = None
         self._export_controller: ExportController | None = None
         self._export_backend_label = ""
@@ -453,7 +472,15 @@ class MainWindow(QMainWindow):
         self._add_action(playback_menu, "Marcar inicio do corte", self._mark_clip_start, "I")
         self._add_action(playback_menu, "Marcar fim do corte", self._mark_clip_end, "O")
 
+        view_menu = menu_bar.addMenu("Exibir")
+        self.hud_action = QAction("Mostrar metricas no preview", self)
+        self.hud_action.setCheckable(True)
+        self.hud_action.setShortcut("Ctrl+M")
+        self.hud_action.toggled.connect(self._toggle_hud)
+        view_menu.addAction(self.hud_action)
+
         help_menu = menu_bar.addMenu("Ajuda")
+        self._add_action(help_menu, "Abrir pasta de logs", self._open_log_folder)
         self._add_action(help_menu, "Sobre", self._show_about_dialog)
 
     def _add_action(
@@ -814,9 +841,11 @@ class MainWindow(QMainWindow):
 
     def _open_video(self, path: Path) -> None:
         self._stop_playback()
+        opened_at = time.perf_counter()
         try:
             video = VideoSource(path)
-        except VideoOpenError:
+        except VideoOpenError as error:
+            log_event(LOG, "video.open_failed", level=logging.WARNING, name=path.name, error=str(error))
             QMessageBox.critical(self, "Erro", "Nao foi possivel abrir o video selecionado.")
             return
         if self.video is not None:
@@ -830,6 +859,18 @@ class MainWindow(QMainWindow):
         self.fps = video.fps
         width, height = video.size
         self.source_size = (width, height)
+        self._last_logged_settings = None  # next preview logs a full settings.snapshot for this video
+        log_event(
+            LOG,
+            "video.open",
+            name=path.name,
+            width=width,
+            height=height,
+            fps=round(self.fps, 3),
+            frame_count=self.frame_count,
+            codec=video.codec,
+            open_ms=round((time.perf_counter() - opened_at) * 1000.0, 1),
+        )
         self.preview.set_display_reference_size(width, height)
         self.current_frame_index = 0
         self.clip_start_frame = 0
@@ -868,13 +909,23 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Nao foi possivel carregar esse frame.")
             return
 
+        playing = self.playback_timer.isActive()
+        log_event(
+            LOG,
+            "frame.decode",
+            level=logging.DEBUG,
+            index=frame_index,
+            decode_ms=round(self.video.last_decode_ms, 2),
+            sequential=self.video.last_read_was_sequential,
+            playing=playing,
+        )
         self.current_frame_index = frame_index
         self.current_frame = frame
         self.frame_label.setText(f"Frame {frame_index + 1} / {self.frame_count}")
         self._update_denoise_controls_state()
         self._update_stabilization_controls_state()
         self._update_stabilization_info_label()
-        self._schedule_preview_refresh(immediate=True)
+        self._schedule_preview_refresh(immediate=True, reason="playback" if playing else "scrub")
 
     # --- transport -------------------------------------------------------------------------
     def _go_to_first_frame(self) -> None:
@@ -917,6 +968,19 @@ class MainWindow(QMainWindow):
             return
 
         self.play_button.setText("⏸")
+        self._playback_started_at = time.monotonic()
+        self._playback_frames_shown = 0
+        self._playback_intervals = RollingStats(window=60)
+        self._playback_last_frame_at = None
+        self._playback_video_counters = (self.video.seeks, self.video.sequential_reads) if self.video else (0, 0)
+        log_event(
+            LOG,
+            "playback.start",
+            frame=current_frame,
+            end_frame=self.playback_end_frame,
+            interval_ms=self._playback_interval_ms(),
+            frame_skip=int(self.preview_frame_skip_combo.currentData() or 0),
+        )
         self.playback_timer.start(self._playback_interval_ms())
 
     def _stop_playback(self) -> None:
@@ -925,7 +989,26 @@ class MainWindow(QMainWindow):
             self.playback_timer.stop()
         self.play_button.setText("⏵")
         if was_active:
+            self._log_playback_stop()
             self._schedule_filter_thumbnails_refresh()
+            self._update_hud()
+
+    def _log_playback_stop(self) -> None:
+        seconds = time.monotonic() - self._playback_started_at if self._playback_started_at else 0.0
+        seeks_before, sequential_before = self._playback_video_counters
+        fields: dict[str, Any] = {
+            "seconds": round(seconds, 2),
+            "frames_shown": self._playback_frames_shown,
+            "effective_fps": round(self._playback_frames_shown / seconds, 2) if seconds > 0 else None,
+            "dropped_total": self._preview_controller.mailbox.dropped,
+        }
+        if self.video is not None:
+            fields["seeks"] = self.video.seeks - seeks_before
+            fields["sequential_reads"] = self.video.sequential_reads - sequential_before
+            fields["decode_ms"] = self.video.decode_stats.summary()
+        self._counters["playback_frames"] += self._playback_frames_shown
+        log_event(LOG, "playback.stop", **fields)
+        self._playback_started_at = None
 
     def _advance_playback_frame(self) -> None:
         if self.frame_slider.value() >= self.playback_end_frame:
@@ -942,12 +1025,14 @@ class MainWindow(QMainWindow):
     def _mark_clip_start(self) -> None:
         self.clip_start_frame = self.current_frame_index
         self.clip_end_frame = max(self.clip_end_frame, self.clip_start_frame)
+        log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="start")
         self._update_frame_slider_markers()
         self._update_range_label()
 
     def _mark_clip_end(self) -> None:
         self.clip_end_frame = self.current_frame_index
         self.clip_start_frame = min(self.clip_start_frame, self.clip_end_frame)
+        log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="end")
         self._update_frame_slider_markers()
         self._update_range_label()
 
@@ -992,6 +1077,7 @@ class MainWindow(QMainWindow):
     def _handle_preview_zoom_changed(self, _index: int) -> None:
         zoom_percent = int(self.preview_zoom_combo.currentData() or 100)
         self.preview.set_zoom_factor(zoom_percent / 100.0)
+        log_event(LOG, "ui.preview_zoom", percent=zoom_percent)
         current_index = self.preview_zoom_combo.currentIndex()
         self.preview_zoom_out_button.setEnabled(current_index > 0)
         self.preview_zoom_in_button.setEnabled(current_index < self.preview_zoom_combo.count() - 1)
@@ -999,7 +1085,8 @@ class MainWindow(QMainWindow):
     def _handle_preview_render_mode_changed(self, _index: int) -> None:
         self.preview.set_render_quality(self._preview_render_mode() is not PreviewRenderMode.FAST)
         self._stabilization_epoch += 1
-        self._schedule_preview_refresh(immediate=True)
+        log_event(LOG, "ui.render_mode", mode=self._preview_render_mode().value)
+        self._schedule_preview_refresh(immediate=True, reason="mode")
 
     def _handle_preview_frame_skip_changed(self, _index: int) -> None:
         if self.playback_timer.isActive():
@@ -1021,7 +1108,8 @@ class MainWindow(QMainWindow):
             return min(1.0, scale_factor)
         return 1.0
 
-    def _schedule_preview_refresh(self, *, immediate: bool = False) -> None:
+    def _schedule_preview_refresh(self, *, immediate: bool = False, reason: str = "settings") -> None:
+        self._pending_preview_reason = reason
         if immediate:
             self._preview_refresh_timer.stop()
             self._refresh_preview_impl()
@@ -1036,7 +1124,8 @@ class MainWindow(QMainWindow):
     def _filters_tab_visible(self) -> bool:
         return self.settings_tabs.currentIndex() == self._filters_tab_index
 
-    def _handle_tab_changed(self, _index: int) -> None:
+    def _handle_tab_changed(self, index: int) -> None:
+        log_event(LOG, "ui.tab", tab=self.settings_tabs.tabText(index))
         if self._filters_tab_visible():
             self._schedule_filter_thumbnails_refresh()
 
@@ -1046,6 +1135,7 @@ class MainWindow(QMainWindow):
             return
 
         settings = self._current_render_settings()
+        self._log_settings(settings)
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
         self._sync_stabilization_preview()
@@ -1066,8 +1156,20 @@ class MainWindow(QMainWindow):
                 size_limit=PREVIEW_SIZE_LIMIT.get(self._preview_render_mode()),
                 stabilization_reference=self.stabilization_reference_frame,
                 stabilization_epoch=self._stabilization_epoch,
+                reason=self._pending_preview_reason,
             )
         )
+        self._pending_preview_reason = "settings"
+
+    def _log_settings(self, settings: RenderSettings) -> None:
+        """Full snapshot after opening a video; afterwards only the fields that changed."""
+        if self._last_logged_settings is None:
+            log_event(LOG, "settings.snapshot", settings=diff_settings(None, settings))
+        else:
+            changes = diff_settings(self._last_logged_settings, settings)
+            if changes:
+                log_event(LOG, "settings.change", changes=changes, reason=self._pending_preview_reason)
+        self._last_logged_settings = settings
 
     @Slot(object)
     def _on_preview_ready(self, images: PreviewImages) -> None:
@@ -1075,7 +1177,16 @@ class MainWindow(QMainWindow):
             return  # stale: a newer request already landed (or the video changed)
         self._applied_preview_generation = images.generation
         self.last_preview_render_ms = images.elapsed_ms
+        self._last_preview = images
+        self._counters["renders"] += 1
+        if images.reason == "playback":
+            now = time.perf_counter()
+            if self._playback_last_frame_at is not None:
+                self._playback_intervals.add((now - self._playback_last_frame_at) * 1000.0)
+            self._playback_last_frame_at = now
+            self._playback_frames_shown += 1
         self.preview.set_images(images.before, images.after)
+        self._update_hud()
         self._schedule_filter_thumbnails_refresh()
 
     def _discard_pending_previews(self) -> None:
@@ -1120,6 +1231,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_render_failed(self, message: str) -> None:
+        self._counters["render_errors"] += 1
         self.status_label.setText(f"Falha ao renderizar o preview: {message}")
 
     def _thumbnail_source_frame(self, frame: np.ndarray) -> np.ndarray:
@@ -1172,6 +1284,7 @@ class MainWindow(QMainWindow):
             self._schedule_preview_refresh()
             return
         self.active_preset_settings = preset
+        log_event(LOG, "ui.preset", preset=self.preset_combo.itemText(index))
         self._apply_settings_to_controls(preset)
         self._schedule_preview_refresh()
         if self.current_frame is not None:
@@ -1647,6 +1760,9 @@ class MainWindow(QMainWindow):
             self._export_controller.deleteLater()
             self._export_controller = None
         self._end_export_ui()
+        self._counters["exports"] += 1
+        if not result.success and not result.cancelled:
+            self._counters["export_failures"] += 1
 
         if result.success:
             self.progress_bar.setValue(100)
@@ -1673,6 +1789,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._stop_playback()
+        self._log_session_summary()
         if self._export_controller is not None:
             self._export_controller.stop()
             self._export_controller = None
@@ -1691,6 +1808,73 @@ class MainWindow(QMainWindow):
             button.blockSignals(True)
             button.setChecked(checked)
             button.blockSignals(False)
+
+    def _toggle_hud(self, checked: bool) -> None:
+        self._hud_visible = checked
+        self.preview.set_hud_visible(checked)
+        log_event(LOG, "ui.hud", visible=checked)
+        self._update_hud()
+
+    def _playback_fps(self) -> float | None:
+        if len(self._playback_intervals) < 2 or self._playback_intervals.mean <= 0:
+            return None
+        return 1000.0 / self._playback_intervals.mean
+
+    def _update_hud(self) -> None:
+        """Compact metrics box drawn over the preview (toggle with Ctrl+M)."""
+        if not self._hud_visible:
+            return
+        lines: list[str] = []
+        images = self._last_preview
+        trace: dict[str, object] = images.trace if images is not None else {}
+        stages: dict[str, float] = trace.get("stages", {})  # type: ignore[assignment]
+        if images is not None:
+            breakdown = " ".join(f"{name}={value:.0f}" for name, value in stages.items() if "." not in name)
+            lines.append(f"render {images.elapsed_ms:.0f} ms  {breakdown}")
+            queue = f"fila {images.queue_wait_ms:.0f} ms  descartados {self._preview_controller.mailbox.dropped}"
+            if "filters.denoise" in stages:
+                queue = f"denoise {stages['filters.denoise']:.0f} ms  {queue}"
+            lines.append(queue)
+            if "stabilization.result" in trace:
+                detail = f"  inliers {trace['stabilization.inliers']}" if "stabilization.inliers" in trace else ""
+                lines.append(
+                    f"estab {trace.get('stabilization.mode')} -> {trace.get('stabilization.estimator')} "
+                    f"-> {trace['stabilization.result']}{detail}"
+                )
+        if self.video is not None:
+            fps = self._playback_fps()
+            playback = f"  playback {fps:.1f} fps" if fps else ""
+            lines.append(
+                f"decode {self.video.last_decode_ms:.1f} ms (med {self.video.decode_stats.mean:.1f})  "
+                f"seeks {self.video.seeks}  seq {self.video.sequential_reads}{playback}"
+            )
+        backend = str(trace.get("filters.backend", self._backend.label))
+        shape_in = trace.get("input_shape")
+        shape_out = trace.get("output_shape")
+        shapes = f"  {shape_in[1]}x{shape_in[0]} -> {shape_out[1]}x{shape_out[0]}" if shape_in and shape_out else ""  # type: ignore[index]
+        lines.append(f"{backend}  {self.preview_render_mode_combo.currentText()}{shapes}")
+        self.preview.set_hud_lines(lines)
+
+    def _open_log_folder(self) -> None:
+        session = current_session()
+        if session is None:
+            QMessageBox.information(self, "Logs", "O logging nao foi inicializado nesta sessao.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(session.log_path.parent)))
+
+    def _log_session_summary(self) -> None:
+        log_event(
+            LOG,
+            "session.summary",
+            seconds=round(time.monotonic() - self._session_started, 1),
+            renders=self._counters["renders"],
+            dropped=self._preview_controller.mailbox.dropped,
+            playback_frames=self._counters["playback_frames"],
+            exports=self._counters["exports"],
+            export_failures=self._counters["export_failures"],
+            render_errors=self._counters["render_errors"],
+            video=self.video_path.name if self.video_path else None,
+        )
 
     def _show_about_dialog(self) -> None:
         QMessageBox.information(
