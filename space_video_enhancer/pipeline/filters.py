@@ -15,7 +15,8 @@ import cv2
 import numpy as np
 
 from space_video_enhancer.pipeline.denoise import estimate_denoise_strengths
-from space_video_enhancer.settings import DenoiseMode, FilterSettings, NormalizedRect
+from space_video_enhancer.pipeline.grade import GradeTables, apply_hue_bands, apply_white_balance, build_grade_tables
+from space_video_enhancer.settings import ColorGradeSettings, DenoiseMode, FilterSettings, NormalizedRect
 from space_video_enhancer.telemetry import trace as tracing
 
 MANUAL_DENOISE_DIVISOR = 7.5
@@ -50,6 +51,8 @@ class ProcessingContext:
     """Per-channel (B, G, R) table for ``temperature_shift``; ``None`` when neutral."""
     sharpen_amount: float
     scale_factor: float
+    grade: GradeTables | None = None
+    """White balance and hue-band tables; ``None`` when the grade settings are neutral."""
 
 
 def gamma_value(slider_value: int) -> float:
@@ -98,6 +101,7 @@ def build_processing_context(
     settings: FilterSettings,
     reference_frame: np.ndarray | None = None,
     sample_rect: NormalizedRect | None = None,
+    grade: ColorGradeSettings | None = None,
 ) -> ProcessingContext:
     denoise_strength: float | None = None
     denoise_color_strength: float | None = None
@@ -145,6 +149,7 @@ def build_processing_context(
         temperature_lookup_table=temperature_lookup_table(shift),
         sharpen_amount=sharpen_amount,
         scale_factor=settings.scale_factor,
+        grade=build_grade_tables(grade) if grade is not None else None,
     )
 
 
@@ -233,11 +238,13 @@ def apply_chain(image: object, context: ProcessingContext) -> object:
                 context.denoise_template_window,
                 context.denoise_search_window,
             )
+    result = apply_white_balance(result, context.grade)  # gains belong before the tonal curve
     result = cv2.convertScaleAbs(result, alpha=context.contrast_alpha, beta=context.brightness_beta)
     if context.gamma_lookup_table is not None:
         result = cv2.LUT(result, context.gamma_lookup_table)
     result = apply_saturation(result, context.saturation_lookup_table)
     result = apply_temperature(result, context.temperature_lookup_table)
+    result = apply_hue_bands(result, context.grade)
     if context.sharpen_amount > 0:
         blurred = cv2.GaussianBlur(result, (0, 0), sigmaX=SHARPEN_SIGMA)
         result = cv2.addWeighted(result, 1.0 + context.sharpen_amount, blurred, -context.sharpen_amount, 0)

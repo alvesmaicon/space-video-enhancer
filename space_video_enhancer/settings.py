@@ -272,6 +272,56 @@ class StabilizationSettings:
         )
 
 
+HUE_BAND_NAMES = ("red", "orange", "yellow", "green", "cyan", "blue", "purple", "magenta")
+HUE_BAND_CENTERS_DEG = (0, 30, 60, 120, 180, 240, 280, 320)
+HUE_SHIFT_LIMIT_DEG = 30
+BAND_SATURATION_LIMIT = 100
+BAND_LUMINANCE_LIMIT = 50
+WHITE_BALANCE_GAIN_MIN = 0.5
+WHITE_BALANCE_GAIN_MAX = 2.0
+NEUTRAL_GAINS = (1.0, 1.0, 1.0)
+DEFAULT_WHITE_BALANCE_RECT = NormalizedRect(0.4, 0.4, 0.2, 0.2)
+
+
+@dataclass(frozen=True)
+class HueBandAdjust:
+    """Per-hue-band HSL adjustment: hue shift in degrees, saturation and luminance in percent."""
+
+    hue_shift: int = 0
+    saturation: int = 0
+    luminance: int = 0
+
+    @property
+    def is_neutral(self) -> bool:
+        return self.hue_shift == 0 and self.saturation == 0 and self.luminance == 0
+
+
+DEFAULT_HUE_BANDS: tuple[HueBandAdjust, ...] = tuple(HueBandAdjust() for _name in HUE_BAND_NAMES)
+
+
+@dataclass(frozen=True)
+class ColorGradeSettings:
+    """White balance (per-channel gains + green/magenta tint) and the per-hue-band adjustments."""
+
+    tint: int = 50
+    """0-100, 50 neutral: below pulls toward green, above toward magenta."""
+    white_balance_gains: tuple[float, float, float] = NEUTRAL_GAINS
+    """B, G, R multipliers, e.g. from :func:`pipeline.grade.neutral_gains` on a gray region."""
+    bands: tuple[HueBandAdjust, ...] = DEFAULT_HUE_BANDS
+
+    @property
+    def has_white_balance(self) -> bool:
+        return self.tint != 50 or any(abs(gain - 1.0) > 1e-3 for gain in self.white_balance_gains)
+
+    @property
+    def has_hue_bands(self) -> bool:
+        return any(not band.is_neutral for band in self.bands)
+
+    @property
+    def is_neutral(self) -> bool:
+        return not self.has_white_balance and not self.has_hue_bands
+
+
 @dataclass(frozen=True)
 class RenderSettings:
     """Complete, immutable snapshot of what the user configured."""
@@ -282,6 +332,7 @@ class RenderSettings:
     crop: CropSettings = field(default_factory=CropSettings)
     stabilization: StabilizationSettings = field(default_factory=StabilizationSettings)
     denoise_sample_rect: NormalizedRect = DEFAULT_DENOISE_SAMPLE_RECT
+    grade: ColorGradeSettings = field(default_factory=ColorGradeSettings)
 
 
 def clamp_unit(value: float) -> float:

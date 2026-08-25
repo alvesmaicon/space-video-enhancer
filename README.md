@@ -65,7 +65,7 @@ space_video_enhancer/
     worker.py              # adaptador QThread com sinais de progresso/termino
   ui/
     main_window.py         # orquestra toolbar, splitter, status bar e abas; produz RenderSettings; nao processa imagem
-    tabs/                  # uma classe por aba: Cor, Filtros, Estabilizar, Geometria, Ruido, Exportar
+    tabs/                  # uma classe por aba: Cor, HSL, Filtros, Estabilizar, Geometria, Ruido, Exportar
     preview_worker.py      # QThread que decodifica e renderiza preview e miniaturas; a UI nunca bloqueia
     widgets/               # ComparePreview (+ SelectionOverlay), TransportBar, StatusPanel, LabeledSlider, FrameRangeSlider
     theme.qss              # estilo (icones em ui/icons/)
@@ -86,6 +86,7 @@ Regras da arquitetura:
 - Zoom do preview: "Ajustar" (padrao) preenche a area disponivel; os percentuais sao pixels do frame de saida por pixel logico da tela (100% = 1:1). Ctrl+0 ajusta, Ctrl++/Ctrl+- mudam de nivel.
 - Teclado: Espaco, Home/End, setas e I/O controlam a reproducao e o corte, mas so quando o widget focado nao usa a tecla (um slider focado mantem as setas, um botao focado mantem o Espaco). Clicar no preview da o foco a ele; abrir um video tambem.
 - Overlays: o crop aparece sempre que estiver ativo, mas so e editavel na aba Geometria; a amostra de ruido e o ponto focal aparecem apenas nas abas Ruido e Estabilizar, editaveis direto no preview (nao existe modo "editar").
+- Cores (aba HSL, `pipeline/grade.py`): balanco de branco por ganhos B/G/R (calculados de uma regiao que deveria ser cinza — retangulo roxo no preview — ou do frame inteiro, gray world) mais tint verde/magenta, aplicados antes da curva tonal; e ajustes de matiz/saturacao/luminancia por oito faixas de matiz interpoladas linearmente no circulo de cores (hue vs hue / sat / lum). Tudo vira tabelas (`cv2.LUT`) resolvidas uma vez por `ProcessingContext`; os ganhos ficam gravados nas settings, entao a exportacao usa exatamente o que o preview mostra.
 
 ## Desenvolvimento
 
@@ -135,7 +136,7 @@ print(pd.json_normalize(renders.stages).describe())
 - seleciona um video local e navega pelos frames com slider, botoes de transporte e reproducao quadro a quadro
 - zoom do preview por botoes e percentual, com modos de qualidade (alta, balanceado, rapido) e pulo de frames na reproducao
 - comparacao antes/depois com divisor arrastavel
-- abas tematicas: cor e detalhe, filtros (presets com miniaturas do frame atual), estabilizacao, geometria, ruido e midia
+- abas tematicas: cor e detalhe, HSL (balanco de branco e ajuste por cor), filtros (presets com miniaturas do frame atual), estabilizacao, geometria, ruido e midia
 - presets de melhoria e reset por slider para o valor do preset ativo
 - denoise desativado, manual, auto ou por amostra escolhida no preview; nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
 - estabilizacao por translacao, similaridade, perspectiva, camera lock por regiao focal ou hibrida, com intensidade, suavizacao temporal, crop automatico e zoom out

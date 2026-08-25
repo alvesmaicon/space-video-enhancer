@@ -40,6 +40,7 @@ from space_video_enhancer.export.ffmpeg import FfmpegProbe, find_ffmpeg, resolve
 from space_video_enhancer.export.job import ExportRequest, ExportResult
 from space_video_enhancer.export.worker import ExportController
 from space_video_enhancer.pipeline.filters import OpenCLBackend
+from space_video_enhancer.pipeline.grade import neutral_gains
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS
 from space_video_enhancer.pipeline.preview import PreviewRequest, ThumbnailRequest
 from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
@@ -48,6 +49,8 @@ from space_video_enhancer.settings import (
     DEFAULT_DENOISE_SAMPLE_RECT,
     DEFAULT_FILTER_SETTINGS,
     DEFAULT_STABILIZATION_RECT,
+    DEFAULT_WHITE_BALANCE_RECT,
+    NEUTRAL_GAINS,
     CropSettings,
     DenoiseMode,
     FilterSettings,
@@ -67,6 +70,7 @@ from space_video_enhancer.ui.tabs.color import ColorTab
 from space_video_enhancer.ui.tabs.export import ExportTab
 from space_video_enhancer.ui.tabs.filters import THUMBNAIL_SIZE, FiltersTab
 from space_video_enhancer.ui.tabs.geometry import GeometryTab
+from space_video_enhancer.ui.tabs.grade import ColorGradeTab
 from space_video_enhancer.ui.tabs.noise import NoiseTab
 from space_video_enhancer.ui.tabs.stabilization import StabilizationTab
 from space_video_enhancer.ui.theme import load_stylesheet
@@ -128,6 +132,8 @@ class MainWindow(QMainWindow):
         self.active_preset_settings: FilterSettings = DEFAULT_FILTER_SETTINGS
         self.crop_rect_norm = norm_to_qrect(DEFAULT_CROP_RECT)
         self.denoise_sample_rect_norm = norm_to_qrect(DEFAULT_DENOISE_SAMPLE_RECT)
+        self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
+        self.white_balance_gains: tuple[float, float, float] = NEUTRAL_GAINS
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
         self.stabilization_reference_frame: np.ndarray | None = None
         self.stabilization_reference_frame_index = 0
@@ -204,6 +210,7 @@ class MainWindow(QMainWindow):
         self.status = StatusPanel()
 
         self.color_tab = ColorTab()
+        self.grade_tab = ColorGradeTab()
         self.filters_tab = FiltersTab()
         self.stabilization_tab = StabilizationTab()
         self.geometry_tab = GeometryTab()
@@ -211,6 +218,7 @@ class MainWindow(QMainWindow):
         self.export_tab = ExportTab()
         self._tabs: tuple[tuple[str, TabPage], ...] = (
             ("Cor", self.color_tab),
+            ("HSL", self.grade_tab),
             ("Filtros", self.filters_tab),
             ("Estabilizar", self.stabilization_tab),
             ("Geometria", self.geometry_tab),
@@ -419,6 +427,7 @@ class MainWindow(QMainWindow):
         self.preview.cropChanged.connect(self._handle_preview_crop_changed)
         self.preview.sampleChanged.connect(self._handle_preview_sample_changed)
         self.preview.stabilizationChanged.connect(self._handle_preview_stabilization_changed)
+        self.preview.whiteBalanceChanged.connect(self._handle_preview_white_balance_changed)
         self.preview.openRequested.connect(self._select_video)
 
         self.settings_tabs.currentChanged.connect(self._handle_tab_changed)
@@ -440,6 +449,10 @@ class MainWindow(QMainWindow):
         self.color_tab.presetChanged.connect(self._handle_preset_changed)
         self.color_tab.valueChanged.connect(self._handle_filter_control_change)
         self.color_tab.resetRequested.connect(self._reset_slider_to_preset)
+        self.grade_tab.valueChanged.connect(self._handle_grade_change)
+        self.grade_tab.neutralizeRequested.connect(self._neutralize_white_balance)
+        self.grade_tab.gainsResetRequested.connect(self._reset_white_balance_gains)
+        self.grade_tab.regionResetRequested.connect(self._reset_white_balance_rect)
         self.filters_tab.filterSelected.connect(self._handle_image_filter_changed)
         self.filters_tab.intensityChanged.connect(self._handle_image_filter_changed)
         self.stabilization_tab.modeChanged.connect(self._handle_stabilization_mode_changed)
@@ -506,6 +519,7 @@ class MainWindow(QMainWindow):
             crop=self._current_crop(),
             stabilization=self._current_stabilization(),
             denoise_sample_rect=qrect_to_norm(self.denoise_sample_rect_norm),
+            grade=self.grade_tab.settings(self.white_balance_gains),
         )
 
     def _preview_render_mode(self) -> PreviewRenderMode:
@@ -563,6 +577,9 @@ class MainWindow(QMainWindow):
         self.crop_rect_norm = self._default_crop_rect(self._normalized_crop_aspect_ratio())
         self.denoise_sample_rect_norm = norm_to_qrect(DEFAULT_DENOISE_SAMPLE_RECT)
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
+        self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
+        self.white_balance_gains = NEUTRAL_GAINS
+        self.grade_tab.set_gains(NEUTRAL_GAINS)
         self.stabilization_reference_frame = None
         self.stabilization_reference_frame_index = 0
         self._stabilization_epoch += 1
@@ -576,6 +593,8 @@ class MainWindow(QMainWindow):
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
         self._sync_stabilization_preview()
+        self._sync_white_balance_preview()
+        self._update_white_balance_info()
         self._update_crop_info_label()
         self._update_stabilization_info_label()
         self.status.show_message(
@@ -841,6 +860,7 @@ class MainWindow(QMainWindow):
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
         self._sync_stabilization_preview()
+        self._sync_white_balance_preview()
 
     def _refresh_preview_impl(self) -> None:
         """Snapshot the widgets and ask the render thread for the current frame (latest request wins)."""
@@ -1081,6 +1101,54 @@ class MainWindow(QMainWindow):
         self.denoise_sample_rect_norm = QRectF(rect)
         self._sync_denoise_sample_preview()
         self._update_denoise_sample_info_label()
+        self._schedule_preview_refresh()
+
+    # --- white balance / HSL ---------------------------------------------------------------
+    def _handle_grade_change(self) -> None:
+        self._schedule_preview_refresh()
+
+    def _handle_preview_white_balance_changed(self, rect: QRectF) -> None:
+        self.white_balance_rect_norm = QRectF(rect)
+        self._sync_white_balance_preview()
+        self._update_white_balance_info()
+
+    def _reset_white_balance_rect(self) -> None:
+        self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
+        self._sync_white_balance_preview()
+        self._update_white_balance_info()
+
+    def _sync_white_balance_preview(self) -> None:
+        enabled = self.frame_count > 0 and self._tab_is_active(self.grade_tab)
+        self.preview.set_white_balance_state(enabled, self.white_balance_rect_norm, editing=True)
+
+    def _update_white_balance_info(self) -> None:
+        if self.frame_count <= 0:
+            self.grade_tab.set_region_info("Abra um vídeo para escolher a região de cinza.")
+            return
+        pixels = qrect_to_norm(self.white_balance_rect_norm).to_pixels(*self.source_size)
+        size = f"{pixels[2]}x{pixels[3]} px" if pixels is not None else ""
+        self.grade_tab.set_region_info(
+            f"Região de cinza: {size} — arraste o retângulo roxo no preview sobre algo que deveria ser cinza "
+            "ou branco e clique em Neutralizar."
+        )
+
+    def _neutralize_white_balance(self, whole_frame: bool) -> None:
+        """One-off: read the decoded frame's region and turn it into channel gains (stored in the settings)."""
+        if self.current_frame is None:
+            self.status.show_message("Abra um vídeo e aguarde o primeiro render para neutralizar as cores.")
+            return
+        rect = None if whole_frame else qrect_to_norm(self.white_balance_rect_norm)
+        gains = neutral_gains(self.current_frame, rect)
+        self._set_white_balance_gains(gains)
+        log_event(LOG, "ui.white_balance", source="frame" if whole_frame else "region", gains=list(gains))
+        self.status.show_message(f"Balanço de branco: ganhos B {gains[0]:.2f} · G {gains[1]:.2f} · R {gains[2]:.2f}.")
+
+    def _reset_white_balance_gains(self) -> None:
+        self._set_white_balance_gains(NEUTRAL_GAINS)
+
+    def _set_white_balance_gains(self, gains: tuple[float, float, float]) -> None:
+        self.white_balance_gains = gains
+        self.grade_tab.set_gains(gains)
         self._schedule_preview_refresh()
 
     def _reset_denoise_sample_rect(self) -> None:

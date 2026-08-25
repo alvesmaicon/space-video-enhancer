@@ -144,6 +144,15 @@ FOCUS_STYLE = OverlayStyle(
     label_color=QColor("#166534"),
     dashed=True,
 )
+WHITE_BALANCE_STYLE = OverlayStyle(
+    outline_active=QColor("#a21caf"),
+    outline_idle=QColor("#e879f9"),
+    handle=QColor("#a21caf"),
+    fill=QColor(162, 28, 175, 30),
+    label="Cinza de referência",
+    label_color=QColor("#86198f"),
+    dashed=True,
+)
 
 
 class SelectionOverlay:
@@ -300,6 +309,7 @@ class ComparePreview(QWidget):
     cropChanged = Signal(QRectF)
     sampleChanged = Signal(QRectF)
     stabilizationChanged = Signal(QRectF)
+    whiteBalanceChanged = Signal(QRectF)
     openRequested = Signal()
     """The empty-state "Abrir vídeo" button was clicked."""
 
@@ -320,8 +330,11 @@ class ComparePreview(QWidget):
         self.crop = SelectionOverlay(CROP_STYLE, QRectF(0.1, 0.1, 0.8, 0.8), self.cropChanged.emit)
         self.sample = SelectionOverlay(SAMPLE_STYLE, QRectF(0.33, 0.33, 0.34, 0.34), self.sampleChanged.emit)
         self.focus = SelectionOverlay(FOCUS_STYLE, QRectF(0.4, 0.3, 0.2, 0.2), self.stabilizationChanged.emit)
-        # Hit-testing priority: focus region, then noise sample, then crop.
-        self._overlays = (self.focus, self.sample, self.crop)
+        self.white_balance = SelectionOverlay(
+            WHITE_BALANCE_STYLE, QRectF(0.4, 0.4, 0.2, 0.2), self.whiteBalanceChanged.emit
+        )
+        # Hit-testing priority: focus region, gray reference, noise sample, then crop.
+        self._overlays = (self.focus, self.white_balance, self.sample, self.crop)
 
         self.open_button = QPushButton(OPEN_BUTTON_TEXT, self)
         self.open_button.setObjectName("previewOpenButton")
@@ -429,6 +442,10 @@ class ComparePreview(QWidget):
         self.focus.set_state(enabled, stabilization_rect_norm, editing)
         self.update()
 
+    def set_white_balance_state(self, enabled: bool, rect_norm: QRectF, editing: bool) -> None:
+        self.white_balance.set_state(enabled, rect_norm, editing)
+        self.update()
+
     # --- painting ------------------------------------------------------------------------
     def paintEvent(self, event: QPaintEvent) -> None:
         del event
@@ -473,7 +490,7 @@ class ComparePreview(QWidget):
             CAPTION_BACKGROUND,
         )
 
-        for overlay in (self.crop, self.sample, self.focus):
+        for overlay in (self.crop, self.sample, self.focus, self.white_balance):
             if overlay.enabled:
                 overlay.paint(painter, self._image_rect)
 

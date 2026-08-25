@@ -24,6 +24,9 @@ def flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
         key = f"{prefix}{field.name}"
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             flat.update(flatten(value, f"{key}."))
+        elif isinstance(value, (tuple, list)) and any(dataclasses.is_dataclass(item) for item in value):
+            for index, item in enumerate(value):
+                flat.update(flatten(item, f"{key}.{index}."))
         else:
             flat[key] = _plain(value)
     return flat

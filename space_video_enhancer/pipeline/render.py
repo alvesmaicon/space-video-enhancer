@@ -1,6 +1,6 @@
 """The single frame pipeline shared by preview, thumbnails and export.
 
-Order: stabilize -> basic filters (incl. output scale) -> image preset -> geometry -> crop.
+Order: stabilize -> basic filters (white balance, tonal, hue bands, scale) -> image preset -> geometry -> crop.
 Crop is last so the rectangle drawn on the (rotated/flipped) preview means the same
 thing on export.
 
@@ -29,7 +29,7 @@ from space_video_enhancer.telemetry.trace import RenderTrace
 
 def build_context(settings: RenderSettings, reference_frame: np.ndarray | None) -> ProcessingContext:
     """Resolve filter parameters; ``reference_frame`` feeds the auto/sample denoise estimate."""
-    return build_processing_context(settings.filters, reference_frame, settings.denoise_sample_rect)
+    return build_processing_context(settings.filters, reference_frame, settings.denoise_sample_rect, settings.grade)
 
 
 def render_frame(
