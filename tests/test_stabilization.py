@@ -9,6 +9,7 @@ from space_video_enhancer.pipeline.stabilization.estimators import (
     estimate_camera_lock_transform,
     estimate_inter_frame_transform,
     estimate_translation_shift,
+    reference_cache_stats,
 )
 from space_video_enhancer.pipeline.stabilization.stabilize import (
     apply_stabilization,
@@ -203,6 +204,18 @@ def test_camera_lock_maps_frame_onto_reference(textured_frame: np.ndarray, previ
     assert transform[0, 2] == pytest.approx(-SHIFT_LEFT, abs=1.5)
     assert transform[1, 2] == pytest.approx(SHIFT_DOWN, abs=1.5)
     assert transform[0, 0] == pytest.approx(1.0, abs=0.02)
+
+
+def test_camera_lock_reuses_the_reference_features(textured_frame: np.ndarray, previous_frame: np.ndarray) -> None:
+    reference = previous_frame.copy()
+    before = dict(reference_cache_stats)
+    first = estimate_camera_lock_transform(textured_frame, reference, FOCUS)
+    second = estimate_camera_lock_transform(textured_frame, reference, FOCUS)
+    assert first is not None and second is not None and np.array_equal(first, second)
+    assert reference_cache_stats["misses"] == before["misses"] + 1
+    assert reference_cache_stats["hits"] == before["hits"] + 1
+    estimate_camera_lock_transform(textured_frame, previous_frame.copy(), FOCUS)  # another array: computed again
+    assert reference_cache_stats["misses"] == before["misses"] + 2
 
 
 def test_apply_stabilization_keeps_frame_size_and_moves_content(

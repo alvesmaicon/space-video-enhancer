@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import cv2
@@ -62,6 +65,53 @@ TEMPLATE_SEARCH_MARGIN_FACTOR = 1.6
 TEMPLATE_SEARCH_MIN_MARGIN = 32
 TEMPLATE_MIN_SCORE = 0.28
 SEARCH_RECT_MIN_MARGIN = 40
+REFERENCE_CACHE_SIZE = 4
+
+
+@dataclass(frozen=True)
+class ReferenceFeatures:
+    """ORB keypoints of a camera-lock reference inside its focus region, computed once and reused.
+
+    The reference does not change between frames, so detecting its features every frame was
+    ~40% of the camera-lock cost. Entries are keyed by the reference array identity, the focus
+    region in pixels and the analysis scale; the array is kept alive by the entry.
+    """
+
+    frame: np.ndarray
+    gray: np.ndarray
+    points: np.ndarray
+    """``(N, 2)`` float32 keypoint positions in ``gray`` coordinates."""
+    descriptors: np.ndarray | None
+
+
+_reference_cache: OrderedDict[tuple[Any, ...], ReferenceFeatures] = OrderedDict()
+_reference_cache_lock = threading.Lock()
+reference_cache_stats = {"hits": 0, "misses": 0}
+
+
+def reference_features(reference_frame: np.ndarray, reference_pixels: PixelRect, scale: float) -> ReferenceFeatures:
+    key = (id(reference_frame), reference_frame.shape, reference_pixels, round(scale, 6))
+    with _reference_cache_lock:
+        cached = _reference_cache.get(key)
+        if cached is not None and cached.frame is reference_frame:
+            _reference_cache.move_to_end(key)
+            reference_cache_stats["hits"] += 1
+            return cached
+
+    gray = scaled_gray(reference_frame, scale)
+    mask = np.zeros_like(gray, dtype=np.uint8)
+    ref_x, ref_y, ref_w, ref_h = scaled_rect(reference_pixels, scale, gray.shape[1], gray.shape[0])
+    mask[ref_y : ref_y + ref_h, ref_x : ref_x + ref_w] = 255
+    keypoints, descriptors = cv2.ORB_create(**ORB_PARAMS).detectAndCompute(gray, mask)
+    points = np.array([keypoint.pt for keypoint in keypoints], dtype=np.float32).reshape(-1, 2)
+    features = ReferenceFeatures(reference_frame, gray, points, descriptors)
+
+    with _reference_cache_lock:
+        reference_cache_stats["misses"] += 1
+        _reference_cache[key] = features
+        while len(_reference_cache) > REFERENCE_CACHE_SIZE:
+            _reference_cache.popitem(last=False)
+    return features
 
 
 def analysis_gray(frame: np.ndarray) -> tuple[np.ndarray, float]:
@@ -310,23 +360,18 @@ def estimate_camera_lock_transform(
         return None
 
     scale = min(1.0, CAMERA_LOCK_MAX_DIMENSION / max(reference_width, reference_height, current_width, current_height))
-    reference_gray = scaled_gray(reference_frame, scale)
+    reference = reference_features(reference_frame, reference_pixels, scale)
     current_gray = scaled_gray(frame, scale)
-    if reference_gray.size == 0 or current_gray.size == 0:
+    if reference.gray.size == 0 or current_gray.size == 0:
         return None
 
-    reference_mask = np.zeros_like(reference_gray, dtype=np.uint8)
     current_mask = np.zeros_like(current_gray, dtype=np.uint8)
-    ref_x, ref_y, ref_w, ref_h = scaled_rect(reference_pixels, scale, reference_gray.shape[1], reference_gray.shape[0])
     search_rect = expanded_search_rect(current_pixels, current_width, current_height, CAMERA_LOCK_SEARCH_EXPANSION)
     cur_x, cur_y, cur_w, cur_h = scaled_rect(search_rect, scale, current_gray.shape[1], current_gray.shape[0])
-    reference_mask[ref_y : ref_y + ref_h, ref_x : ref_x + ref_w] = 255
     current_mask[cur_y : cur_y + cur_h, cur_x : cur_x + cur_w] = 255
 
     for label, mask in (("orb_masked", current_mask), ("orb_unmasked", None)):
-        transform = camera_lock_feature_transform(
-            reference_gray, current_gray, reference_mask, mask, scale, frame.shape
-        )
+        transform = camera_lock_feature_transform(reference, current_gray, mask, scale, frame.shape)
         if transform is not None:
             note("stabilization.estimator", label)
             return transform
@@ -340,28 +385,22 @@ def estimate_camera_lock_transform(
 
 
 def camera_lock_feature_transform(
-    reference_gray: np.ndarray,
+    reference: ReferenceFeatures,
     current_gray: np.ndarray,
-    reference_mask: np.ndarray,
     current_mask: np.ndarray | None,
     scale: float,
     frame_shape: tuple[int, ...],
 ) -> np.ndarray | None:
-    orb = cv2.ORB_create(**ORB_PARAMS)
-    reference_keypoints, reference_descriptors = orb.detectAndCompute(reference_gray, reference_mask)
-    current_keypoints, current_descriptors = orb.detectAndCompute(current_gray, current_mask)
-    if (
-        reference_descriptors is None
-        or current_descriptors is None
-        or len(reference_keypoints) < ORB_MIN_KEYPOINTS
-        or len(current_keypoints) < ORB_MIN_KEYPOINTS
-    ):
+    if reference.descriptors is None or len(reference.points) < ORB_MIN_KEYPOINTS:
+        return None
+    current_keypoints, current_descriptors = cv2.ORB_create(**ORB_PARAMS).detectAndCompute(current_gray, current_mask)
+    if current_descriptors is None or len(current_keypoints) < ORB_MIN_KEYPOINTS:
         return None
 
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
     good_matches = [
         pair[0]
-        for pair in matcher.knnMatch(reference_descriptors, current_descriptors, k=2)
+        for pair in matcher.knnMatch(reference.descriptors, current_descriptors, k=2)
         if len(pair) >= 2 and pair[0].distance < (ORB_RATIO_TEST * pair[1].distance)
     ]
     note("stabilization.good_matches", len(good_matches))
@@ -370,7 +409,7 @@ def camera_lock_feature_transform(
 
     good_matches.sort(key=lambda match: match.distance)
     good_matches = good_matches[:ORB_MAX_MATCHES]
-    reference_points = np.array([reference_keypoints[match.queryIdx].pt for match in good_matches], dtype=np.float32)
+    reference_points = reference.points[[match.queryIdx for match in good_matches]]
     current_points = np.array([current_keypoints[match.trainIdx].pt for match in good_matches], dtype=np.float32)
     return estimate_similarity_transform(current_points, reference_points, scale, frame_shape)
 
