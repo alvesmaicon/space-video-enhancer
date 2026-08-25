@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "space-video-enhancer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Offline MVP for video enhancement preview and export"
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
   "numpy>=1.26,<3",
@@ -13,8 +14,58 @@ dependencies = [
   "PySide6>=6.8,<7",
 ]
 
-[project.scripts]
-space-video-enhancer = "main:main"
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
 
-[tool.setuptools]
-py-modules = ["main"]
+[project.scripts]
+space-video-enhancer = "space_video_enhancer.app:main"
+
+[tool.setuptools.packages.find]
+include = ["space_video_enhancer*"]
+
+[tool.setuptools.package-data]
+"space_video_enhancer.ui" = ["*.qss"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["build", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM", "RUF", "PL"]
+ignore = [
+  "PLR0913",  # many arguments: pipeline functions receive explicit params on purpose
+  "PLR0917",  # many positional arguments: same reason
+  "PLR2004",  # magic values: thresholds live in named constants where it matters
+  "PLR0912",  # too many branches (UI wiring)
+  "PLR0915",  # too many statements (UI wiring)
+  "PLR0911",  # too many return statements
+  "RUF012",   # mutable class attributes on Qt classes
+]
+
+[tool.ruff.lint.per-file-ignores]
+"space_video_enhancer/ui/**" = ["N802", "N803", "N815"]  # Qt naming (paintEvent, valueChanged, ...)
+"tests/**" = ["PLR2004"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+exclude = ["build/", "\\.venv/"]
+
+[[tool.mypy.overrides]]
+module = ["cv2", "cv2.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
