@@ -4,7 +4,17 @@ import cv2
 import numpy as np
 import pytest
 
-from space_video_enhancer.pipeline.filters import OpenCLBackend, apply_basic_filters_cpu, build_processing_context
+from space_video_enhancer.pipeline.filters import (
+    OpenCLBackend,
+    apply_basic_filters,
+    apply_basic_filters_cpu,
+    apply_basic_filters_opencl,
+    apply_saturation,
+    apply_temperature,
+    build_processing_context,
+    saturation_lookup_table,
+    temperature_lookup_table,
+)
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS, apply_image_filter_preset
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.settings import (
@@ -14,6 +24,8 @@ from space_video_enhancer.settings import (
     NormalizedRect,
     RenderSettings,
 )
+from space_video_enhancer.telemetry import trace as tracing
+from space_video_enhancer.telemetry.trace import RenderTrace
 
 
 def test_neutral_settings_are_identity(textured_frame: np.ndarray) -> None:
@@ -100,3 +112,62 @@ def test_opencl_backend_disables_after_failure() -> None:
     assert "fallback" in backend.label
     disabled = OpenCLBackend(enabled=False)
     assert disabled.is_available() is False and disabled.label == "CPU"
+
+
+def _reference_saturation(frame: np.ndarray, saturation: float) -> np.ndarray:
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float64)
+    hsv[:, :, 1] = np.clip(np.rint(hsv[:, :, 1] * saturation), 0, 255)
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def _reference_temperature(frame: np.ndarray, shift: float) -> np.ndarray:
+    adjusted = frame.astype(np.float64)
+    adjusted[:, :, 2] *= 1.0 + (0.22 * shift)
+    adjusted[:, :, 1] *= 1.0 - (0.05 * abs(shift))
+    adjusted[:, :, 0] *= 1.0 - (0.22 * shift)
+    return np.clip(np.rint(adjusted), 0, 255).astype(np.uint8)
+
+
+def test_saturation_and_temperature_lookup_tables_match_the_float_math(textured_frame: np.ndarray) -> None:
+    saturated = apply_saturation(textured_frame, saturation_lookup_table(1.3))
+    assert isinstance(saturated, np.ndarray)
+    assert np.array_equal(saturated, _reference_saturation(textured_frame, 1.3))
+    warmed = apply_temperature(textured_frame, temperature_lookup_table(0.4))
+    assert isinstance(warmed, np.ndarray)
+    assert np.array_equal(warmed, _reference_temperature(textured_frame, 0.4))
+    cooled = apply_temperature(textured_frame, temperature_lookup_table(-0.6))
+    assert isinstance(cooled, np.ndarray)
+    assert np.array_equal(cooled, _reference_temperature(textured_frame, -0.6))
+    assert saturation_lookup_table(1.0) is None and temperature_lookup_table(0.0) is None
+    assert apply_saturation(textured_frame, None) is textured_frame
+
+
+def test_umat_chain_matches_the_cpu_chain(textured_frame: np.ndarray) -> None:
+    context = build_processing_context(
+        FilterSettings(contrast=58, brightness=47, gamma=42, saturation=64, temperature=38, sharpen=30)
+    )
+    cpu = apply_basic_filters_cpu(textured_frame, context)
+    device = apply_basic_filters_opencl(textured_frame, context)  # UMat runs on the CPU when OpenCL is absent
+    assert device.shape == cpu.shape
+    # OpenCL kernels (HSV conversion, blur) round differently by a level here and there; the sharpen
+    # then amplifies that. Identical when OpenCL is absent.
+    difference = np.abs(device.astype(np.int16) - cpu.astype(np.int16))
+    assert difference.mean() < 1.0 and np.percentile(difference, 99) <= 2
+
+
+class _AlwaysAvailableBackend(OpenCLBackend):
+    def is_available(self) -> bool:
+        return True
+
+
+def _backend_note(frame: np.ndarray, settings: FilterSettings) -> str:
+    trace = RenderTrace()
+    with tracing.active(trace):
+        apply_basic_filters(frame, build_processing_context(settings), _AlwaysAvailableBackend())
+    return str(trace.notes["filters.backend"])
+
+
+def test_opencl_is_only_used_when_denoise_is_on(textured_frame: np.ndarray) -> None:
+    assert _backend_note(textured_frame, FilterSettings(saturation=70, sharpen=40)) == "cpu_no_denoise"
+    denoised = FilterSettings(denoise_mode=DenoiseMode.MANUAL, denoise_strength=20, denoise_color_strength=20)
+    assert _backend_note(textured_frame, denoised) == "opencl"

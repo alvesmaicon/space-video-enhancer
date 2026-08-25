@@ -1,4 +1,10 @@
-"""Basic colour/detail chain: denoise, contrast, brightness, gamma, saturation, temperature, sharpen, scale."""
+"""Basic colour/detail chain: denoise, contrast, brightness, gamma, saturation, temperature, sharpen, scale.
+
+Everything after the denoise is lookup tables and OpenCV primitives on ``uint8``, so the same
+:func:`apply_chain` runs on ``np.ndarray`` (CPU) or ``cv2.UMat`` (OpenCL) with a single
+upload/download. OpenCL is only used when NLMeans is on: for the light filters the transfer
+costs more than the work.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +43,11 @@ class ProcessingContext:
     brightness_beta: float
     gamma_lookup_table: np.ndarray | None
     saturation: float
+    saturation_lookup_table: np.ndarray | None
+    """S-channel table for ``saturation``; ``None`` when neutral."""
     temperature_shift: float
+    temperature_lookup_table: np.ndarray | None
+    """Per-channel (B, G, R) table for ``temperature_shift``; ``None`` when neutral."""
     sharpen_amount: float
     scale_factor: float
 
@@ -61,6 +71,27 @@ def gamma_lookup_table(gamma: float) -> np.ndarray | None:
         return None
     levels = np.arange(256, dtype=np.float64) / 255.0
     return np.clip((levels**gamma) * 255.0, 0, 255).astype(np.uint8)
+
+
+def saturation_lookup_table(saturation: float) -> np.ndarray | None:
+    """Table applied to the HSV saturation channel (rounded, not truncated)."""
+    if abs(saturation - 1.0) <= SATURATION_EPSILON:
+        return None
+    return np.clip(np.rint(np.arange(256, dtype=np.float64) * saturation), 0, 255).astype(np.uint8)
+
+
+def temperature_lookup_table(shift: float) -> np.ndarray | None:
+    """``(1, 256, 3)`` table so one ``cv2.LUT`` call scales B, G and R by their own gains."""
+    if abs(shift) < TEMPERATURE_EPSILON:
+        return None
+    gains = (
+        1.0 - (TEMPERATURE_RB_GAIN * shift),
+        1.0 - (TEMPERATURE_G_LOSS * abs(shift)),
+        1.0 + (TEMPERATURE_RB_GAIN * shift),
+    )
+    levels = np.arange(256, dtype=np.float64)
+    table = np.stack([np.clip(np.rint(levels * gain), 0, 255) for gain in gains], axis=1)
+    return table.astype(np.uint8).reshape(1, 256, 3)
 
 
 def build_processing_context(
@@ -95,6 +126,8 @@ def build_processing_context(
         tracing.note("denoise.h", [round(denoise_strength, 2), round(denoise_color_strength or 0.0, 2)])
 
     contrast = 1.0 + ((settings.contrast - 50) / CONTRAST_DIVISOR)
+    saturation = saturation_value(settings.saturation)
+    shift = temperature_shift(settings.temperature)
     brightness = ((settings.brightness - 50) / 50.0) * BRIGHTNESS_RANGE
     sharpen_amount = (settings.sharpen / 100.0) * SHARPEN_MAX_AMOUNT if settings.sharpen > 0 else 0.0
 
@@ -106,8 +139,10 @@ def build_processing_context(
         contrast_alpha=max(CONTRAST_MIN_ALPHA, contrast),
         brightness_beta=brightness,
         gamma_lookup_table=gamma_lookup_table(gamma_value(settings.gamma)),
-        saturation=saturation_value(settings.saturation),
-        temperature_shift=temperature_shift(settings.temperature),
+        saturation=saturation,
+        saturation_lookup_table=saturation_lookup_table(saturation),
+        temperature_shift=shift,
+        temperature_lookup_table=temperature_lookup_table(shift),
         sharpen_amount=sharpen_amount,
         scale_factor=settings.scale_factor,
     )
@@ -171,26 +206,22 @@ class OpenCLBackend:
             return False
 
 
-def apply_saturation(frame: np.ndarray, saturation: float) -> np.ndarray:
-    if abs(saturation - 1.0) <= SATURATION_EPSILON:
-        return frame
-    hsv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv_image[:, :, 1] = np.clip(hsv_image[:, :, 1] * saturation, 0, 255)
-    return cv2.cvtColor(hsv_image.astype(np.uint8), cv2.COLOR_HSV2BGR)
+def apply_saturation(image: object, table: np.ndarray | None) -> object:
+    """Scale the HSV saturation channel through ``table``; works on ``np.ndarray`` or ``cv2.UMat``."""
+    if table is None:
+        return image
+    hue, saturation, value = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2HSV))
+    return cv2.cvtColor(cv2.merge([hue, cv2.LUT(saturation, table), value]), cv2.COLOR_HSV2BGR)
 
 
-def apply_temperature(frame: np.ndarray, shift: float) -> np.ndarray:
-    if abs(shift) < TEMPERATURE_EPSILON:
-        return frame
-    adjusted = frame.astype(np.float32)
-    adjusted[:, :, 2] *= 1.0 + (TEMPERATURE_RB_GAIN * shift)
-    adjusted[:, :, 1] *= 1.0 - (TEMPERATURE_G_LOSS * abs(shift))
-    adjusted[:, :, 0] *= 1.0 - (TEMPERATURE_RB_GAIN * shift)
-    return np.clip(adjusted, 0, 255).astype(np.uint8)
+def apply_temperature(image: object, table: np.ndarray | None) -> object:
+    if table is None:
+        return image
+    return cv2.LUT(image, table)
 
 
-def _denoise_contrast_gamma(image: object, context: ProcessingContext) -> object:
-    """First half of the chain; works on ``np.ndarray`` or ``cv2.UMat``."""
+def apply_chain(image: object, context: ProcessingContext) -> object:
+    """The whole basic chain on one image type (``np.ndarray`` or ``cv2.UMat``)."""
     result = image
     if context.denoise_strength is not None:
         with tracing.stage("filters.denoise"):
@@ -205,12 +236,8 @@ def _denoise_contrast_gamma(image: object, context: ProcessingContext) -> object
     result = cv2.convertScaleAbs(result, alpha=context.contrast_alpha, beta=context.brightness_beta)
     if context.gamma_lookup_table is not None:
         result = cv2.LUT(result, context.gamma_lookup_table)
-    return result
-
-
-def _sharpen_scale(image: object, context: ProcessingContext) -> object:
-    """Last half of the chain; works on ``np.ndarray`` or ``cv2.UMat``."""
-    result = image
+    result = apply_saturation(result, context.saturation_lookup_table)
+    result = apply_temperature(result, context.temperature_lookup_table)
     if context.sharpen_amount > 0:
         blurred = cv2.GaussianBlur(result, (0, 0), sigmaX=SHARPEN_SIGMA)
         result = cv2.addWeighted(result, 1.0 + context.sharpen_amount, blurred, -context.sharpen_amount, 0)
@@ -226,26 +253,16 @@ def _sharpen_scale(image: object, context: ProcessingContext) -> object:
 
 
 def apply_basic_filters_cpu(frame: np.ndarray, context: ProcessingContext) -> np.ndarray:
-    result = _denoise_contrast_gamma(frame.copy(), context)
-    assert isinstance(result, np.ndarray)
-    result = apply_saturation(result, context.saturation)
-    result = apply_temperature(result, context.temperature_shift)
-    result = _sharpen_scale(result, context)
+    result = apply_chain(frame, context)
     assert isinstance(result, np.ndarray)
     return result
 
 
 def apply_basic_filters_opencl(frame: np.ndarray, context: ProcessingContext) -> np.ndarray:
-    gpu_result = _denoise_contrast_gamma(cv2.UMat(frame), context)
-    assert isinstance(gpu_result, cv2.UMat)
-    cpu_result = gpu_result.get()
-    cpu_result = apply_saturation(cpu_result, context.saturation)
-    cpu_result = apply_temperature(cpu_result, context.temperature_shift)
-    if context.sharpen_amount > 0 or context.scale_factor > 1.0:
-        gpu_result = _sharpen_scale(cv2.UMat(cpu_result), context)
-        assert isinstance(gpu_result, cv2.UMat)
-        return gpu_result.get()
-    return cpu_result
+    """One upload, the whole chain on the device, one download."""
+    result = apply_chain(cv2.UMat(frame), context)
+    assert isinstance(result, cv2.UMat)
+    return result.get()
 
 
 def apply_basic_filters(
@@ -254,6 +271,10 @@ def apply_basic_filters(
     backend: OpenCLBackend | None = None,
 ) -> np.ndarray:
     if backend is not None and backend.is_available():
+        if context.denoise_strength is None:
+            # Without NLMeans the upload/download costs more than the whole chain on the CPU.
+            tracing.note("filters.backend", "cpu_no_denoise")
+            return apply_basic_filters_cpu(frame, context)
         try:
             result = apply_basic_filters_opencl(frame, context)
         except cv2.error as error:
