@@ -11,6 +11,7 @@ import numpy as np
 from space_video_enhancer.pipeline.stabilization import transforms
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import NormalizedRect, PixelRect, StabilizationMode
+from space_video_enhancer.telemetry.trace import note
 
 # --- inter-frame analysis -------------------------------------------------------------------
 ANALYSIS_MAX_DIMENSION = 480.0
@@ -134,9 +135,11 @@ def estimate_translation_shift(
         return None
 
     if frame_index is not None and state.last_shift_index == frame_index and isinstance(state.last_shift, tuple):
+        note("stabilization.estimator", "cached")
         return state.last_shift
 
     if state.prev_gray is None or state.breaks_sequence(frame_index):
+        note("stabilization.estimator", "primed" if state.prev_gray is None else "sequence_break")
         state.remember_gray(current_gray, frame_index)
         state.remember_shift(None, frame_index)
         return None
@@ -148,11 +151,17 @@ def estimate_translation_shift(
     if tracked is not None:
         deltas = tracked[1] - tracked[0]
         shift = (-float(np.median(deltas[:, 0])) / scale, -float(np.median(deltas[:, 1])) / scale)
+        note("stabilization.estimator", "lk_translation")
+        note("stabilization.tracked_points", len(tracked[0]))
 
     if shift is None:
         phase_shift, response = cv2.phaseCorrelate(state.prev_gray.astype(np.float32), current_gray.astype(np.float32))
+        note("stabilization.phase_response", round(float(response), 3))
         if response >= PHASE_CORRELATE_MIN_RESPONSE:
             shift = (-float(phase_shift[0]) / scale, -float(phase_shift[1]) / scale)
+            note("stabilization.estimator", "phase_correlate")
+        else:
+            note("stabilization.estimator", "none")
 
     state.remember_gray(current_gray, frame_index)
     state.remember_shift(shift, frame_index)
@@ -175,9 +184,11 @@ def estimate_geometric_transform(
         and state.last_transform_index == frame_index
         and isinstance(state.last_transform, np.ndarray)
     ):
+        note("stabilization.estimator", "cached")
         return state.last_transform
 
     if state.prev_gray is None or state.breaks_sequence(frame_index):
+        note("stabilization.estimator", "primed" if state.prev_gray is None else "sequence_break")
         state.remember_gray(current_gray, frame_index)
         state.remember_transform(None, frame_index)
         return None
@@ -199,8 +210,11 @@ def geometric_transform_from_gray(
         previous_gray, current_gray, GEOMETRIC_GFTT, GEOMETRIC_MIN_FEATURES, GEOMETRIC_MIN_TRACKED, LK_PARAMS
     )
     if tracked is None:
+        note("stabilization.estimator", "none")
         return None
     previous_points, current_points = tracked
+    note("stabilization.tracked_points", len(previous_points))
+    note("stabilization.estimator", "lk_perspective" if mode is StabilizationMode.PERSPECTIVE else "lk_similarity")
 
     if mode is StabilizationMode.PERSPECTIVE:
         perspective = estimate_perspective_transform(current_points, previous_points, scale, frame_shape)
@@ -218,10 +232,16 @@ def estimate_similarity_transform(
     if len(source_points) < SIMILARITY_MIN_POINTS or len(destination_points) < SIMILARITY_MIN_POINTS:
         return None
     transform, inliers = cv2.estimateAffinePartial2D(source_points, destination_points, **SIMILARITY_RANSAC)
-    if transform is None or inliers is None or int(np.count_nonzero(inliers)) < SIMILARITY_MIN_POINTS:
+    inlier_count = 0 if inliers is None else int(np.count_nonzero(inliers))
+    note("stabilization.inliers", inlier_count)
+    if transform is None or inlier_count < SIMILARITY_MIN_POINTS:
+        note("stabilization.rejected", "too_few_inliers")
         return None
     scaled = transforms.rescale_affine(transform, scale)
-    return scaled if transforms.is_reasonable(scaled, frame_shape) else None
+    if not transforms.is_reasonable(scaled, frame_shape):
+        note("stabilization.rejected", "unreasonable_similarity")
+        return None
+    return scaled
 
 
 def estimate_perspective_transform(
@@ -233,10 +253,16 @@ def estimate_perspective_transform(
     if len(source_points) < PERSPECTIVE_MIN_POINTS or len(destination_points) < PERSPECTIVE_MIN_POINTS:
         return None
     transform, inliers = cv2.findHomography(source_points, destination_points, cv2.RANSAC, PERSPECTIVE_RANSAC_THRESHOLD)
-    if transform is None or inliers is None or int(np.count_nonzero(inliers)) < PERSPECTIVE_MIN_POINTS:
+    inlier_count = 0 if inliers is None else int(np.count_nonzero(inliers))
+    note("stabilization.perspective_inliers", inlier_count)
+    if transform is None or inlier_count < PERSPECTIVE_MIN_POINTS:
+        note("stabilization.rejected", "too_few_perspective_inliers")
         return None
     scaled = transforms.rescale_homography(transform, scale)
-    return scaled if transforms.is_reasonable(scaled, frame_shape, allow_perspective=True) else None
+    if not transforms.is_reasonable(scaled, frame_shape, allow_perspective=True):
+        note("stabilization.rejected", "unreasonable_perspective")
+        return None
+    return scaled
 
 
 def estimate_camera_lock_transform(
@@ -266,16 +292,19 @@ def estimate_camera_lock_transform(
     reference_mask[ref_y : ref_y + ref_h, ref_x : ref_x + ref_w] = 255
     current_mask[cur_y : cur_y + cur_h, cur_x : cur_x + cur_w] = 255
 
-    for mask in (current_mask, None):
+    for label, mask in (("orb_masked", current_mask), ("orb_unmasked", None)):
         transform = camera_lock_feature_transform(
             reference_gray, current_gray, reference_mask, mask, scale, frame.shape
         )
         if transform is not None:
+            note("stabilization.estimator", label)
             return transform
 
     shift = estimate_template_shift(frame, reference_frame, focus_rect)
     if shift is None:
+        note("stabilization.estimator", "none")
         return None
+    note("stabilization.estimator", "template_match")
     return transforms.translation_to_affine(shift[0], shift[1])
 
 
@@ -304,6 +333,7 @@ def camera_lock_feature_transform(
         for pair in matcher.knnMatch(reference_descriptors, current_descriptors, k=2)
         if len(pair) >= 2 and pair[0].distance < (ORB_RATIO_TEST * pair[1].distance)
     ]
+    note("stabilization.good_matches", len(good_matches))
     if len(good_matches) < ORB_MIN_GOOD_MATCHES:
         return None
 
@@ -349,6 +379,7 @@ def estimate_template_shift(
         cv2.TM_CCOEFF_NORMED,
     )
     _, max_value, _, max_loc = cv2.minMaxLoc(result)
+    note("stabilization.template_score", round(float(max_value), 3))
     if max_value < TEMPLATE_MIN_SCORE:
         return None
 

@@ -10,6 +10,7 @@ import numpy as np
 
 from space_video_enhancer.pipeline.denoise import estimate_denoise_strengths
 from space_video_enhancer.settings import DenoiseMode, FilterSettings, NormalizedRect
+from space_video_enhancer.telemetry import trace as tracing
 
 MANUAL_DENOISE_DIVISOR = 7.5
 CONTRAST_DIVISOR = 60.0
@@ -89,6 +90,9 @@ def build_processing_context(
         denoise_color_strength = denoise_strength
     if denoise_color_strength is not None and denoise_strength is None:
         denoise_strength = denoise_color_strength
+    tracing.note("denoise.mode", settings.denoise_mode.value)
+    if denoise_strength is not None:
+        tracing.note("denoise.h", [round(denoise_strength, 2), round(denoise_color_strength or 0.0, 2)])
 
     contrast = 1.0 + ((settings.contrast - 50) / CONTRAST_DIVISOR)
     brightness = ((settings.brightness - 50) / 50.0) * BRIGHTNESS_RANGE
@@ -189,14 +193,15 @@ def _denoise_contrast_gamma(image: object, context: ProcessingContext) -> object
     """First half of the chain; works on ``np.ndarray`` or ``cv2.UMat``."""
     result = image
     if context.denoise_strength is not None:
-        result = cv2.fastNlMeansDenoisingColored(
-            result,
-            None,
-            context.denoise_strength,
-            context.denoise_color_strength or context.denoise_strength,
-            context.denoise_template_window,
-            context.denoise_search_window,
-        )
+        with tracing.stage("filters.denoise"):
+            result = cv2.fastNlMeansDenoisingColored(
+                result,
+                None,
+                context.denoise_strength,
+                context.denoise_color_strength or context.denoise_strength,
+                context.denoise_template_window,
+                context.denoise_search_window,
+            )
     result = cv2.convertScaleAbs(result, alpha=context.contrast_alpha, beta=context.brightness_beta)
     if context.gamma_lookup_table is not None:
         result = cv2.LUT(result, context.gamma_lookup_table)
@@ -250,7 +255,12 @@ def apply_basic_filters(
 ) -> np.ndarray:
     if backend is not None and backend.is_available():
         try:
-            return apply_basic_filters_opencl(frame, context)
-        except cv2.error:
+            result = apply_basic_filters_opencl(frame, context)
+        except cv2.error as error:
             backend.mark_failed()
+            tracing.note("filters.opencl_error", str(error).splitlines()[0][:200])
+        else:
+            tracing.note("filters.backend", "opencl")
+            return result
+    tracing.note("filters.backend", "cpu")
     return apply_basic_filters_cpu(frame, context)
