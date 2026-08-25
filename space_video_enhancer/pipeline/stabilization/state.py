@@ -19,9 +19,11 @@ class StabilizationState:
     last_shift_index: int | None = None
     last_transform: np.ndarray | None = None
     last_transform_index: int | None = None
-    smoothed_transform: np.ndarray | None = None
-    smoothed_frame_index: int | None = None
-    hybrid_fallback_bias: float = 0.0
+    correction: np.ndarray | None = None
+    """Full-strength correction (before the intensity blend) of the last processed frame."""
+    correction_frame_index: int | None = None
+    lock_lost_frames: int = 0
+    """Hybrid: recent frames without a camera-lock match (capped); eases the re-acquisition."""
 
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
@@ -43,3 +45,19 @@ class StabilizationState:
     def remember_transform(self, transform: np.ndarray | None, frame_index: int | None) -> None:
         self.last_transform = transform
         self.last_transform_index = frame_index
+
+    def remember_correction(self, correction: np.ndarray | None, frame_index: int | None) -> None:
+        self.correction = correction
+        self.correction_frame_index = frame_index
+
+    def cached_correction(self, frame_index: int | None) -> np.ndarray | None:
+        """The correction already computed for ``frame_index`` (a re-render of the same frame)."""
+        if frame_index is None or self.correction_frame_index != frame_index:
+            return None
+        return self.correction
+
+    def previous_correction(self, frame_index: int | None) -> np.ndarray | None:
+        """The correction of the frame right before ``frame_index``, if that is what was processed last."""
+        if frame_index is None or self.correction_frame_index != frame_index - 1:
+            return None
+        return self.correction

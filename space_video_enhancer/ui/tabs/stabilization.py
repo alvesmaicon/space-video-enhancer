@@ -31,21 +31,24 @@ MODE_OPTIONS: list[tuple[str, StabilizationMode]] = [
 ]
 MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
     StabilizationMode.OFF: "Nenhuma compensação de movimento.",
-    StabilizationMode.AUTO: "Acompanha o deslocamento global entre frames consecutivos (só translação).",
+    StabilizationMode.AUTO: (
+        "Segue uma versão suavizada da trajetória da câmera (só translação): remove o tremor, preserva panorâmicas."
+    ),
     StabilizationMode.SIMILARITY: (
-        "Compensa translação, rotação leve e pequenas variações de escala entre frames consecutivos."
+        "Como o automático, compensando também rotação leve e pequenas variações de escala."
     ),
     StabilizationMode.PERSPECTIVE: (
-        "Estima uma homografia global para lidar melhor com parallax leve e pequenas mudanças de perspectiva."
+        "Como o automático, com uma homografia global para parallax leve e pequenas mudanças de perspectiva."
     ),
     StabilizationMode.CAMERA_LOCK: (
-        "Usa features da região verde para manter esse enquadramento preso ao frame de referência."
+        "Usa features da região verde para manter esse enquadramento preso ao frame de referência; "
+        "segura a última posição se perder o alvo."
     ),
     StabilizationMode.HYBRID: (
-        "Prende a região verde com camera lock e, se perder o alvo, faz fallback progressivo para estabilização global."
+        "Prende a região verde com camera lock; se perder o alvo, segue o movimento global até reencontrá-lo."
     ),
 }
-DEFAULT_INTENSITY = 65
+DEFAULT_INTENSITY = 100
 DEFAULT_SMOOTHING = 35
 
 
@@ -67,6 +70,11 @@ class StabilizationTab(TabPage):
             "Intensidade da estabilização", 0, 100, DEFAULT_INTENSITY, display=format_percent
         )
         self.smoothing_slider = LabeledSlider("Suavização temporal", 0, 100, DEFAULT_SMOOTHING, display=format_percent)
+        self.smoothing_slider.setToolTip(
+            "Quão devagar a câmera virtual segue a real: "
+            "baixo remove só o tremor rápido, alto quase trava o enquadramento."
+        )
+        self.intensity_slider.setToolTip("Fração da correção aplicada: 100% segue a trajetória suavizada por completo.")
         self.reset_button = QPushButton("Redefinir ponto focal")
         self.reset_button.setObjectName("secondaryButton")
         self.auto_crop_checkbox = QCheckBox("Crop automático para esconder bordas")

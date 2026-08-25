@@ -124,6 +124,30 @@ def _track_features(
     return features.reshape(-1, 2)[valid_mask], next_points.reshape(-1, 2)[valid_mask]
 
 
+def translation_from_gray(
+    previous_gray: np.ndarray,
+    current_gray: np.ndarray,
+    scale: float,
+) -> tuple[float, float] | None:
+    """Global translation (full-res pixels) that moves ``current_gray`` back onto ``previous_gray``."""
+    tracked = _track_features(
+        previous_gray, current_gray, TRANSLATION_GFTT, TRANSLATION_MIN_FEATURES, TRANSLATION_MIN_TRACKED
+    )
+    if tracked is not None:
+        deltas = tracked[1] - tracked[0]
+        note("stabilization.estimator", "lk_translation")
+        note("stabilization.tracked_points", len(tracked[0]))
+        return (-float(np.median(deltas[:, 0])) / scale, -float(np.median(deltas[:, 1])) / scale)
+
+    phase_shift, response = cv2.phaseCorrelate(previous_gray.astype(np.float32), current_gray.astype(np.float32))
+    note("stabilization.phase_response", round(float(response), 3))
+    if response >= PHASE_CORRELATE_MIN_RESPONSE:
+        note("stabilization.estimator", "phase_correlate")
+        return (-float(phase_shift[0]) / scale, -float(phase_shift[1]) / scale)
+    note("stabilization.estimator", "none")
+    return None
+
+
 def estimate_translation_shift(
     frame: np.ndarray,
     frame_index: int | None,
@@ -144,37 +168,26 @@ def estimate_translation_shift(
         state.remember_shift(None, frame_index)
         return None
 
-    shift: tuple[float, float] | None = None
-    tracked = _track_features(
-        state.prev_gray, current_gray, TRANSLATION_GFTT, TRANSLATION_MIN_FEATURES, TRANSLATION_MIN_TRACKED
-    )
-    if tracked is not None:
-        deltas = tracked[1] - tracked[0]
-        shift = (-float(np.median(deltas[:, 0])) / scale, -float(np.median(deltas[:, 1])) / scale)
-        note("stabilization.estimator", "lk_translation")
-        note("stabilization.tracked_points", len(tracked[0]))
-
-    if shift is None:
-        phase_shift, response = cv2.phaseCorrelate(state.prev_gray.astype(np.float32), current_gray.astype(np.float32))
-        note("stabilization.phase_response", round(float(response), 3))
-        if response >= PHASE_CORRELATE_MIN_RESPONSE:
-            shift = (-float(phase_shift[0]) / scale, -float(phase_shift[1]) / scale)
-            note("stabilization.estimator", "phase_correlate")
-        else:
-            note("stabilization.estimator", "none")
-
+    shift = translation_from_gray(state.prev_gray, current_gray, scale)
     state.remember_gray(current_gray, frame_index)
     state.remember_shift(shift, frame_index)
     return shift
 
 
-def estimate_geometric_transform(
+def estimate_inter_frame_transform(
     frame: np.ndarray,
     frame_index: int | None,
     state: StabilizationState,
     mode: StabilizationMode,
+    *,
+    translation_fallback: bool = False,
 ) -> np.ndarray | None:
-    """Similarity or perspective transform between the remembered previous frame and ``frame``."""
+    """Transform that aligns ``frame`` onto the remembered previous frame, in full-res pixels.
+
+    Translation only for :attr:`StabilizationMode.AUTO`, similarity or homography otherwise.
+    ``translation_fallback`` tries a plain translation when the geometric fit fails. Returns
+    ``None`` on the first frame of a sequence, after a jump, or when nothing could be tracked.
+    """
     current_gray, scale = analysis_gray(frame)
     if current_gray.size == 0:
         return None
@@ -193,10 +206,28 @@ def estimate_geometric_transform(
         state.remember_transform(None, frame_index)
         return None
 
-    transform = geometric_transform_from_gray(state.prev_gray, current_gray, scale, frame.shape, mode)
+    transform: np.ndarray | None
+    if mode is StabilizationMode.AUTO:
+        shift = translation_from_gray(state.prev_gray, current_gray, scale)
+        transform = None if shift is None else transforms.translation_to_affine(shift[0], shift[1])
+    else:
+        transform = geometric_transform_from_gray(state.prev_gray, current_gray, scale, frame.shape, mode)
+        if transform is None and translation_fallback:
+            shift = translation_from_gray(state.prev_gray, current_gray, scale)
+            transform = None if shift is None else transforms.translation_to_affine(shift[0], shift[1])
     state.remember_gray(current_gray, frame_index)
     state.remember_transform(transform, frame_index)
     return transform
+
+
+def estimate_geometric_transform(
+    frame: np.ndarray,
+    frame_index: int | None,
+    state: StabilizationState,
+    mode: StabilizationMode,
+) -> np.ndarray | None:
+    """Similarity or perspective transform between the remembered previous frame and ``frame``."""
+    return estimate_inter_frame_transform(frame, frame_index, state, mode)
 
 
 def geometric_transform_from_gray(

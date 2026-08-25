@@ -216,3 +216,27 @@ def auto_crop(frame: np.ndarray, transform: np.ndarray) -> np.ndarray:
     if cropped.size == 0:
         return frame
     return cv2.resize(cropped, (width, height), interpolation=cv2.INTER_CUBIC)
+
+
+def identity_like(transform: np.ndarray) -> np.ndarray:
+    """Identity in the same shape (affine or homography) as ``transform``."""
+    if is_affine(transform):
+        return np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    return np.eye(3, dtype=np.float32)
+
+
+def compose(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
+    """``outer ∘ inner``: apply ``inner`` first, then ``outer``. Stays affine when both are."""
+    composed = affine_to_homography(outer).astype(np.float64) @ affine_to_homography(inner).astype(np.float64)
+    if is_affine(outer) and is_affine(inner):
+        return composed[:2, :].astype(np.float32)
+    return _normalize_homography(composed)
+
+
+def clamp_translation(transform: np.ndarray, frame_shape: tuple[int, ...], fraction: float) -> np.ndarray:
+    """Limit the translation to ``fraction`` of the frame size in each axis."""
+    height, width = frame_shape[:2]
+    clamped = transform.astype(np.float32).copy()
+    clamped[0, 2] = float(np.clip(clamped[0, 2], -width * fraction, width * fraction))
+    clamped[1, 2] = float(np.clip(clamped[1, 2], -height * fraction, height * fraction))
+    return clamped

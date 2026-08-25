@@ -254,7 +254,7 @@ class CropSettings:
 @dataclass(frozen=True)
 class StabilizationSettings:
     mode: StabilizationMode = StabilizationMode.OFF
-    intensity: float = 0.65
+    intensity: float = 1.0
     temporal_smoothing: float = 0.35
     focus_rect: NormalizedRect = DEFAULT_STABILIZATION_RECT
     auto_crop: bool = True
