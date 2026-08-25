@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QButtonGroup, QGridLayout, QLabel, QToolButton
 
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS, ORIGINAL_PRESET_ID, get_image_filter_preset
 from space_video_enhancer.settings import ImageFilterSelection, clamp_unit
+from space_video_enhancer.ui.format import format_percent
 from space_video_enhancer.ui.tabs.base import TabPage, group_box
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
@@ -49,7 +50,9 @@ class FiltersTab(TabPage):
             self.buttons[preset.filter_id] = button
             grid.addWidget(button, index // 2, index % 2)
 
-        self.intensity_slider = LabeledSlider("Intensidade do filtro", 0, 100, DEFAULT_INTENSITY)
+        self.intensity_slider = LabeledSlider(
+            "Intensidade do filtro", 0, 100, DEFAULT_INTENSITY, display=format_percent
+        )
         self.intensity_slider.valueChanged.connect(self._handle_intensity_changed)
         self.intensity_slider.resetRequested.connect(lambda: self.intensity_slider.setValue(DEFAULT_INTENSITY))
         self.description_label = QLabel()

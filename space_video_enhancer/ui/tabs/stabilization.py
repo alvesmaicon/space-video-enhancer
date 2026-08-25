@@ -1,11 +1,16 @@
-"""Tab "Estabilizar": mode, strength, smoothing, focal region controls and border handling."""
+"""Tab "Estabilizar": mode, strength, smoothing, focal region and border handling.
+
+The focal region itself is edited directly on the preview whenever this tab is active
+and the mode uses a focal point; there is no separate "edit" toggle.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton
 
 from space_video_enhancer.settings import NormalizedRect, StabilizationMode, StabilizationSettings, clamp_unit
+from space_video_enhancer.ui.format import format_percent
 from space_video_enhancer.ui.tabs.base import (
     TabPage,
     combo_enum,
@@ -24,6 +29,22 @@ MODE_OPTIONS: list[tuple[str, StabilizationMode]] = [
     ("Camera lock (região)", StabilizationMode.CAMERA_LOCK),
     ("Híbrido: camera lock + fallback", StabilizationMode.HYBRID),
 ]
+MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
+    StabilizationMode.OFF: "Nenhuma compensação de movimento.",
+    StabilizationMode.AUTO: "Acompanha o deslocamento global entre frames consecutivos (só translação).",
+    StabilizationMode.SIMILARITY: (
+        "Compensa translação, rotação leve e pequenas variações de escala entre frames consecutivos."
+    ),
+    StabilizationMode.PERSPECTIVE: (
+        "Estima uma homografia global para lidar melhor com parallax leve e pequenas mudanças de perspectiva."
+    ),
+    StabilizationMode.CAMERA_LOCK: (
+        "Usa features da região verde para manter esse enquadramento preso ao frame de referência."
+    ),
+    StabilizationMode.HYBRID: (
+        "Prende a região verde com camera lock e, se perder o alvo, faz fallback progressivo para estabilização global."
+    ),
+}
 DEFAULT_INTENSITY = 65
 DEFAULT_SMOOTHING = 35
 
@@ -32,17 +53,22 @@ class StabilizationTab(TabPage):
     modeChanged = Signal()
     controlChanged = Signal()
     """Intensity, smoothing, auto crop or zoom out changed (inter-frame memory must restart)."""
-    editToggled = Signal(bool)
     resetRequested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self.mode_combo = enum_combo(MODE_OPTIONS)
-        self.intensity_slider = LabeledSlider("Intensidade da estabilização", 0, 100, DEFAULT_INTENSITY)
-        self.smoothing_slider = LabeledSlider("Suavização temporal", 0, 100, DEFAULT_SMOOTHING)
-        self.edit_button = QPushButton("Editar ponto/região no preview")
-        self.edit_button.setCheckable(True)
-        self.reset_button = QPushButton("Resetar ponto focal")
+        for index, (_label, mode) in enumerate(MODE_OPTIONS):
+            self.mode_combo.setItemData(index, MODE_DESCRIPTIONS[mode], Qt.ItemDataRole.ToolTipRole)
+        self.hint_label = QLabel()
+        self.hint_label.setObjectName("hintLabel")
+        self.hint_label.setWordWrap(True)
+        self.intensity_slider = LabeledSlider(
+            "Intensidade da estabilização", 0, 100, DEFAULT_INTENSITY, display=format_percent
+        )
+        self.smoothing_slider = LabeledSlider("Suavização temporal", 0, 100, DEFAULT_SMOOTHING, display=format_percent)
+        self.reset_button = QPushButton("Redefinir ponto focal")
+        self.reset_button.setObjectName("secondaryButton")
         self.auto_crop_checkbox = QCheckBox("Crop automático para esconder bordas")
         self.auto_crop_checkbox.setChecked(True)
         self.zoom_out_checkbox = QCheckBox("Zoom out automático para preservar bordas")
@@ -50,27 +76,27 @@ class StabilizationTab(TabPage):
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
 
-        self.mode_combo.currentIndexChanged.connect(lambda _index: self.modeChanged.emit())
+        self.mode_combo.currentIndexChanged.connect(self._handle_mode_changed)
         self.intensity_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
         self.smoothing_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
         self.auto_crop_checkbox.toggled.connect(lambda _checked: self.controlChanged.emit())
         self.zoom_out_checkbox.toggled.connect(self._handle_zoom_out_toggled)
-        self.edit_button.toggled.connect(self.editToggled.emit)
         self.reset_button.clicked.connect(self.resetRequested.emit)
 
         self.add_sections(
             group_box(
                 "Estabilização",
                 form_rows(("Modo", self.mode_combo)),
+                self.hint_label,
                 self.intensity_slider,
                 self.smoothing_slider,
-                self.edit_button,
-                self.reset_button,
                 self.auto_crop_checkbox,
                 self.zoom_out_checkbox,
+                self.reset_button,
                 self.info_label,
             )
         )
+        self._update_hint()
 
     def mode(self) -> StabilizationMode:
         return combo_enum(self.mode_combo, StabilizationMode, StabilizationMode.OFF)
@@ -86,7 +112,7 @@ class StabilizationTab(TabPage):
         )
 
     def update_controls_state(self, has_video: bool) -> None:
-        """Enable only what the current mode uses; leaves the edit button unchecked outside focal modes."""
+        """Enable only what the current mode uses."""
         mode = self.mode()
         controls_enabled = has_video and self.mode_combo.isEnabled()
         stabilization_enabled = controls_enabled and mode is not StabilizationMode.OFF
@@ -95,29 +121,30 @@ class StabilizationTab(TabPage):
         zoom_out_enabled = stabilization_enabled and self.zoom_out_checkbox.isChecked()
         self.auto_crop_checkbox.setEnabled(stabilization_enabled and not zoom_out_enabled)
         self.zoom_out_checkbox.setEnabled(stabilization_enabled)
-        focal_mode = stabilization_enabled and mode.uses_focal_point
-        self.edit_button.setEnabled(focal_mode)
-        self.reset_button.setEnabled(focal_mode)
-        if not focal_mode:
-            set_checked_silently(self.edit_button, False)
+        self.reset_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
 
     def set_info(self, text: str) -> None:
         self.info_label.setText(text)
-
-    def set_edit_checked_silently(self, checked: bool) -> None:
-        set_checked_silently(self.edit_button, checked)
 
     def set_controls_enabled(self, enabled: bool) -> None:
         for widget in (
             self.mode_combo,
             self.intensity_slider,
             self.smoothing_slider,
-            self.edit_button,
             self.reset_button,
             self.auto_crop_checkbox,
             self.zoom_out_checkbox,
         ):
             widget.setEnabled(enabled)
+
+    def _handle_mode_changed(self, _index: int) -> None:
+        self._update_hint()
+        self.modeChanged.emit()
+
+    def _update_hint(self) -> None:
+        description = MODE_DESCRIPTIONS[self.mode()]
+        self.hint_label.setText(description)
+        self.mode_combo.setToolTip(description)
 
     def _handle_zoom_out_toggled(self, checked: bool) -> None:
         if checked and self.auto_crop_checkbox.isChecked():

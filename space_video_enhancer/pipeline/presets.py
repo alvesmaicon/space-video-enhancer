@@ -36,27 +36,27 @@ class ImageFilterPreset:
 IMAGE_FILTER_PRESETS: tuple[ImageFilterPreset, ...] = (
     ImageFilterPreset(
         ORIGINAL_PRESET_ID, "Original",
-        "Mantem apenas os ajustes manuais atuais, sem correcao tonal extra.",
+        "Mantém apenas os ajustes manuais atuais, sem correção tonal extra.",
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
     ),
     ImageFilterPreset(
         "shadow_lift", "Sombras abertas",
-        "Clareia areas escuras e segura os brancos para cenas com contraste alto.",
+        "Clareia áreas escuras e segura os brancos para cenas com contraste alto.",
         0.55, 0.20, 0.10, 0.08, 0.0, 0.03, 0.0, 0.0,
     ),
     ImageFilterPreset(
         "highlight_guard", "Realces suaves",
-        "Comprime altas luzes para reduzir estouro em areas claras e janelas.",
+        "Comprime altas luzes para reduzir estouro em áreas claras e janelas.",
         0.18, 0.65, 0.08, 0.10, -0.02, -0.03, 0.0, 0.0,
     ),
     ImageFilterPreset(
-        "dynamic_balance", "Faixa dinamica",
+        "dynamic_balance", "Faixa dinâmica",
         "Equilibra sombras e realces ao mesmo tempo, bom para cenas muito duras.",
         0.48, 0.48, 0.16, 0.14, 0.0, 0.04, 0.0, 0.0,
     ),
     ImageFilterPreset(
         "neutral_color", "Cor neutra",
-        "Corrige dominantes de cor e entrega um balanco mais natural de branco e pele.",
+        "Corrige dominantes de cor e entrega um balanço mais natural de branco e pele.",
         0.22, 0.28, 0.10, 0.38, 0.0, 0.02, 0.0, 0.0,
     ),
     ImageFilterPreset(
@@ -66,12 +66,12 @@ IMAGE_FILTER_PRESETS: tuple[ImageFilterPreset, ...] = (
     ),
     ImageFilterPreset(
         "micro_contrast", "Microcontraste",
-        "Realca textura fina e separacao entre planos sem abrir tanto as sombras.",
+        "Realça textura fina e separação entre planos sem abrir tanto as sombras.",
         0.14, 0.24, 0.52, 0.10, 0.01, 0.04, 0.0, 0.0,
     ),
     ImageFilterPreset(
         "contrast_punch", "Contraste punch",
-        "Entrega mais presenca e recorte nos detalhes, com um look mais energico.",
+        "Entrega mais presença e recorte nos detalhes, com um look mais enérgico.",
         0.10, 0.34, 0.62, 0.08, 0.0, 0.06, 0.0, 0.0,
     ),
     ImageFilterPreset(
@@ -81,7 +81,7 @@ IMAGE_FILTER_PRESETS: tuple[ImageFilterPreset, ...] = (
     ),
     ImageFilterPreset(
         "cool_tamer", "Atenuar frias",
-        "Suaviza azuis e cianos mantendo quentes e tons de pele com mais consistencia.",
+        "Suaviza azuis e cianos mantendo quentes e tons de pele com mais consistência.",
         0.18, 0.22, 0.14, 0.10, 0.04, -0.01, 0.0, 0.48,
     ),
 )

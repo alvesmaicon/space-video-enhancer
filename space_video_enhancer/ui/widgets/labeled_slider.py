@@ -1,25 +1,43 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QSlider, QStyle, QToolButton, QVBoxLayout, QWidget
 
+VALUE_LABEL_MIN_WIDTH = 40
+
 
 class LabeledSlider(QWidget):
-    """Horizontal slider with a title, live value label and a "back to preset" button."""
+    """Horizontal slider with a title, live value label and a "back to preset" button.
+
+    ``display`` turns the raw value into the label text, e.g. ``+12`` for controls whose
+    neutral point is the middle of the range or ``35%`` for intensities.
+    """
 
     valueChanged = Signal(int)
     resetRequested = Signal()
 
-    def __init__(self, label: str, minimum: int, maximum: int, value: int) -> None:
+    def __init__(
+        self,
+        label: str,
+        minimum: int,
+        maximum: int,
+        value: int,
+        *,
+        display: Callable[[int], str] | None = None,
+    ) -> None:
         super().__init__()
+        self._display: Callable[[int], str] = display or str
         self._title = QLabel(label)
-        self._value_label = QLabel(str(value))
+        self._value_label = QLabel(self._display(value))
         self._value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._value_label.setMinimumWidth(VALUE_LABEL_MIN_WIDTH)
         self._reset_button = QToolButton()
         self._reset_button.setAutoRaise(True)
         self._reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._reset_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        self._reset_button.setToolTip("Voltar este controle ao preset ativo")
+        self._reset_button.setToolTip("Voltar este controle ao valor do preset ativo")
         self._reset_button.clicked.connect(self.resetRequested.emit)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(minimum, maximum)
@@ -41,6 +59,9 @@ class LabeledSlider(QWidget):
     def value(self) -> int:
         return self.slider.value()
 
+    def value_text(self) -> str:
+        return self._value_label.text()
+
     def setValue(self, value: int) -> None:
         self.slider.setValue(value)
 
@@ -50,5 +71,5 @@ class LabeledSlider(QWidget):
         self._reset_button.setEnabled(enabled)
 
     def _handle_value_changed(self, value: int) -> None:
-        self._value_label.setText(str(value))
+        self._value_label.setText(self._display(value))
         self.valueChanged.emit(value)

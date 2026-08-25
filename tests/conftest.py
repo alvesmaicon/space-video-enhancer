@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
+
+from space_video_enhancer.ui.main_window import MainWindow
+from tests.qt_helpers import pump, qt_app
 
 
 def make_textured_frame(width: int = 480, height: int = 270, seed: int = 42) -> np.ndarray:
@@ -36,3 +41,36 @@ def textured_frame() -> np.ndarray:
 @pytest.fixture
 def quadrant_frame() -> np.ndarray:
     return make_quadrant_frame()
+
+
+# --- offscreen Qt fixtures (skipped when PySide6 is not installed) ---------------------------
+
+UI_VIDEO_SIZE = (320, 180)
+UI_VIDEO_FRAMES = 12
+UI_VIDEO_FPS = 24.0
+
+
+@pytest.fixture(scope="session")
+def app():  # type: ignore[no-untyped-def]
+    return qt_app()
+
+
+@pytest.fixture(scope="session")
+def ui_video(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("ui") / "sample.mp4"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), UI_VIDEO_FPS, UI_VIDEO_SIZE)
+    base = cv2.resize(make_textured_frame(), UI_VIDEO_SIZE, interpolation=cv2.INTER_AREA)
+    for index in range(UI_VIDEO_FRAMES):
+        writer.write(np.roll(base, index * 3, axis=1))
+    writer.release()
+    return path
+
+
+@pytest.fixture
+def window(app):  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    window.show()
+    pump(app, 0.1)
+    yield window
+    window.close()
+    pump(app, 0.05)

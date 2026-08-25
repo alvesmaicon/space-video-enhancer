@@ -81,6 +81,8 @@ Regras da arquitetura:
 - O MP4 sai em `yuv420p` com `+faststart` e dimensoes pares, para tocar em QuickTime, iOS e decoders de hardware.
 - Layout: toolbar (Abrir, Exportar, zoom, qualidade, metricas) + `QSplitter` com o preview a esquerda e as abas a direita + barra de status persistente (mensagens, indicador de render, progresso/cancelamento da exportacao, info do video). A largura minima do painel de abas e calculada a partir do conteudo real (`MainWindow._fit_settings_panel`), entao nada e cortado nem escondido atras de setas; `tests/test_ui_layout.py` verifica isso offscreen.
 - Zoom do preview: "Ajustar" (padrao) preenche a area disponivel; os percentuais sao pixels do frame de saida por pixel logico da tela (100% = 1:1). Ctrl+0 ajusta, Ctrl++/Ctrl+- mudam de nivel.
+- Teclado: Espaco, Home/End, setas e I/O controlam a reproducao e o corte, mas so quando o widget focado nao usa a tecla (um slider focado mantem as setas, um botao focado mantem o Espaco). Clicar no preview da o foco a ele; abrir um video tambem.
+- Overlays: o crop aparece sempre que estiver ativo, mas so e editavel na aba Geometria; a amostra de ruido e o ponto focal aparecem apenas nas abas Ruido e Estabilizar, editaveis direto no preview (nao existe modo "editar").
 
 ## Desenvolvimento
 

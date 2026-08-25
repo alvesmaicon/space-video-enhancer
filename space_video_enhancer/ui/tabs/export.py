@@ -41,7 +41,11 @@ class ExportTab(TabPage):
         self.thread_combo.setToolTip("Quantas threads usar na exportação")
         self.mark_start_button = QPushButton("Marcar início")
         self.mark_end_button = QPushButton("Marcar fim")
-        self.reset_range_button = QPushButton("Vídeo inteiro")
+        self.reset_range_button = QPushButton("Redefinir corte")
+        for button in (self.mark_start_button, self.mark_end_button, self.reset_range_button):
+            button.setObjectName("secondaryButton")
+        self.mark_start_button.setToolTip("Início do corte no frame atual (I)")
+        self.mark_end_button.setToolTip("Fim do corte no frame atual (O)")
         self.range_label = QLabel("Corte: vídeo inteiro")
         self.range_label.setWordWrap(True)
 

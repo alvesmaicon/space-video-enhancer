@@ -43,10 +43,46 @@ QPushButton {
 QPushButton:disabled {
     background: #9ca3af;
 }
+QPushButton:checked {
+    background: #115e59;
+}
+QPushButton#secondaryButton {
+    background: white;
+    color: #0f766e;
+    border: 1px solid #a8a29e;
+}
+QPushButton#secondaryButton:hover {
+    background: #ecfeff;
+    border-color: #0f766e;
+}
+QPushButton#secondaryButton:disabled {
+    background: #f8f5ef;
+    color: #9ca3af;
+    border-color: #e7e5e4;
+}
 QPushButton#transportButton {
+    background: white;
+    border: 1px solid #a8a29e;
+    border-radius: 10px;
     padding: 4px;
-    font-size: 16px;
-    font-weight: 500;
+}
+QPushButton#transportButton:hover {
+    background: #ecfeff;
+    border-color: #0f766e;
+}
+QPushButton#transportButton:disabled {
+    background: #f8f5ef;
+    border-color: #e7e5e4;
+}
+QPushButton#transportPlayButton {
+    padding: 4px;
+    border-radius: 12px;
+}
+QLabel#hintLabel, QLabel#frameLabel {
+    color: #6b7280;
+}
+QLabel#timecodeLabel {
+    font-weight: 600;
 }
 QPushButton#previewOpenButton {
     padding: 12px 22px;

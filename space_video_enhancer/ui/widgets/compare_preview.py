@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -37,7 +37,10 @@ OPEN_BUTTON_TEXT = "Abrir vídeo…"
 BACKGROUND_COLOR = QColor("#f3f4f6")
 PLACEHOLDER_TEXT_COLOR = QColor("#4b5563")
 SPLIT_LINE_COLOR = QColor("#ffffff")
-CAPTION_COLOR = QColor("#111827")
+CAPTION_BACKGROUND = QColor(17, 24, 39, 165)
+CAPTION_TEXT_COLOR = QColor("#f9fafb")
+PILL_PADDING_X = 7
+PILL_PADDING_Y = 2
 DIM_COLOR = QColor(17, 24, 39, 120)
 HUD_BACKGROUND = QColor(17, 24, 39, 178)
 HUD_TEXT_COLOR = QColor("#e5e7eb")
@@ -115,16 +118,13 @@ class OverlayStyle:
     label_color: QColor | None = None
     dim_outside: bool = False
     dashed: bool = False
-    always_editable: bool = False
-    """Crop is editable whenever visible; sample/focus need an explicit edit mode."""
 
 
 CROP_STYLE = OverlayStyle(
     outline_active=QColor("#f59e0b"),
-    outline_idle=QColor("#f59e0b"),
+    outline_idle=QColor(245, 158, 11, 140),
     handle=QColor("#f59e0b"),
     dim_outside=True,
-    always_editable=True,
 )
 SAMPLE_STYLE = OverlayStyle(
     outline_active=QColor("#2563eb"),
@@ -162,7 +162,7 @@ class SelectionOverlay:
 
     @property
     def interactive(self) -> bool:
-        return self.enabled and (self.editing or self.style.always_editable)
+        return self.enabled and self.editing
 
     @property
     def dragging(self) -> bool:
@@ -256,8 +256,7 @@ class SelectionOverlay:
         painter.drawRect(rect)
 
         if style.label and style.label_color is not None:
-            painter.setPen(style.label_color)
-            painter.drawText(int(rect.left() + 8), int(rect.top() + 20), style.label)
+            draw_pill(painter, QPointF(rect.left() + 6, rect.top() + 6), style.label, style.label_color)
 
         if self.interactive:
             for handle_rect in _handles(rect).values():
@@ -269,6 +268,24 @@ class SelectionOverlay:
             if handle_rect.contains(position):
                 return handle
         return None
+
+
+def pill_size(painter: QPainter, text: str) -> QSizeF:
+    metrics = painter.fontMetrics()
+    return QSizeF(metrics.horizontalAdvance(text) + (2 * PILL_PADDING_X), metrics.height() + (2 * PILL_PADDING_Y))
+
+
+def draw_pill(painter: QPainter, top_left: QPointF, text: str, background: QColor) -> None:
+    """Small rounded label that stays readable over any footage."""
+    size = pill_size(painter, text)
+    box = QRectF(top_left, size)
+    painter.save()
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(background)
+    painter.drawRoundedRect(box, size.height() / 2.0, size.height() / 2.0)
+    painter.setPen(CAPTION_TEXT_COLOR)
+    painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+    painter.restore()
 
 
 def _point_to_normalized(point: QPointF, image_rect: QRectF) -> QPointF:
@@ -314,6 +331,7 @@ class ComparePreview(QWidget):
         self.setMinimumSize(MIN_WIDGET_SIZE)
         self._apply_size_policy()
         self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # click the preview, then drive it with the keyboard
         self._position_open_button()
 
     # --- sizing -------------------------------------------------------------------------
@@ -394,8 +412,11 @@ class ComparePreview(QWidget):
         self.open_button.setVisible(before is None or after is None)
         self.update()
 
-    def set_crop_state(self, enabled: bool, crop_rect_norm: QRectF, aspect_ratio: float | None) -> None:
-        self.crop.set_state(enabled, crop_rect_norm, editing=True, aspect_ratio=aspect_ratio)
+    def set_crop_state(
+        self, enabled: bool, crop_rect_norm: QRectF, aspect_ratio: float | None, *, editing: bool
+    ) -> None:
+        """``editing`` is true only while the geometry tab is active; elsewhere the crop is just shown."""
+        self.crop.set_state(enabled, crop_rect_norm, editing=editing, aspect_ratio=aspect_ratio)
         if not enabled:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
         self.update()
@@ -441,12 +462,15 @@ class ComparePreview(QWidget):
         painter.setPen(QPen(SPLIT_LINE_COLOR, 3))
         painter.drawLine(int(split_x), int(self._image_rect.top()), int(split_x), int(self._image_rect.bottom()))
 
-        painter.setPen(CAPTION_COLOR)
-        painter.drawText(int(self._image_rect.left() + 12), int(self._image_rect.top() + 28), "Antes")
-        painter.drawText(
-            QRectF(self._image_rect.right() - 92, self._image_rect.top() + 12, 80, 24),
-            Qt.AlignmentFlag.AlignRight,
+        draw_pill(
+            painter, QPointF(self._image_rect.left() + 10, self._image_rect.top() + 10), "Antes", CAPTION_BACKGROUND
+        )
+        after_width = pill_size(painter, "Depois").width()
+        draw_pill(
+            painter,
+            QPointF(self._image_rect.right() - 10 - after_width, self._image_rect.top() + 10),
             "Depois",
+            CAPTION_BACKGROUND,
         )
 
         for overlay in (self.crop, self.sample, self.focus):

@@ -42,6 +42,7 @@ class TabPage(QScrollArea):
         self.setWidgetResizable(True)
         self.setFrameShape(QScrollArea.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # arrow keys belong to the transport, not to scrolling
         self.setWidget(self.content)
 
     def add_sections(self, *sections: QWidget) -> None:

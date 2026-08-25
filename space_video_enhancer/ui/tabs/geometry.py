@@ -38,7 +38,8 @@ class GeometryTab(TabPage):
         self.crop_mode_combo = QComboBox()
         for label, mode in CROP_OPTIONS:
             self.crop_mode_combo.addItem(label, mode)
-        self.crop_reset_button = QPushButton("Resetar crop")
+        self.crop_reset_button = QPushButton("Redefinir crop")
+        self.crop_reset_button.setObjectName("secondaryButton")
         self.crop_info_label = QLabel("Crop: desativado")
         self.crop_info_label.setWordWrap(True)
 

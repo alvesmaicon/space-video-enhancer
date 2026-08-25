@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox
 
 from space_video_enhancer.settings import DEFAULT_FILTER_SETTINGS, FILTER_PRESETS, FilterSettings
+from space_video_enhancer.ui.format import format_signed
 from space_video_enhancer.ui.tabs.base import TabPage, form_rows, group_box
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
@@ -23,11 +24,11 @@ class ColorTab(TabPage):
         self.preset_combo = QComboBox()
         for label, preset in FILTER_PRESETS:
             self.preset_combo.addItem(label, preset)
-        self.contrast_slider = LabeledSlider("Contraste", 0, 100, defaults.contrast)
-        self.brightness_slider = LabeledSlider("Brilho", 0, 100, defaults.brightness)
-        self.gamma_slider = LabeledSlider("Gama", 0, 100, defaults.gamma)
-        self.saturation_slider = LabeledSlider("Saturação", 0, 100, defaults.saturation)
-        self.temperature_slider = LabeledSlider("Temperatura", 0, 100, defaults.temperature)
+        self.contrast_slider = LabeledSlider("Contraste", 0, 100, defaults.contrast, display=format_signed)
+        self.brightness_slider = LabeledSlider("Brilho", 0, 100, defaults.brightness, display=format_signed)
+        self.gamma_slider = LabeledSlider("Gama", 0, 100, defaults.gamma, display=format_signed)
+        self.saturation_slider = LabeledSlider("Saturação", 0, 100, defaults.saturation, display=format_signed)
+        self.temperature_slider = LabeledSlider("Temperatura", 0, 100, defaults.temperature, display=format_signed)
         self.sharpen_slider = LabeledSlider("Nitidez", 0, 100, defaults.sharpen)
         self.sliders: dict[str, LabeledSlider] = {
             "contrast": self.contrast_slider,

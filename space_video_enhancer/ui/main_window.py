@@ -18,7 +18,7 @@ from typing import Any
 import cv2
 import numpy as np
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -55,12 +55,12 @@ from space_video_enhancer.settings import (
     NormalizedRect,
     PreviewRenderMode,
     RenderSettings,
-    StabilizationMode,
     StabilizationSettings,
 )
 from space_video_enhancer.telemetry.diff import diff as diff_settings
 from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
 from space_video_enhancer.telemetry.stats import RollingStats
+from space_video_enhancer.ui.format import format_duration, format_timecode
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo, select_combo_data
 from space_video_enhancer.ui.tabs.color import ColorTab
@@ -99,11 +99,6 @@ def qrect_to_norm(rect: QRectF) -> NormalizedRect:
 
 def norm_to_qrect(rect: NormalizedRect) -> QRectF:
     return QRectF(rect.x, rect.y, rect.width, rect.height)
-
-
-def format_duration(seconds: float) -> str:
-    total = max(0, round(seconds))
-    return f"{total // 60}:{total % 60:02d}"
 
 
 class MainWindow(QMainWindow):
@@ -246,8 +241,8 @@ class MainWindow(QMainWindow):
         self.restore_preset_action = self._make_action(
             "Restaurar preset ativo", self._restore_active_preset_settings, "Ctrl+R"
         )
-        self.reset_crop_action = self._make_action("Resetar crop", self._reset_crop_rect)
-        self.reset_range_action = self._make_action("Resetar corte temporal", self._reset_clip_range)
+        self.reset_crop_action = self._make_action("Redefinir crop", self._reset_crop_rect)
+        self.reset_range_action = self._make_action("Redefinir corte temporal", self._reset_clip_range)
         self.play_action = self._make_action("Reproduzir ou pausar", self._toggle_playback, "Space")
         self.first_frame_action = self._make_action("Primeiro frame", self._go_to_first_frame, "Home")
         self.previous_frame_action = self._make_action("Frame anterior", self._go_to_previous_frame, "Left")
@@ -255,6 +250,11 @@ class MainWindow(QMainWindow):
         self.last_frame_action = self._make_action("Último frame", self._go_to_last_frame, "End")
         self.mark_start_action = self._make_action("Marcar início do corte", self._mark_clip_start, "I")
         self.mark_end_action = self._make_action("Marcar fim do corte", self._mark_clip_end, "O")
+        # Bare keys must not steal arrows from sliders or Space from buttons: as QAction shortcuts they
+        # only fire while the preview has focus; everywhere else keyPressEvent handles what widgets left.
+        for action in self._transport_actions():
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            self.preview.addAction(action)
         self.zoom_fit_action = self._make_action("Ajustar à janela", self._zoom_to_fit, "Ctrl+0")
         self.zoom_in_action = self._make_action(
             "Aumentar zoom", lambda: self._step_preview_zoom(1), QKeySequence.StandardKey.ZoomIn
@@ -429,14 +429,12 @@ class MainWindow(QMainWindow):
         self.filters_tab.intensityChanged.connect(self._handle_image_filter_changed)
         self.stabilization_tab.modeChanged.connect(self._handle_stabilization_mode_changed)
         self.stabilization_tab.controlChanged.connect(self._handle_stabilization_control_change)
-        self.stabilization_tab.editToggled.connect(self._handle_stabilization_edit_toggled)
         self.stabilization_tab.resetRequested.connect(self._reset_stabilization_rect)
         self.geometry_tab.geometryChanged.connect(self._handle_geometry_change)
         self.geometry_tab.cropModeChanged.connect(self._handle_crop_mode_changed)
         self.geometry_tab.cropResetRequested.connect(self._reset_crop_rect)
         self.noise_tab.controlChanged.connect(self._handle_filter_control_change)
         self.noise_tab.resetRequested.connect(self._reset_slider_to_preset)
-        self.noise_tab.sampleEditToggled.connect(self._handle_denoise_sample_edit_toggled)
         self.noise_tab.sampleResetRequested.connect(self._reset_denoise_sample_rect)
         self.export_tab.scaleChanged.connect(self._handle_filter_control_change)
         self.export_tab.markStartRequested.connect(self._mark_clip_start)
@@ -551,7 +549,7 @@ class MainWindow(QMainWindow):
         self._stabilization_epoch += 1
         self.status.set_video_info(f"{path.name} · {width}x{height} · {self.fps:.2f} fps · {self.frame_count} frames")
         self.setWindowTitle(f"{path.name} — Space Video Enhancer")
-        self.transport.set_frame_count(self.frame_count)
+        self.transport.set_frame_count(self.frame_count, self.fps)
         self.preview.set_display_reference_size(*self._displayed_size())
         self._set_controls_enabled(True)
         self._update_frame_slider_markers()
@@ -568,6 +566,7 @@ class MainWindow(QMainWindow):
         midpoint = min(self.frame_count - 1, self.frame_count // 2)
         self.transport.set_value_silently(midpoint)
         self._load_frame(midpoint)
+        self.preview.setFocus()
 
     def _load_frame(self, frame_index: int) -> None:
         if self.video is None:
@@ -589,7 +588,7 @@ class MainWindow(QMainWindow):
         )
         self.current_frame_index = frame_index
         self.current_frame = frame
-        self.transport.set_frame_text(f"Frame {frame_index + 1} / {self.frame_count}")
+        self.transport.set_position(frame_index)
         self._update_denoise_controls_state()
         self._update_stabilization_controls_state()
         self._update_stabilization_info_label()
@@ -733,7 +732,8 @@ class MainWindow(QMainWindow):
         frame_count = end_frame - start_frame + 1
         duration_seconds = frame_count / self.fps if self.fps > 0 else 0.0
         self.export_tab.set_range_text(
-            f"Corte: frames {start_frame + 1}-{end_frame + 1} | {frame_count} frames | {duration_seconds:.2f}s"
+            f"Corte: {format_timecode(start_frame, self.fps)} → {format_timecode(end_frame + 1, self.fps)} "
+            f"(frames {start_frame + 1}–{end_frame + 1}, {duration_seconds:.2f} s)"
         )
 
     def _update_frame_slider_markers(self) -> None:
@@ -825,8 +825,18 @@ class MainWindow(QMainWindow):
 
     def _handle_tab_changed(self, index: int) -> None:
         log_event(LOG, "ui.tab", tab=self.settings_tabs.tabText(index))
+        self._sync_overlays()
         if self._filters_tab_visible():
             self._schedule_filter_thumbnails_refresh()
+
+    def _tab_is_active(self, tab: TabPage) -> bool:
+        return self.settings_tabs.currentWidget() is tab
+
+    def _sync_overlays(self) -> None:
+        """Each selection rectangle is editable only on its own tab; the crop stays visible elsewhere."""
+        self._sync_crop_preview()
+        self._sync_denoise_sample_preview()
+        self._sync_stabilization_preview()
 
     def _refresh_preview_impl(self) -> None:
         """Snapshot the widgets and hand the frame to the render thread (latest request wins)."""
@@ -1023,12 +1033,6 @@ class MainWindow(QMainWindow):
         )
         self.noise_tab.set_info(f"{source} Estimativa atual: luminância {luma:.1f} | cor {color:.1f}.")
 
-    def _handle_denoise_sample_edit_toggled(self, checked: bool) -> None:
-        if checked and self.stabilization_tab.edit_button.isChecked():
-            self.stabilization_tab.set_edit_checked_silently(False)
-            self._sync_stabilization_preview(editing_override=False)
-        self._sync_denoise_sample_preview(editing_override=checked)
-
     def _handle_preview_sample_changed(self, rect: QRectF) -> None:
         self.denoise_sample_rect_norm = QRectF(rect)
         self._sync_denoise_sample_preview()
@@ -1041,10 +1045,11 @@ class MainWindow(QMainWindow):
         self._update_denoise_sample_info_label()
         self._schedule_preview_refresh()
 
-    def _sync_denoise_sample_preview(self, editing_override: bool | None = None) -> None:
-        sample_enabled = self.frame_count > 0 and self.noise_tab.mode() is DenoiseMode.SAMPLE
-        editing = self.noise_tab.sample_edit_button.isChecked() if editing_override is None else editing_override
-        self.preview.set_sample_state(sample_enabled, self.denoise_sample_rect_norm, editing)
+    def _sync_denoise_sample_preview(self) -> None:
+        enabled = (
+            self.frame_count > 0 and self.noise_tab.mode() is DenoiseMode.SAMPLE and self._tab_is_active(self.noise_tab)
+        )
+        self.preview.set_sample_state(enabled, self.denoise_sample_rect_norm, editing=True)
 
     def _update_denoise_sample_info_label(self) -> None:
         if self.frame_count <= 0:
@@ -1065,18 +1070,8 @@ class MainWindow(QMainWindow):
         self._stabilization_epoch += 1
         if self.stabilization_tab.mode().uses_focal_point:
             self._capture_stabilization_reference_from_current_frame()
-        else:
-            self.stabilization_tab.set_edit_checked_silently(False)
         self._update_stabilization_controls_state()
         self._schedule_preview_refresh()
-
-    def _handle_stabilization_edit_toggled(self, checked: bool) -> None:
-        if checked and self.noise_tab.sample_edit_button.isChecked():
-            self.noise_tab.set_sample_edit_checked_silently(False)
-            self._sync_denoise_sample_preview(editing_override=False)
-        if checked:
-            self._capture_stabilization_reference_from_current_frame()
-        self._sync_stabilization_preview(editing_override=checked)
 
     def _handle_stabilization_control_change(self) -> None:
         self._stabilization_epoch += 1
@@ -1110,60 +1105,39 @@ class MainWindow(QMainWindow):
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
 
-    def _sync_stabilization_preview(self, editing_override: bool | None = None) -> None:
-        enabled = self.frame_count > 0 and self.stabilization_tab.mode().uses_focal_point
-        editing = self.stabilization_tab.edit_button.isChecked() if editing_override is None else editing_override
-        self.preview.set_stabilization_state(enabled, self.stabilization_rect_norm, editing)
+    def _sync_stabilization_preview(self) -> None:
+        enabled = (
+            self.frame_count > 0
+            and self.stabilization_tab.mode().uses_focal_point
+            and self._tab_is_active(self.stabilization_tab)
+        )
+        self.preview.set_stabilization_state(enabled, self.stabilization_rect_norm, editing=True)
 
     def _update_stabilization_info_label(self) -> None:
+        """Facts only (the mode description lives in the tab's hint and tooltips)."""
         if self.frame_count <= 0:
-            self.stabilization_tab.set_info("Estabilização: abra um vídeo para definir o ponto focal.")
+            self.stabilization_tab.set_info("Abra um vídeo para ajustar a estabilização.")
             return
         settings = self._current_stabilization()
         if not settings.enabled:
-            self.stabilization_tab.set_info("Estabilização desativada.")
+            self.stabilization_tab.set_info("")
             return
 
-        flags = (
-            f"Crop automático: {'ligado' if settings.auto_crop else 'desligado'}. "
-            f"Zoom out: {'ligado' if settings.zoom_out else 'desligado'}. "
-            f"Suavização temporal: {int(settings.temporal_smoothing * 100)}%."
-        )
-        sequential_note = " Exportação usa processamento sequencial nesse modo."
-        descriptions = {
-            StabilizationMode.AUTO: (
-                "Automático por translação: acompanha o deslocamento global entre frames consecutivos. "
-            ),
-            StabilizationMode.SIMILARITY: (
-                "Automático por similaridade: compensa translação, rotação leve e pequenas variações de escala "
-                "entre frames consecutivos. "
-            ),
-            StabilizationMode.PERSPECTIVE: (
-                "Automático por perspectiva: estima uma homografia global para lidar melhor com parallax leve "
-                "e mudanças de perspectiva pequenas. "
-            ),
-        }
-        if settings.mode in descriptions:
-            self.stabilization_tab.set_info(descriptions[settings.mode] + flags + sequential_note)
-            return
-
-        region = settings.focus_rect.to_pixels(*self.source_size)
-        if region is None:
-            self.stabilization_tab.set_info("Estabilização: selecione um ponto ou região focal no preview.")
-            return
-        reference = (
-            f"Referência: frame {self.stabilization_reference_frame_index + 1}. Região: {region[2]}x{region[3]}. "
-        )
-        if settings.mode is StabilizationMode.HYBRID:
-            self.stabilization_tab.set_info(
-                "Híbrido ativo. Tenta prender a região verde com camera lock e, se perder o alvo, faz fallback "
-                "progressivo para estabilização global. " + reference + flags
-            )
-            return
-        self.stabilization_tab.set_info(
-            "Camera lock ativo. Usa features da região verde para estimar uma transformação robusta e tenta "
-            "manter esse enquadramento preso ao frame de referência. " + reference + flags
-        )
+        facts = [
+            f"Crop automático {'ligado' if settings.auto_crop else 'desligado'}",
+            f"zoom out {'ligado' if settings.zoom_out else 'desligado'}",
+            f"suavização {int(settings.temporal_smoothing * 100)}%",
+        ]
+        if settings.mode.uses_focal_point:
+            region = settings.focus_rect.to_pixels(*self.source_size)
+            if region is None:
+                facts.insert(0, "Selecione a região focal no preview")
+            else:
+                facts.insert(0, f"Referência: frame {self.stabilization_reference_frame_index + 1}")
+                facts.insert(1, f"região {region[2]}x{region[3]} px (arraste o retângulo verde no preview)")
+        else:
+            facts.append("exportação sequencial")
+        self.stabilization_tab.set_info(" · ".join(facts) + ".")
 
     # =====================================================================================
     # Crop
@@ -1215,7 +1189,10 @@ class MainWindow(QMainWindow):
 
     def _sync_crop_preview(self) -> None:
         self.preview.set_crop_state(
-            self.geometry_tab.crop_enabled(), self.crop_rect_norm, self._normalized_crop_aspect_ratio()
+            self.geometry_tab.crop_enabled(),
+            self.crop_rect_norm,
+            self._normalized_crop_aspect_ratio(),
+            editing=self._tab_is_active(self.geometry_tab),
         )
 
     def _update_crop_info_label(self) -> None:
@@ -1399,6 +1376,45 @@ class MainWindow(QMainWindow):
         if self._export_output_path is None:
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._export_output_path.parent)))
+
+    # =====================================================================================
+    # Keyboard
+    # =====================================================================================
+    def _transport_actions(self) -> tuple[QAction, ...]:
+        return (
+            self.play_action,
+            self.first_frame_action,
+            self.previous_frame_action,
+            self.next_frame_action,
+            self.last_frame_action,
+            self.mark_start_action,
+            self.mark_end_action,
+        )
+
+    def _bare_key_handlers(self) -> dict[int, Callable[[], None]]:
+        return {
+            Qt.Key.Key_Space: self._toggle_playback,
+            Qt.Key.Key_Left: self._go_to_previous_frame,
+            Qt.Key.Key_Right: self._go_to_next_frame,
+            Qt.Key.Key_Home: self._go_to_first_frame,
+            Qt.Key.Key_End: self._go_to_last_frame,
+            Qt.Key.Key_I: self._mark_clip_start,
+            Qt.Key.Key_O: self._mark_clip_end,
+        }
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Transport keys reach here only when the focused widget did not use them.
+
+        A focused slider keeps its arrow keys and a focused button keeps Space; from anywhere
+        else the same keys drive playback and the clip markers.
+        """
+        if event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier):
+            handler = self._bare_key_handlers().get(event.key())
+            if handler is not None:
+                handler()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._stop_playback()

@@ -1,4 +1,8 @@
-"""Tab "Ruído": denoise mode, NLMeans windows, strengths and the noise-sample region controls."""
+"""Tab "Ruído": denoise mode, NLMeans windows, strengths and the noise-sample region.
+
+The sample region is edited directly on the preview whenever this tab is active and
+the mode is "Amostra do preview"; there is no separate "edit" toggle.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,6 @@ from space_video_enhancer.ui.tabs.base import (
     form_rows,
     group_box,
     select_combo_data,
-    set_checked_silently,
 )
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
@@ -31,7 +34,6 @@ class NoiseTab(TabPage):
     controlChanged = Signal()
     resetRequested = Signal(str)
     """A slider's "back to preset" button; carries the ``FilterSettings`` field name."""
-    sampleEditToggled = Signal(bool)
     sampleResetRequested = Signal()
 
     def __init__(self) -> None:
@@ -50,9 +52,8 @@ class NoiseTab(TabPage):
             "denoise_strength": self.strength_slider,
             "denoise_color_strength": self.color_slider,
         }
-        self.sample_edit_button = QPushButton("Editar amostra no preview")
-        self.sample_edit_button.setCheckable(True)
-        self.sample_reset_button = QPushButton("Resetar amostra")
+        self.sample_reset_button = QPushButton("Redefinir amostra")
+        self.sample_reset_button.setObjectName("secondaryButton")
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
         self.sample_info_label = QLabel()
@@ -63,7 +64,6 @@ class NoiseTab(TabPage):
         for field_name, slider in self.sliders.items():
             slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
             slider.resetRequested.connect(lambda name=field_name: self.resetRequested.emit(name))
-        self.sample_edit_button.toggled.connect(self.sampleEditToggled.emit)
         self.sample_reset_button.clicked.connect(self.sampleResetRequested.emit)
 
         self.add_sections(
@@ -76,9 +76,8 @@ class NoiseTab(TabPage):
                 ),
                 self.strength_slider,
                 self.color_slider,
-                self.sample_edit_button,
-                self.sample_reset_button,
                 self.info_label,
+                self.sample_reset_button,
                 self.sample_info_label,
             )
         )
@@ -108,26 +107,22 @@ class NoiseTab(TabPage):
                 widget.blockSignals(False)
 
     def update_controls_state(self, has_video: bool) -> None:
-        """Strengths only in manual mode, sample buttons only in sample mode."""
+        """Strengths only in manual mode, the sample reset only in sample mode."""
         mode = self.mode()
         controls_enabled = has_video and self.mode_combo.isEnabled()
         manual = controls_enabled and mode is DenoiseMode.MANUAL
         sample = controls_enabled and mode is DenoiseMode.SAMPLE
         self.strength_slider.setEnabled(manual)
         self.color_slider.setEnabled(manual)
-        self.sample_edit_button.setEnabled(sample)
         self.sample_reset_button.setEnabled(sample)
-        if not sample:
-            set_checked_silently(self.sample_edit_button, False)
+        self.sample_reset_button.setVisible(mode is DenoiseMode.SAMPLE)
+        self.sample_info_label.setVisible(mode is DenoiseMode.SAMPLE)
 
     def set_info(self, text: str) -> None:
         self.info_label.setText(text)
 
     def set_sample_info(self, text: str) -> None:
         self.sample_info_label.setText(text)
-
-    def set_sample_edit_checked_silently(self, checked: bool) -> None:
-        set_checked_silently(self.sample_edit_button, checked)
 
     def set_controls_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -136,7 +131,6 @@ class NoiseTab(TabPage):
             self.search_combo,
             self.strength_slider,
             self.color_slider,
-            self.sample_edit_button,
             self.sample_reset_button,
         ):
             widget.setEnabled(enabled)

@@ -187,7 +187,7 @@ FILTER_PRESETS: tuple[tuple[str, FilterSettings | None], ...] = (
         ),
     ),
     (
-        "Recuperacao forte",
+        "Recuperação forte",
         FilterSettings(
             denoise_mode=DenoiseMode.MANUAL,
             denoise_strength=38,
