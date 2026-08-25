@@ -7,48 +7,13 @@ MVP desktop para abrir um video local, comparar antes e depois quadro a quadro, 
 - Python 3.9+
 - FFmpeg instalado e disponivel no `PATH`
 
-No Windows, instale:
-
-- Python 3.9+ 64-bit
-- FFmpeg com a pasta `bin` adicionada ao `PATH`
-- Microsoft Visual C++ Redistributable 2015-2022 x64 apenas se aparecer erro de DLL ao abrir o app
-
 No macOS com Homebrew:
 
 ```bash
 brew install ffmpeg
 ```
 
-No Windows, uma opcao comum e:
-
-1. baixar o FFmpeg em build pronta para Windows
-2. extrair para uma pasta como `C:\ffmpeg`
-3. adicionar `C:\ffmpeg\bin` ao `PATH`
-4. abrir um novo PowerShell e confirmar com `ffmpeg -version`
-
-Se preferir instalar com `winget`, um caminho comum e:
-
-```powershell
-winget install --id Python.Python.3.12 -e
-winget install --id Gyan.FFmpeg -e
-```
-
-Depois, feche e abra um novo PowerShell e confirme:
-
-```powershell
-python --version
-ffmpeg -version
-```
-
-## Instalar dependencias
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m ensurepip --upgrade
-python -m pip install --upgrade pip
-python -m pip install .
-```
+No Windows, instale Python 3.9+ 64-bit e FFmpeg com a pasta `bin` no `PATH` (por exemplo `winget install --id Python.Python.3.12 -e` e `winget install --id Gyan.FFmpeg -e`). Confirme com `python --version` e `ffmpeg -version` em um PowerShell novo. Microsoft Visual C++ Redistributable 2015-2022 x64 so e necessario se aparecer erro de DLL ao abrir o app.
 
 ## Executar
 
@@ -58,78 +23,84 @@ python -m pip install .
 
 O script cria a `.venv` se necessario, garante `pip`, instala as dependencias quando o projeto muda e inicia a interface.
 
-## Windows
+Manualmente (macOS/Linux):
 
-O `run.sh` e voltado para macOS/Linux. No Windows, rode manualmente no PowerShell:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install .
+python -m space_video_enhancer
+```
+
+No Windows (PowerShell):
 
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m ensurepip --upgrade
 python -m pip install --upgrade pip
 python -m pip install .
-python main.py
+python -m space_video_enhancer
 ```
 
-Se a ativacao do ambiente virtual for bloqueada no PowerShell, rode antes:
+Se a ativacao do ambiente virtual for bloqueada, rode antes `Set-ExecutionPolicy -Scope Process Bypass`. `python main.py` continua funcionando como atalho.
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
+## Estrutura do projeto
+
+```
+space_video_enhancer/
+  settings.py              # enums + snapshots imutaveis (RenderSettings) que a UI entrega ao pipeline
+  pipeline/
+    render.py              # render_frame(frame, settings, ...) — o unico pipeline (preview, miniaturas, export)
+    filters.py             # denoise/contraste/gama/saturacao/temperatura/nitidez/escala (CPU ou OpenCL)
+    presets.py             # presets tonais ("Sombras abertas", "Atenuar quentes", ...)
+    denoise.py             # estimativa de ruido (modos Auto e Amostra)
+    geometry.py            # rotacao, espelhamento e crop
+    stabilization/         # estado, transformacoes, estimadores e orquestracao
+  export/
+    ffmpeg.py              # descoberta do ffmpeg, escolha de encoder e montagem do comando
+    job.py                 # exportacao pura (sem Qt): decodifica -> render_frame -> stdin do ffmpeg
+    worker.py              # adaptador QThread com sinais de progresso/termino
+  ui/
+    main_window.py         # monta widgets e produz RenderSettings; nao processa imagem
+    widgets/               # LabeledSlider, FrameRangeSlider, ComparePreview (+ SelectionOverlay)
+    theme.qss              # estilo
+tests/                     # pytest; roda sem display (o pipeline nao depende de Qt)
 ```
 
-Se preferir, tambem pode iniciar sem ativar o ambiente virtual:
+Regras da arquitetura:
 
-```powershell
-.\.venv\Scripts\python.exe main.py
+- O pipeline e puro: `render_frame(frame, settings, ...)` nao le widgets nem estado global. A UI le os widgets uma vez, monta um `RenderSettings` congelado e entrega ao pipeline, ao worker de export e as miniaturas.
+- Ordem fixa: estabilizacao -> filtros basicos (inclui escala) -> preset de imagem -> geometria -> crop. O crop e o ultimo passo, no mesmo sistema de coordenadas do preview rotacionado/espelhado, entao o retangulo desenhado e exatamente o exportado.
+- Exportacao roda em `QThread` (`export/worker.py`) sobre `run_export` (`export/job.py`). Cancelamento e falha sempre encerram o ffmpeg e apagam o arquivo parcial.
+- O MP4 sai em `yuv420p` com `+faststart` e dimensoes pares, para tocar em QuickTime, iOS e decoders de hardware.
+
+## Desenvolvimento
+
+```bash
+python -m pip install -e ".[dev]"
+ruff check . && ruff format --check .
+mypy space_video_enhancer
+pytest
 ```
 
-Observacoes para Windows:
-
-- a interface pode abrir sem FFmpeg, mas a exportacao do video nao funciona
-- normalmente nao e necessario instalar Visual Studio Build Tools, porque as dependencias costumam ter wheels prontas
-- Git so e necessario se voce for clonar o repositorio
-
-## Gerenciamento de pacotes
-
-Voce nao precisa de algo como `yarn` para este projeto. Aqui o fluxo padrao e:
-
-- `venv` para isolar o ambiente
-- `pip` para instalar dependencias
-- `pyproject.toml` para declarar os pacotes do projeto
-
-Se depois voce quiser uma experiencia mais moderna e rapida, a alternativa natural no ecossistema Python e `uv`, nao `yarn`.
+Os testes de exportacao ponta a ponta usam o `ffmpeg` do `PATH` e sao pulados se ele nao existir.
 
 ## O que o MVP faz
 
-- seleciona um video local
-- permite navegar pelos frames com um slider
-- inclui botoes para ir ao inicio, voltar um frame, avancar um frame, ir ao final e reproduzir a visualizacao quadro a quadro
-- permite redimensionar a area de preview com zoom por botoes e percentual de exibicao
-- organiza os ajustes laterais em abas tematicas para cor e detalhe, filtros, geometria, ruido, estabilizacao e midia
-- inclui uma aba `Filtros` com presets de imagem em miniatura baseados no frame selecionado, atualizados quando o preview esta pausado, e um controle de intensidade do preset atual
-- inclui barra de menu superior com secoes como `Arquivo`, `Editar`, `Reproducao` e `Ajuda`
-- exibe comparacao antes/depois com divisor arrastavel
-- inclui crop interativo sobre o preview, com presets de proporcao e modo livre
-- oferece rotacao predefinida em 90, 180 e 270 graus, alem de espelhamento horizontal e vertical na aba de geometria
-- aplica a melhoria sempre com OpenCV frame a frame no preview e na exportacao
-- oferece presets de melhoria para partir de um ajuste base
-- permite resetar cada slider para o valor do preset ativo
-- ajusta denoise com modo desativado, manual, auto ou baseado em uma amostra independente escolhida no preview, alem de nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
-- inclui estabilizacao com modo automatico por movimento global entre frames ou por ponto/regiao focal com selecao direta no preview, intensidade de compensacao e crop automatico para esconder bordas
-- oferece filtros iniciais para equilibrio de sombras, realces, varias camadas de contraste local e atenuacao seletiva de cores quentes ou frias em cenas com faixa dinamica dificil
-- permite marcar frame inicial e final na aba de exportacao para exportar apenas um corte do video, com indicadores visuais no slider
-- mostra barra de progresso durante a exportacao
-- permite cancelar uma exportacao em andamento sem fechar o programa
-- exporta um novo arquivo localmente, usando FFmpeg apenas para encode final e mux do audio original
-- tenta usar aceleracao GPU automaticamente no processamento e na exportacao, com fallback para CPU quando necessario
+- seleciona um video local e navega pelos frames com slider, botoes de transporte e reproducao quadro a quadro
+- zoom do preview por botoes e percentual, com modos de qualidade (alta, balanceado, rapido) e pulo de frames na reproducao
+- comparacao antes/depois com divisor arrastavel
+- abas tematicas: cor e detalhe, filtros (presets com miniaturas do frame atual), estabilizacao, geometria, ruido e midia
+- presets de melhoria e reset por slider para o valor do preset ativo
+- denoise desativado, manual, auto ou por amostra escolhida no preview; nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
+- estabilizacao por translacao, similaridade, perspectiva, camera lock por regiao focal ou hibrida, com intensidade, suavizacao temporal, crop automatico e zoom out
+- filtros tonais para sombras, realces, contraste local e atenuacao de cores quentes/frias
+- crop interativo com presets de proporcao e modo livre; rotacao 90/180/270 e espelhamento
+- corte temporal por frame inicial/final com marcadores no slider
+- exportacao local com barra de progresso e cancelamento, usando FFmpeg apenas para encode e mux do audio original
+- tenta encoders de hardware (NVENC, VAAPI) e OpenCL quando disponiveis, com fallback automatico para CPU/libx264
 
 ## Aceleracao por GPU
 
-O app agora tenta usar aceleracao GPU automaticamente sempre que houver suporte:
-
-Importante:
-
-- o processamento continua tendo partes em CPU, entao o ganho real depende do video, dos filtros ativos e do driver da placa
-- se OpenCL ou o encoder de hardware nao estiverem disponiveis, o app faz fallback automatico para CPU
-- no Linux, o caminho `VAAPI` normalmente exige um dispositivo como `/dev/dri/renderD128`
-- para placas NVIDIA, o FFmpeg precisa ter sido compilado com suporte a `nvenc`
+O processamento em OpenCV pode usar OpenCL (T-API) e o encode pode usar NVENC ou VAAPI. Na pratica o ganho depende do video, dos filtros ativos e do driver: o denoise ganha um pouco, os filtros leves nao. Se OpenCL ou o encoder de hardware falharem, o app cai para CPU e `libx264` automaticamente. No Linux, VAAPI exige um dispositivo como `/dev/dri/renderD128`; para NVIDIA, o FFmpeg precisa ter sido compilado com `nvenc`.

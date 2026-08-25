@@ -36,4 +36,4 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "Aviso: ffmpeg nao encontrado no PATH. A interface abre, mas a exportacao nao vai funcionar." >&2
 fi
 
-exec python main.py "$@"
+exec python -m space_video_enhancer "$@"
