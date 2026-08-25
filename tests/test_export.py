@@ -12,7 +12,16 @@ import cv2
 import numpy as np
 import pytest
 
-from space_video_enhancer.export.ffmpeg import LIBX264, NVENC, VAAPI, FfmpegProbe, build_export_command, resolve_encoder
+from space_video_enhancer.export.ffmpeg import (
+    LIBX264,
+    NVENC,
+    VAAPI,
+    FfmpegProbe,
+    audio_concat_filter,
+    build_export_command,
+    resolve_encoder,
+    source_has_audio,
+)
 from space_video_enhancer.export.job import ExportRequest, run_export
 from space_video_enhancer.settings import (
     CropSettings,
@@ -98,7 +107,13 @@ def _probe_video(path: Path) -> dict:  # type: ignore[type-arg]
     return json.loads(output)["streams"][0]
 
 
-def _request(source: Path, output: Path, settings: RenderSettings, workers: int) -> ExportRequest:
+def _request(
+    source: Path,
+    output: Path,
+    settings: RenderSettings,
+    workers: int,
+    cuts: tuple[tuple[int, int], ...] = (),
+) -> ExportRequest:
     assert FFMPEG is not None
     return ExportRequest(
         source_path=source,
@@ -110,7 +125,64 @@ def _request(source: Path, output: Path, settings: RenderSettings, workers: int)
         worker_count=workers,
         ffmpeg_path=FFMPEG,
         encoder=LIBX264,
+        cuts=cuts,
     )
+
+
+def test_multi_segment_command_trims_and_concatenates_the_audio() -> None:
+    segments = ((0.0, 1.0), (2.0, 3.5))
+    command = build_export_command(
+        "ffmpeg",
+        width=64,
+        height=64,
+        fps=24.0,
+        source_path=Path("in.mp4"),
+        start_seconds=0.0,
+        duration_seconds=2.5,
+        encoder=LIBX264,
+        output_path=Path("out.mp4"),
+        segments_seconds=segments,
+        has_audio=True,
+    )
+    assert "-ss" not in command and "-filter_complex" in command
+    graph = command[command.index("-filter_complex") + 1]
+    assert graph == audio_concat_filter(segments)
+    assert graph.count("atrim=") == 2 and "concat=n=2:v=0:a=1[aout]" in graph and "asetpts=PTS-STARTPTS" in graph
+    assert command[command.index("-map") + 1] == "0:v:0" and "[aout]" in command
+    silent = build_export_command(
+        "ffmpeg",
+        width=64,
+        height=64,
+        fps=24.0,
+        source_path=Path("in.mp4"),
+        start_seconds=0.0,
+        duration_seconds=2.5,
+        encoder=LIBX264,
+        output_path=Path("out.mp4"),
+        segments_seconds=segments,
+        has_audio=False,
+    )
+    assert "-an" in silent and "-filter_complex" not in silent and "aac" not in silent
+    single = _command(LIBX264)
+    assert "-ss" in single and "1:a?" in single  # one segment keeps the original, proven command
+
+
+def test_request_segments_follow_the_cuts(tmp_path: Path) -> None:
+    request = ExportRequest(
+        source_path=tmp_path / "in.mp4",
+        output_path=tmp_path / "out.mp4",
+        settings=RenderSettings(),
+        start_frame=0,
+        end_frame=11,
+        fps=24.0,
+        worker_count=1,
+        ffmpeg_path="ffmpeg",
+        encoder=LIBX264,
+        cuts=((3, 4), (8, 9)),
+    )
+    assert [(segment.start, segment.end) for segment in request.segments] == [(0, 2), (5, 7), (10, 11)]
+    assert request.expected_frames == 8 and request.duration_seconds == 8 / 24.0
+    assert request.segments_seconds[1] == (5 / 24.0, 8 / 24.0)
 
 
 @requires_ffmpeg
@@ -138,6 +210,31 @@ def test_end_to_end_export_produces_playable_yuv420p(tmp_path: Path, workers: in
     assert stream["pix_fmt"] == "yuv420p"
     assert (stream["width"], stream["height"]) == (64, 64)
     assert int(stream["nb_read_frames"]) == 12
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("workers", [1, 3])
+def test_cuts_inside_the_clip_are_removed_from_the_export(tmp_path: Path, workers: int) -> None:
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source)
+    assert source_has_audio(FFMPEG or "ffmpeg", source) is False  # VideoWriter output carries no audio
+    settings = RenderSettings(filters=FilterSettings(sharpen=0))
+    request = _request(source, output, settings, workers, cuts=((3, 4), (8, 9)))
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event())
+    assert result.success, result.message
+    assert result.processed_frames == 8 and result.expected_frames == 8
+    assert int(_probe_video(output)["nb_read_frames"]) == 8
+
+
+@requires_ffmpeg
+def test_cuts_that_remove_everything_fail_before_ffmpeg_starts(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source)
+    request = _request(source, output, RenderSettings(), 1, cuts=((0, 11),))
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event())
+    assert not result.success and "nada a exportar" in result.message and not output.exists()
 
 
 @requires_ffmpeg
