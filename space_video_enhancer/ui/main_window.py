@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.export.ffmpeg import FfmpegProbe, find_ffmpeg, resolve_encoder
 from space_video_enhancer.export.job import ExportRequest, ExportResult
 from space_video_enhancer.export.worker import ExportController
@@ -75,7 +76,7 @@ from space_video_enhancer.ui.tabs.grade import ColorGradeTab
 from space_video_enhancer.ui.tabs.noise import NoiseTab
 from space_video_enhancer.ui.tabs.stabilization import StabilizationTab
 from space_video_enhancer.ui.theme import load_stylesheet
-from space_video_enhancer.ui.timeline_media import FilmstripController
+from space_video_enhancer.ui.timeline_media import FilmstripController, WaveformController
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
 from space_video_enhancer.ui.widgets.status_panel import StatusPanel
 from space_video_enhancer.ui.widgets.transport_bar import TransportBar
@@ -93,6 +94,8 @@ INTERACTIVE_DENOISE_SIZE_LIMIT = 640
 IDLE_REFRESH_DELAY_MS = 250
 """After the last interactive render, the resting frame is re-rendered at full quality."""
 INTERACTIVE_REASONS = ("scrub", "playback")
+WAVEFORM_BUCKETS_PER_FRAME = 4
+"""Audio peaks resolution for the timeline: four buckets per video frame keeps a 1 h clip under 4 MB."""
 PREVIEW_REFRESH_DELAY_MS = {PreviewRenderMode.FAST: 20, PreviewRenderMode.BALANCED: 35, PreviewRenderMode.HIGH: 50}
 PREVIEW_ZOOM_STEPS = (25, 50, 100, 200, 400)
 """Fixed zoom levels; 100% shows one output pixel per logical screen pixel. "Ajustar" (fit) is the default."""
@@ -151,6 +154,8 @@ class MainWindow(QMainWindow):
         self._preview_controller.thumbnailsReady.connect(self._on_thumbnails_ready)
         self._filmstrip = FilmstripController(self)  # its own decoder thread: timeline seeks never stall the preview
         self._filmstrip.thumbnailReady.connect(self._on_filmstrip_thumbnail)
+        self._waveform = WaveformController(self)
+        self._waveform.peaksReady.connect(self._on_waveform_ready)
         self._preview_controller.renderFailed.connect(self._on_render_failed)
         self._preview_generation = 0
         self._applied_preview_generation = -1
@@ -613,6 +618,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{path.name} — Space Video Enhancer")
         self.transport.set_frame_count(self.frame_count, self.fps, width / height if height else 16 / 9)
         self._filmstrip.set_video(path)
+        ffmpeg_path = find_ffmpeg()
+        if ffmpeg_path is None:
+            self.transport.set_audio_state("unavailable")
+        else:
+            self.transport.set_audio_state("loading")
+            self._waveform.load(path, ffmpeg_path, self.fps * WAVEFORM_BUCKETS_PER_FRAME)
         self.preview.set_display_reference_size(*self._displayed_size())
         self._set_controls_enabled(True)
         self._update_timeline_markers()
@@ -842,6 +853,10 @@ class MainWindow(QMainWindow):
 
     def _on_filmstrip_thumbnail(self, _generation: int, frame: int, image: QImage) -> None:
         self.transport.set_thumbnail(frame, image)
+
+    def _on_waveform_ready(self, path: Path, peaks: AudioPeaks | None) -> None:
+        if path == self.video_path:  # a result for a video that was closed meanwhile is dropped
+            self.transport.set_waveform(peaks)
 
     def _set_cuts_from_timeline(self, cuts: Sequence[tuple[int, int]], finished: bool) -> None:
         """A cut edge or body dragged on the timeline; logged once, when the drag ends."""
@@ -1703,6 +1718,7 @@ class MainWindow(QMainWindow):
             self._export_controller.stop()
             self._export_controller = None
         self._filmstrip.stop()
+        self._waveform.stop()
         self._preview_controller.stop()  # also releases the video it owns
         self.video = None
         super().closeEvent(event)

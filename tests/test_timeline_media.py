@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
 import threading
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
@@ -12,12 +14,14 @@ pytest.importorskip("PySide6")
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
+from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.ui.main_window import MainWindow
-from space_video_enhancer.ui.timeline_media import FilmstripController
+from space_video_enhancer.ui.timeline_media import FilmstripController, WaveformController
 from space_video_enhancer.ui.widgets.timeline import THUMBNAIL_CACHE_SIZE, VIDEO_TRACK_HEIGHT, TimelineWidget
 from space_video_enhancer.video import VideoSource
 from tests.conftest import UI_VIDEO_FRAMES
 from tests.qt_helpers import pump, wait_for_preview, wait_until
+from tests.test_audio import tone_file
 
 
 def test_filmstrip_decodes_on_its_own_thread(
@@ -126,3 +130,80 @@ def test_main_window_fills_the_filmstrip_after_opening(app: QApplication, window
     window._open_video(ui_video)  # reopening clears and refills
     wait_for_preview(app, window)
     wait_until(app, lambda: expected <= set(timeline._thumbnails), what="filmstrip refill")
+
+
+def _loud_between(seconds_from: float, seconds_to: float, total_seconds: float, bps: float) -> AudioPeaks:
+    count = round(total_seconds * bps)
+    minimums = np.zeros(count, dtype=np.float32)
+    maximums = np.zeros(count, dtype=np.float32)
+    loud = slice(round(seconds_from * bps), round(seconds_to * bps))
+    minimums[loud] = -0.8
+    maximums[loud] = 0.8
+    return AudioPeaks(minimums, maximums, bps)
+
+
+def test_waveform_columns_follow_the_zoom(app: QApplication) -> None:
+    timeline = TimelineWidget()
+    timeline.resize(800, timeline.sizeHint().height())
+    timeline.show()
+    pump(app, 0.02)
+    timeline.set_media(1200, 30.0)  # 40 s
+    assert timeline.audio_state() == "none"
+    timeline.set_audio_state("loading")
+    timeline.grab()  # paints the state text
+    timeline.set_waveform(_loud_between(10.0, 20.0, 40.0, 120.0))
+    assert timeline.audio_state() == "ready"
+    columns = timeline.waveform_columns(0, 800)
+    assert columns is not None
+    minimums, maximums = columns
+    assert minimums.shape == (800,) and maximums.shape == (800,)
+    scale = timeline.scale
+    assert maximums[int(scale.x_of(450))] == pytest.approx(0.8) and minimums[int(scale.x_of(450))] == pytest.approx(
+        -0.8
+    )
+    assert maximums[int(scale.x_of(150))] == 0.0 and maximums[int(scale.x_of(900))] == 0.0
+    loud_columns = int(np.count_nonzero(maximums > 0.5))
+    assert loud_columns == pytest.approx(200, abs=3), "10 s of 40 s in 800 px"
+    timeline.zoom_by(8.0, scale.x_of(450))  # ~5 s in view around 15 s: everything is loud
+    columns = timeline.waveform_columns(0, 800)
+    assert columns is not None and np.all(columns[1] > 0.5)
+    timeline.grab()
+    timeline.set_waveform(None)
+    assert timeline.audio_state() == "none" and timeline.waveform_columns(0, 800) is None
+    timeline.close()
+
+
+def test_waveform_columns_past_the_audio_end_are_silent(app: QApplication) -> None:
+    timeline = TimelineWidget()
+    timeline.resize(800, timeline.sizeHint().height())
+    timeline.set_media(1200, 30.0)  # 40 s of video ...
+    timeline.set_waveform(_loud_between(0.0, 20.0, 20.0, 120.0))  # ... but only 20 s of audio
+    columns = timeline.waveform_columns(0, 800)
+    assert columns is not None
+    assert np.all(columns[1][:395] > 0.5) and np.all(columns[1][405:] == 0.0)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not on PATH")
+def test_waveform_controller_loads_on_its_own_thread(app: QApplication, tmp_path: Path) -> None:
+    controller = WaveformController()
+    results: list[tuple[Path, AudioPeaks | None]] = []
+    controller.peaksReady.connect(lambda path, peaks: results.append((path, peaks)))
+    try:
+        tone = tone_file(tmp_path, seconds=0.5)
+        controller.load(tone, shutil.which("ffmpeg") or "ffmpeg", 100.0)
+        wait_until(app, lambda: len(results) == 1, what="waveform peaks")
+        path, peaks = results[0]
+        assert path == tone and peaks is not None and peaks.bucket_count == 50
+    finally:
+        controller.stop()
+
+
+def test_main_window_reports_the_audio_state_of_the_open_video(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    timeline = window.transport.timeline
+    wait_until(app, lambda: timeline.audio_state() != "loading", what="waveform state")
+    assert timeline.audio_state() == ("none" if shutil.which("ffmpeg") else "unavailable")
+    assert timeline.audio_track_rect().top() > timeline.video_track_rect().bottom()

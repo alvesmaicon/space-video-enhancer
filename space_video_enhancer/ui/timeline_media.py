@@ -1,8 +1,10 @@
-"""Background decoding for the timeline tracks: filmstrip thumbnails.
+"""Background decoding for the timeline tracks: filmstrip thumbnails and the audio waveform.
 
 The filmstrip has its own thread and its own :class:`VideoSource`, so a thumbnail seek never
 delays the preview decoder (and a scrub never delays the thumbnails). The GUI thread only posts
-requests; a newer request cancels whatever is left of the previous one between two frames.
+requests; a newer request cancels whatever is left of the previous one between two frames. The
+waveform runs one ffmpeg decode per video on another thread and reports back tagged with the path,
+so a result for a video that is no longer open is simply dropped.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from pathlib import Path
 import cv2
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from space_video_enhancer.audio import AudioPeaks, load_audio_peaks
 from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.ui.images import frame_to_qimage
 from space_video_enhancer.video import VideoOpenError, VideoSource
@@ -161,4 +164,47 @@ class FilmstripController(QObject):
         self._thread.quit()
         self._thread.wait(timeout_ms)
         self._worker.release_video()
+        self._worker.deleteLater()
+
+
+class WaveformWorker(QObject):
+    peaksReady = Signal(object, object)  # Path, AudioPeaks | None
+
+    @Slot(object, str, float)
+    def load(self, path: Path, ffmpeg_path: str, buckets_per_second: float) -> None:
+        started = time.perf_counter()
+        peaks: AudioPeaks | None = load_audio_peaks(ffmpeg_path, path, buckets_per_second)
+        log_event(
+            LOG,
+            "waveform.load",
+            name=path.name,
+            has_audio=peaks is not None,
+            buckets=peaks.bucket_count if peaks is not None else 0,
+            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
+        )
+        self.peaksReady.emit(path, peaks)
+
+
+class WaveformController(QObject):
+    """Owns the waveform thread; results carry the path they belong to."""
+
+    peaksReady = Signal(object, object)
+    _load = Signal(object, str, float)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._thread = QThread(self)
+        self._thread.setObjectName("timeline-waveform")
+        self._worker = WaveformWorker()
+        self._worker.moveToThread(self._thread)
+        self._load.connect(self._worker.load)  # queued on the worker thread
+        self._worker.peaksReady.connect(self.peaksReady)
+        self._thread.start()
+
+    def load(self, path: Path, ffmpeg_path: str, buckets_per_second: float) -> None:
+        self._load.emit(path, ffmpeg_path, buckets_per_second)
+
+    def stop(self, timeout_ms: int = 10_000) -> None:
+        self._thread.quit()
+        self._thread.wait(timeout_ms)
         self._worker.deleteLater()

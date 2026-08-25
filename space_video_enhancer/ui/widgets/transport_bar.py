@@ -14,6 +14,7 @@ from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
+from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.ui.format import format_timecode
 from space_video_enhancer.ui.icons import glyph_icon
 from space_video_enhancer.ui.widgets.timeline import TimelineWidget
@@ -232,3 +233,9 @@ class TransportBar(QWidget):
 
     def set_thumbnail(self, frame: int, image: QImage) -> None:
         self.timeline.set_thumbnail(frame, image)
+
+    def set_waveform(self, peaks: AudioPeaks | None) -> None:
+        self.timeline.set_waveform(peaks)
+
+    def set_audio_state(self, state: str) -> None:
+        self.timeline.set_audio_state(state)

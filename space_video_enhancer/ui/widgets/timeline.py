@@ -14,6 +14,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
@@ -30,11 +31,13 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QMenu, QScrollBar, QSizePolicy, QWidget
 
+from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.ui.format import format_timecode
 
 RULER_HEIGHT = 22
 TRACK_GAP = 4
 VIDEO_TRACK_HEIGHT = 56
+AUDIO_TRACK_HEIGHT = 36
 SCROLLBAR_HEIGHT = 12
 MIN_WIDTH = 240
 MAX_PIXELS_PER_FRAME = 48.0
@@ -75,6 +78,15 @@ PLAYHEAD_CELL_COLOR = QColor(31, 41, 55, 40)
 TRACK_LABEL_COLOR = QColor("#57534e")
 TRACK_LABEL_BACKGROUND = QColor(252, 250, 247, 200)
 HINT_COLOR = QColor("#9ca3af")
+WAVEFORM_COLOR = QColor(15, 118, 110, 150)
+WAVEFORM_CENTER_COLOR = QColor(15, 118, 110, 90)
+WAVEFORM_MAX_GAIN = 20.0
+"""Quiet audio is scaled up so its loudest peak fills the track, but never more than this."""
+AUDIO_STATE_TEXT = {
+    "loading": "Carregando áudio…",
+    "none": "Sem áudio",
+    "unavailable": "FFmpeg não encontrado: sem forma de onda",
+}
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -246,6 +258,9 @@ class TimelineWidget(QWidget):
         self._thumbnail_frames: list[int] = []
         """Sorted keys of ``_thumbnails`` for the nearest-neighbour fallback while new ones decode."""
         self._thumbnail_key: tuple[int, float] | None = None
+        self._peaks: AudioPeaks | None = None
+        self._waveform_gain = 1.0
+        self._audio_state = "none"
         self._thumbnail_timer = QTimer(self)
         self._thumbnail_timer.setSingleShot(True)
         self._thumbnail_timer.timeout.connect(self.request_missing_thumbnails)
@@ -271,7 +286,7 @@ class TimelineWidget(QWidget):
 
     # --- geometry -----------------------------------------------------------------------
     def track_heights(self) -> tuple[int, ...]:
-        return (VIDEO_TRACK_HEIGHT,)
+        return (VIDEO_TRACK_HEIGHT, AUDIO_TRACK_HEIGHT)
 
     def content_height(self) -> int:
         return RULER_HEIGHT + sum(TRACK_GAP + height for height in self.track_heights())
@@ -297,6 +312,9 @@ class TimelineWidget(QWidget):
     def video_track_rect(self) -> QRect:
         return self.track_rect(0)
 
+    def audio_track_rect(self) -> QRect:
+        return self.track_rect(1)
+
     def tracks_rect(self) -> QRect:
         return QRect(0, RULER_HEIGHT, self.width(), self.content_height() - RULER_HEIGHT)
 
@@ -313,6 +331,9 @@ class TimelineWidget(QWidget):
         self._fps = fps if fps > 0 else 30.0
         self._aspect_ratio = aspect_ratio if aspect_ratio > 0 else DEFAULT_ASPECT_RATIO
         self.clear_thumbnails()
+        self._peaks = None
+        self._audio_state = "none"
+        self.scale.set_width(max(1, self.width()))  # resizeEvent has not run yet when the widget is hidden
         self.scale.fit()
         self._value = 0
         self._selected_cut = -1
@@ -540,6 +561,46 @@ class TimelineWidget(QWidget):
         best = min(candidates, key=lambda cached: abs(cached - frame))
         return self._thumbnails[best] if abs(best - frame) <= tolerance else None
 
+    # --- waveform -------------------------------------------------------------------------
+    def set_waveform(self, peaks: AudioPeaks | None) -> None:
+        """Peaks for the audio track; the display gain makes the loudest peak fill the track (up to a cap)."""
+        self._peaks = peaks
+        self._waveform_gain = 1.0
+        if peaks is not None and peaks.bucket_count:
+            loudest = float(max(peaks.maximums.max(), -peaks.minimums.min(), 0.0))
+            if loudest > 0.0:
+                self._waveform_gain = float(_clamp(0.95 / loudest, 1.0, WAVEFORM_MAX_GAIN))
+        self._audio_state = "ready" if peaks is not None and peaks.bucket_count else "none"
+        self.update()
+
+    def waveform_gain(self) -> float:
+        return self._waveform_gain
+
+    def set_audio_state(self, state: str) -> None:
+        """``loading`` while ffmpeg decodes, ``unavailable`` without ffmpeg; :meth:`set_waveform` sets the rest."""
+        self._audio_state = state
+        self.update()
+
+    def audio_state(self) -> str:
+        return self._audio_state
+
+    def waveform_columns(self, left: int, right: int) -> tuple[np.ndarray, np.ndarray] | None:
+        """``(minimums, maximums)`` per pixel column in ``[left, right)``: the extremes of the buckets it covers."""
+        peaks = self._peaks
+        if peaks is None or peaks.bucket_count == 0 or right <= left:
+            return None
+        xs = np.arange(left, right + 1, dtype=np.float64)
+        seconds = (self.scale.scroll + xs / self.scale.pixels_per_frame) / self._fps
+        raw_edges = np.floor(seconds * peaks.buckets_per_second).astype(np.int64)
+        edges = np.clip(raw_edges, 0, peaks.bucket_count - 1)
+        edges = np.maximum.accumulate(edges)  # reduceat needs non-decreasing indices
+        minimums = np.minimum.reduceat(peaks.minimums, edges)[:-1]
+        maximums = np.maximum.reduceat(peaks.maximums, edges)[:-1]
+        silent = (raw_edges[:-1] >= peaks.bucket_count) | (raw_edges[1:] <= 0)
+        minimums = np.where(silent, 0.0, minimums).astype(np.float32)
+        maximums = np.where(silent, 0.0, maximums).astype(np.float32)
+        return minimums, maximums
+
     # --- hit testing and mouse -----------------------------------------------------------
     def hit_test(self, pos: QPointF) -> Hit:
         x, y = pos.x(), pos.y()
@@ -551,7 +612,7 @@ class TimelineWidget(QWidget):
                     if abs(self.scale.x_of(frame) - x) <= MARKER_GRAB_PX:
                         return Hit(kind)
             return Hit("seek")
-        if self.video_track_rect().contains(QPoint(int(x), int(y))):
+        if self.tracks_rect().contains(QPoint(int(x), int(y))):
             nearest: tuple[float, Hit] | None = None
             for index, (start, end) in enumerate(self._cuts):
                 for kind, frame in (("cut_start", start), ("cut_end", end + 1)):
@@ -697,6 +758,7 @@ class TimelineWidget(QWidget):
             return
         self._paint_ruler(painter)
         self._paint_filmstrip(painter)
+        self._paint_waveform(painter)
         self._paint_tracks(painter)
         self._paint_cuts(painter)
         self._paint_clip_markers(painter)
@@ -740,16 +802,44 @@ class TimelineWidget(QWidget):
                 painter.drawImage(QRectF(x, track.top(), width, height), image)
         painter.setClipping(False)
 
+    def _paint_waveform(self, painter: QPainter) -> None:
+        track = self.audio_track_rect()
+        if self._audio_state != "ready":
+            painter.setPen(HINT_COLOR)
+            painter.drawText(track, Qt.AlignmentFlag.AlignCenter, AUDIO_STATE_TEXT.get(self._audio_state, ""))
+            return
+        columns = self.waveform_columns(0, self.width())
+        if columns is None:
+            return
+        minimums, maximums = columns
+        center = track.top() + track.height() / 2.0
+        half = track.height() / 2.0 - 3.0
+        scale = half * self._waveform_gain
+        xs = np.arange(self.width(), dtype=np.float64) + 0.5
+        upper = [QPointF(x, center - _clamp(float(value) * scale, 0.5, half)) for x, value in zip(xs, maximums)]
+        lower = [
+            QPointF(x, center - _clamp(float(value) * scale, -half, -0.5)) for x, value in zip(xs[::-1], minimums[::-1])
+        ]
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(WAVEFORM_COLOR)
+        painter.drawPolygon(QPolygonF(upper + lower))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(WAVEFORM_CENTER_COLOR, 1))
+        painter.drawLine(QPointF(track.left(), center), QPointF(track.right() + 1, center))
+
     def _paint_tracks(self, painter: QPainter) -> None:
-        track = self.video_track_rect()
         if not self._show_clip:
             return
         start_x = self.scale.x_of(self._clip[0])
         end_x = self.scale.x_of(self._clip[1] + 1)
-        if not self._thumbnails:  # with a filmstrip the kept range is the untinted part
-            painter.fillRect(self._span_rect(track, start_x, end_x), RANGE_COLOR)
-        painter.fillRect(self._span_rect(track, self.scale.x_of(0), start_x), TRACK_OUTSIDE_CLIP_COLOR)
-        painter.fillRect(self._span_rect(track, end_x, self.scale.x_of(self.frame_count)), TRACK_OUTSIDE_CLIP_COLOR)
+        first_x = self.scale.x_of(0)
+        last_x = self.scale.x_of(self.frame_count)
+        for index in range(len(self.track_heights())):
+            track = self.track_rect(index)
+            if index == 0 and not self._thumbnails:  # with a filmstrip the kept range is the untinted part
+                painter.fillRect(self._span_rect(track, start_x, end_x), RANGE_COLOR)
+            painter.fillRect(self._span_rect(track, first_x, start_x), TRACK_OUTSIDE_CLIP_COLOR)
+            painter.fillRect(self._span_rect(track, end_x, last_x), TRACK_OUTSIDE_CLIP_COLOR)
 
     def _paint_cuts(self, painter: QPainter) -> None:
         tracks = self.tracks_rect()
@@ -829,7 +919,7 @@ class TimelineWidget(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def track_labels(self) -> tuple[str, ...]:
-        return ("VÍDEO",)
+        return ("VÍDEO", "ÁUDIO")
 
     @staticmethod
     def _span_rect(track: QRect, left: float, right: float, min_width: float = 0.0) -> QRectF:
