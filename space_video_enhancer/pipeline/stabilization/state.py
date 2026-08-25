@@ -12,6 +12,11 @@ import numpy as np
 
 from space_video_enhancer.pipeline.stabilization import transforms
 
+MAX_FRAME_GAP = 12
+"""Frames a sequence may skip and still continue. The preview drops frames whenever rendering is
+slower than playback (40%+ with heavy filters at 1080p); restarting the path on every drop made
+the stabilization flicker on and off. Larger jumps (scrubbing far away) still restart."""
+
 
 @dataclass
 class StabilizationState:
@@ -34,10 +39,18 @@ class StabilizationState:
         self.__init__()  # type: ignore[misc]
 
     def breaks_sequence(self, frame_index: int | None) -> bool:
-        """True when ``frame_index`` is known and is not the frame right after the remembered one."""
+        """True when ``frame_index`` is known and does not continue the remembered frame (see :func:`frame_gap`)."""
         return (
-            frame_index is not None and self.prev_frame_index is not None and frame_index != self.prev_frame_index + 1
+            frame_index is not None
+            and self.prev_frame_index is not None
+            and frame_gap(self.prev_frame_index, frame_index) is None
         )
+
+    def correction_gap(self, frame_index: int | None) -> int | None:
+        """Frames between the last correction and ``frame_index`` when the sequence continues, else ``None``."""
+        if frame_index is None or self.correction_frame_index is None:
+            return None
+        return frame_gap(self.correction_frame_index, frame_index)
 
     def remember_gray(self, gray: np.ndarray, frame_index: int | None) -> None:
         self.prev_gray = gray
@@ -69,8 +82,8 @@ class StabilizationState:
         return self._correction_in_units_of(width)
 
     def previous_correction(self, frame_index: int | None, width: int) -> np.ndarray | None:
-        """The correction of the frame right before ``frame_index``, if that is what was processed last."""
-        if frame_index is None or self.correction_frame_index != frame_index - 1:
+        """The correction of the last processed frame when ``frame_index`` continues that sequence."""
+        if self.correction_gap(frame_index) is None:
             return None
         return self._correction_in_units_of(width)
 
@@ -82,3 +95,16 @@ class StabilizationState:
         if transforms.is_affine(self.correction):
             return transforms.rescale_affine(self.correction, scale)
         return transforms.rescale_homography(self.correction, scale)
+
+
+def frame_gap(previous_index: int, frame_index: int) -> int | None:
+    """Signed distance from ``previous_index`` to ``frame_index`` when it continues the sequence.
+
+    Consecutive frames give 1; dropped frames give a small positive gap; stepping backwards gives a
+    negative one (motion estimation works either way). Re-rendering the same frame or jumping more
+    than :data:`MAX_FRAME_GAP` frames does not continue the sequence.
+    """
+    gap = frame_index - previous_index
+    if gap == 0 or abs(gap) > MAX_FRAME_GAP:
+        return None
+    return gap

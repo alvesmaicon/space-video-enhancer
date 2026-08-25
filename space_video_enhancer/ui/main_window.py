@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
         self._playback_started_at: float | None = None
         self._playback_frames_shown = 0
         self._playback_intervals = RollingStats(window=60)
+        self._playback_stabilization: Counter[str] = Counter()
         self._playback_last_frame_at: float | None = None
         self._playback_video_counters = (0, 0)
         # Decode metrics arrive with each render result; the GUI never touches the decoder itself.
@@ -638,6 +639,7 @@ class MainWindow(QMainWindow):
         self._playback_started_at = time.monotonic()
         self._playback_frames_shown = 0
         self._playback_intervals = RollingStats(window=60)
+        self._playback_stabilization = Counter()
         self._playback_last_frame_at = None
         self._playback_video_counters = self._video_read_counters
         log_event(
@@ -673,6 +675,8 @@ class MainWindow(QMainWindow):
             "sequential_reads": sequential_now - sequential_before,
             "decode_ms": self._decode_stats.summary(),
         }
+        if self._playback_stabilization:
+            fields["stabilization"] = dict(self._playback_stabilization)
         self._counters["playback_frames"] += self._playback_frames_shown
         log_event(LOG, "playback.stop", **fields)
         self._playback_started_at = None
@@ -919,6 +923,8 @@ class MainWindow(QMainWindow):
                 self._playback_intervals.add((now - self._playback_last_frame_at) * 1000.0)
             self._playback_last_frame_at = now
             self._playback_frames_shown += 1
+            if "stabilization.result" in images.trace:
+                self._playback_stabilization[str(images.trace["stabilization.result"])] += 1
         self.preview.set_images(images.before, images.after)
         if images.generation >= self._preview_generation:
             self.status.set_render_busy(False)

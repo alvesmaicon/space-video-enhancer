@@ -19,7 +19,7 @@ from space_video_enhancer.pipeline.stabilization.stabilize import (
     path_decay,
     smoothing_time_constant,
 )
-from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.pipeline.stabilization.state import MAX_FRAME_GAP, StabilizationState, frame_gap
 from space_video_enhancer.settings import NormalizedRect, StabilizationMode, StabilizationSettings
 
 SHIFT_DOWN, SHIFT_LEFT = 5, 7
@@ -135,6 +135,30 @@ def test_same_frame_reuses_the_correction(textured_frame: np.ndarray, previous_f
     apply_stabilization(textured_frame, settings, frame_index=10, state=state)
     assert state.correction is first  # not accumulated twice
     assert state.correction_frame_index == 10
+
+
+def test_dropped_frames_do_not_restart_the_path() -> None:
+    """Rendering only every 2nd/3rd frame (what the preview does under load) must still stabilize."""
+    frames, _positions = shaky_sequence(count=40)
+    rendered = [index for index in range(40) if index % 5 not in (1, 3)]  # drops two of every five frames
+    settings = StabilizationSettings(mode=StabilizationMode.AUTO, temporal_smoothing=0.5, auto_crop=False)
+    state = StabilizationState()
+    outputs = []
+    for index in rendered:
+        outputs.append(apply_stabilization(frames[index], settings, frame_index=index, state=state))
+        if index > 0:
+            assert state.correction is not None, f"frame {index} restarted the path"
+    before = measured_positions([frames[index] for index in rendered], frames[0])
+    after = measured_positions(outputs, frames[0])
+    assert jitter_std(after) < jitter_std(before) * 0.5
+
+
+def test_frame_gap_rules() -> None:
+    assert frame_gap(10, 11) == 1 and frame_gap(10, 13) == 3 and frame_gap(10, 8) == -2
+    assert frame_gap(10, 10) is None and frame_gap(10, 10 + MAX_FRAME_GAP + 1) is None
+    state = StabilizationState(prev_frame_index=10)
+    assert not state.breaks_sequence(11) and not state.breaks_sequence(10 + MAX_FRAME_GAP)
+    assert state.breaks_sequence(10) and state.breaks_sequence(40) and not state.breaks_sequence(None)
 
 
 def test_sequence_break_restarts_the_path(textured_frame: np.ndarray, previous_frame: np.ndarray) -> None:

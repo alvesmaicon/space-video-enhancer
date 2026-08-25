@@ -12,6 +12,10 @@ jitter is removed while pans survive. The translation part is capped so the corr
 frame never wanders further than :data:`CORRECTION_BUDGET_FRACTION` of the frame — which
 is also the fixed margin the automatic crop removes, on every frame, so the zoom is constant.
 
+Sequences tolerate skipped frames (the preview drops frames when rendering is slower than
+playback): a gap of up to ``MAX_FRAME_GAP`` frames continues the path, decaying it once per
+skipped frame; only larger jumps restart it.
+
 Camera lock estimates an absolute transform onto the reference frame every frame and holds
 the last one while the target is lost. Hybrid does the same but, while lost, keeps the lock
 alive by dead reckoning with the inter-frame motion, releasing it slowly; when the target is
@@ -148,8 +152,9 @@ def follow_smoothed_path(
 
     base = previous if previous is not None else transforms.identity_like(delta)
     accumulated = transforms.compose(base, delta)
+    gap = abs(state.correction_gap(frame_index) or 1)  # skipped frames decay the path as if rendered
     correction = transforms.mix_transforms(
-        transforms.identity_like(accumulated), accumulated, path_decay(settings.temporal_smoothing)
+        transforms.identity_like(accumulated), accumulated, path_decay(settings.temporal_smoothing) ** gap
     )
     correction = transforms.clamp_translation(correction, frame.shape, CORRECTION_BUDGET_FRACTION)
     if not transforms.is_reasonable(correction, frame.shape, allow_perspective=not transforms.is_affine(correction)):
@@ -225,7 +230,7 @@ def hybrid(
         if delta is None:
             delta = transforms.identity_like(previous)
     accumulated = transforms.compose(base, delta)
-    release = 1.0 - 1.0 / HYBRID_RELEASE_FRAMES
+    release = (1.0 - 1.0 / HYBRID_RELEASE_FRAMES) ** abs(state.correction_gap(frame_index) or 1)
     correction = transforms.mix_transforms(transforms.identity_like(accumulated), accumulated, release)
     if not transforms.is_reasonable(correction, frame.shape, allow_perspective=not transforms.is_affine(correction)):
         note("stabilization.rejected", "accumulated")
