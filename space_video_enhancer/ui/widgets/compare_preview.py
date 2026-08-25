@@ -1,4 +1,9 @@
-"""Before/after preview with a draggable split and up to three selection overlays."""
+"""Before/after preview with a draggable split, up to three selection overlays and an empty-state CTA.
+
+Two sizing modes: *fit* (default) fills whatever the scroll area gives it and scales the
+image to fit; *zoom* sizes itself so the output frame shows at ``zoom_factor`` logical
+pixels per output pixel (1.0 = 1:1) and lets the scroll area pan.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +11,29 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QMouseEvent, QPainter, QPaintEvent, QPen
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QResizeEvent,
+)
+from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
 
 HANDLE_SIZE = 10.0
 MIN_SELECTION_SIZE = 0.08
 IMAGE_MARGIN = 18
 MIN_WIDGET_SIZE = QSize(320, 200)
+MAX_WIDGET_SIDE = 16_000
+DEFAULT_REFERENCE_SIZE = QSize(1280, 720)
+MIN_ZOOM = 0.1
+MAX_ZOOM = 8.0
+PLACEHOLDER_TEXT = "Abra um vídeo para comparar antes e depois."
+OPEN_BUTTON_TEXT = "Abrir vídeo…"
 BACKGROUND_COLOR = QColor("#f3f4f6")
 PLACEHOLDER_TEXT_COLOR = QColor("#4b5563")
 SPLIT_LINE_COLOR = QColor("#ffffff")
@@ -110,7 +131,7 @@ SAMPLE_STYLE = OverlayStyle(
     outline_idle=QColor("#60a5fa"),
     handle=QColor("#2563eb"),
     fill=QColor(37, 99, 235, 35),
-    label="Amostra ruido",
+    label="Amostra de ruído",
     label_color=QColor("#1d4ed8"),
     dashed=True,
 )
@@ -262,7 +283,8 @@ class ComparePreview(QWidget):
     cropChanged = Signal(QRectF)
     sampleChanged = Signal(QRectF)
     stabilizationChanged = Signal(QRectF)
-    DEFAULT_BASE_SIZE = QSize(960, 540)
+    openRequested = Signal()
+    """The empty-state "Abrir vídeo" button was clicked."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -270,8 +292,10 @@ class ComparePreview(QWidget):
         self._after: QImage | None = None
         self._split_ratio = 0.5
         self._image_rect = QRectF()
-        self._base_size = QSize(self.DEFAULT_BASE_SIZE)
+        self._reference_size = QSize(DEFAULT_REFERENCE_SIZE)
+        """Output frame size in pixels; zoom 1.0 shows it 1:1 in logical pixels."""
         self._zoom_factor = 1.0
+        self._fit_mode = True
         self._smooth_transform_enabled = True
         self._hud_visible = False
         self._hud_lines: list[str] = []
@@ -282,47 +306,76 @@ class ComparePreview(QWidget):
         # Hit-testing priority: focus region, then noise sample, then crop.
         self._overlays = (self.focus, self.sample, self.crop)
 
+        self.open_button = QPushButton(OPEN_BUTTON_TEXT, self)
+        self.open_button.setObjectName("previewOpenButton")
+        self.open_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_button.clicked.connect(self.openRequested.emit)
+
         self.setMinimumSize(MIN_WIDGET_SIZE)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.resize(self.sizeHint())
+        self._apply_size_policy()
         self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._position_open_button()
 
     # --- sizing -------------------------------------------------------------------------
     def sizeHint(self) -> QSize:
-        width = max(MIN_WIDGET_SIZE.width(), int(self._base_size.width() * self._zoom_factor))
-        height = max(MIN_WIDGET_SIZE.height(), int(self._base_size.height() * self._zoom_factor))
-        return QSize(width, height)
+        if self._fit_mode:
+            return QSize(MIN_WIDGET_SIZE)
+        width = int(self._reference_size.width() * self._zoom_factor) + (2 * IMAGE_MARGIN)
+        height = int(self._reference_size.height() * self._zoom_factor) + (2 * IMAGE_MARGIN)
+        return QSize(
+            max(MIN_WIDGET_SIZE.width(), min(MAX_WIDGET_SIDE, width)),
+            max(MIN_WIDGET_SIZE.height(), min(MAX_WIDGET_SIDE, height)),
+        )
 
     def minimumSizeHint(self) -> QSize:
         return QSize(MIN_WIDGET_SIZE)
 
+    @property
+    def fit_mode(self) -> bool:
+        return self._fit_mode
+
+    def set_fit_mode(self, fit: bool) -> None:
+        if fit == self._fit_mode:
+            return
+        self._fit_mode = fit
+        self._apply_size_policy()
+        self._relayout()
+
     def set_display_reference_size(self, width: int, height: int) -> None:
-        if width <= 0 or height <= 0:
-            self._base_size = QSize(self.DEFAULT_BASE_SIZE)
-        else:
-            bound_width = self.DEFAULT_BASE_SIZE.width()
-            bound_height = self.DEFAULT_BASE_SIZE.height()
-            aspect_ratio = width / height
-            if aspect_ratio >= bound_width / bound_height:
-                target_width = bound_width
-                target_height = max(MIN_WIDGET_SIZE.height(), int(target_width / aspect_ratio))
-            else:
-                target_height = bound_height
-                target_width = max(MIN_WIDGET_SIZE.width(), int(target_height * aspect_ratio))
-            self._base_size = QSize(target_width, target_height)
+        """Size of the output frame (after scale and rotation); defines what 100% means."""
+        size = QSize(width, height) if width > 0 and height > 0 else QSize(DEFAULT_REFERENCE_SIZE)
+        if size == self._reference_size:
+            return
+        self._reference_size = size
         self._relayout()
 
     def set_zoom_factor(self, zoom_factor: float) -> None:
-        self._zoom_factor = max(0.25, min(8.0, zoom_factor))
+        self._zoom_factor = max(MIN_ZOOM, min(MAX_ZOOM, zoom_factor))
         self._relayout()
+
+    def effective_zoom(self) -> float:
+        """Displayed pixels per output pixel; in fit mode this follows the widget size."""
+        if not self._fit_mode:
+            return self._zoom_factor
+        reference_width = self._reference_size.width()
+        if reference_width <= 0:
+            return 1.0
+        if self._image_rect.width() > 0:
+            return self._image_rect.width() / reference_width
+        return self._fit_rect_for_size(self._reference_size).width() / reference_width
 
     def set_render_quality(self, smooth_transform_enabled: bool) -> None:
         self._smooth_transform_enabled = smooth_transform_enabled
-        self._relayout()
+        self.update()
+
+    def _apply_size_policy(self) -> None:
+        policy = QSizePolicy.Policy.Expanding if self._fit_mode else QSizePolicy.Policy.Fixed
+        self.setSizePolicy(policy, policy)
 
     def _relayout(self) -> None:
         self.updateGeometry()
-        self.resize(self.sizeHint())
+        if not self._fit_mode:
+            self.resize(self.sizeHint())
         self.update()
 
     # --- state ---------------------------------------------------------------------------
@@ -338,6 +391,7 @@ class ComparePreview(QWidget):
     def set_images(self, before: QImage | None, after: QImage | None) -> None:
         self._before = before
         self._after = after
+        self.open_button.setVisible(before is None or after is None)
         self.update()
 
     def set_crop_state(self, enabled: bool, crop_rect_norm: QRectF, aspect_ratio: float | None) -> None:
@@ -364,12 +418,11 @@ class ComparePreview(QWidget):
 
         if self._before is None or self._after is None:
             painter.setPen(PLACEHOLDER_TEXT_COLOR)
-            painter.drawText(
-                self.rect(), Qt.AlignmentFlag.AlignCenter, "Selecione um video para comparar antes e depois."
-            )
+            text_rect = QRectF(0.0, self.height() / 2.0 - 64.0, float(self.width()), 24.0)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, PLACEHOLDER_TEXT)
             return
 
-        self._image_rect = self._fit_rect(self._after)
+        self._image_rect = self._fit_rect_for_size(self._after.size())
         painter.drawImage(self._image_rect, self._after)
 
         split_x = self._image_rect.left() + (self._image_rect.width() * self._split_ratio)
@@ -402,6 +455,10 @@ class ComparePreview(QWidget):
 
         if self._hud_visible and self._hud_lines:
             self._draw_hud(painter)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._position_open_button()
 
     # --- mouse ---------------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -442,12 +499,12 @@ class ComparePreview(QWidget):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
 
     # --- helpers -------------------------------------------------------------------------
-    def _fit_rect(self, image: QImage) -> QRectF:
+    def _fit_rect_for_size(self, size: QSize) -> QRectF:
         available = self.rect().adjusted(IMAGE_MARGIN, IMAGE_MARGIN, -IMAGE_MARGIN, -IMAGE_MARGIN)
-        if image.width() <= 0 or image.height() <= 0:
+        if size.width() <= 0 or size.height() <= 0:
             return QRectF(available)
 
-        image_ratio = image.width() / image.height()
+        image_ratio = size.width() / size.height()
         available_ratio = available.width() / max(1, available.height())
         if image_ratio > available_ratio:
             target_width = float(available.width())
@@ -459,6 +516,11 @@ class ComparePreview(QWidget):
         offset_x = available.x() + ((available.width() - target_width) / 2)
         offset_y = available.y() + ((available.height() - target_height) / 2)
         return QRectF(offset_x, offset_y, target_width, target_height)
+
+    def _position_open_button(self) -> None:
+        hint = self.open_button.sizeHint()
+        self.open_button.resize(hint)
+        self.open_button.move((self.width() - hint.width()) // 2, self.height() // 2 - 24)
 
     def _update_split_ratio(self, mouse_x: float) -> None:
         if self._image_rect.width() <= 0:

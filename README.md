@@ -64,10 +64,11 @@ space_video_enhancer/
     job.py                 # exportacao pura (sem Qt): decodifica -> render_frame -> stdin do ffmpeg
     worker.py              # adaptador QThread com sinais de progresso/termino
   ui/
-    main_window.py         # monta widgets e produz RenderSettings; nao processa imagem
+    main_window.py         # orquestra toolbar, splitter, status bar e abas; produz RenderSettings; nao processa imagem
+    tabs/                  # uma classe por aba: Cor, Filtros, Estabilizar, Geometria, Ruido, Exportar
     preview_worker.py      # QThread que renderiza preview e miniaturas; a UI nunca bloqueia
-    widgets/               # LabeledSlider, FrameRangeSlider, ComparePreview (+ SelectionOverlay)
-    theme.qss              # estilo
+    widgets/               # ComparePreview (+ SelectionOverlay), TransportBar, StatusPanel, LabeledSlider, FrameRangeSlider
+    theme.qss              # estilo (icones em ui/icons/)
 tests/                     # pytest; roda sem display (o pipeline nao depende de Qt)
 ```
 
@@ -78,6 +79,8 @@ Regras da arquitetura:
 - Preview e miniaturas rodam em um `QThread` proprio (`ui/preview_worker.py`): a UI envia um `PreviewRequest` por ajuste e so o mais recente e renderizado; resultados antigos sao descartados por numero de geracao. Miniaturas so sao calculadas com a aba Filtros visivel.
 - Exportacao roda em `QThread` (`export/worker.py`) sobre `run_export` (`export/job.py`). Cancelamento e falha sempre encerram o ffmpeg e apagam o arquivo parcial.
 - O MP4 sai em `yuv420p` com `+faststart` e dimensoes pares, para tocar em QuickTime, iOS e decoders de hardware.
+- Layout: toolbar (Abrir, Exportar, zoom, qualidade, metricas) + `QSplitter` com o preview a esquerda e as abas a direita + barra de status persistente (mensagens, indicador de render, progresso/cancelamento da exportacao, info do video). A largura minima do painel de abas e calculada a partir do conteudo real (`MainWindow._fit_settings_panel`), entao nada e cortado nem escondido atras de setas; `tests/test_ui_layout.py` verifica isso offscreen.
+- Zoom do preview: "Ajustar" (padrao) preenche a area disponivel; os percentuais sao pixels do frame de saida por pixel logico da tela (100% = 1:1). Ctrl+0 ajusta, Ctrl++/Ctrl+- mudam de nivel.
 
 ## Desenvolvimento
 
@@ -94,7 +97,7 @@ Os testes de exportacao ponta a ponta usam o `ffmpeg` do `PATH` e sao pulados se
 
 O app grava eventos estruturados (uma linha JSON por evento) em `~/.space-video-enhancer/logs/app.jsonl`, com rotacao em 10 MB x 5. Nada sai do computador: os logs servem para medir e melhorar algoritmos e interface. Nomes de arquivo aparecem sem o diretorio.
 
-Variaveis de ambiente: `SVE_LOG_DIR` (pasta), `SVE_LOG_LEVEL` (`INFO` padrao; `DEBUG` inclui `frame.decode` e `preview.render` durante a reproducao), `SVE_LOG_STDERR=1` (espelha no terminal). O menu `Ajuda > Abrir pasta de logs` abre a pasta; `Exibir > Mostrar metricas no preview` (Ctrl+M) mostra um HUD com tempo de render por estagio, fila, decode, estabilizacao e backend.
+Variaveis de ambiente: `SVE_LOG_DIR` (pasta), `SVE_LOG_LEVEL` (`INFO` padrao; `DEBUG` inclui `frame.decode` e `preview.render` durante a reproducao), `SVE_LOG_STDERR=1` (espelha no terminal). O menu `Ajuda > Abrir pasta de logs` abre a pasta; `Exibir > Metricas` (Ctrl+M, ou o botao Metricas na toolbar) mostra um HUD com tempo de render por estagio, fila, decode, estabilizacao e backend.
 
 Eventos principais:
 
@@ -116,6 +119,7 @@ Analise rapida com pandas:
 
 ```python
 import pandas as pd
+
 df = pd.read_json("~/.space-video-enhancer/logs/app.jsonl", lines=True)
 renders = df[df.event == "preview.render"]
 print(pd.json_normalize(renders.stages).describe())

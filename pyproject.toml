@@ -28,7 +28,7 @@ space-video-enhancer = "space_video_enhancer.app:main"
 include = ["space_video_enhancer*"]
 
 [tool.setuptools.package-data]
-"space_video_enhancer.ui" = ["*.qss"]
+"space_video_enhancer.ui" = ["*.qss", "icons/*.svg"]
 
 [tool.ruff]
 line-length = 120
@@ -48,7 +48,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"space_video_enhancer/ui/**" = ["N802", "N803", "N815"]  # Qt naming (paintEvent, valueChanged, ...)
+"space_video_enhancer/ui/**" = ["N802", "N803", "N815", "RUF001"]  # Qt naming (paintEvent, valueChanged, ...); typographic UI strings
 "tests/**" = ["PLR2004"]
 
 [tool.mypy]
