@@ -65,11 +65,14 @@ class FiltersTab(TabPage):
     def selection(self) -> ImageFilterSelection:
         return ImageFilterSelection(self.active_filter_id, clamp_unit(self.intensity / 100.0))
 
-    def set_thumbnails(self, images: Mapping[str, QImage]) -> None:
+    def set_thumbnails(self, images: Mapping[str, QImage], device_pixel_ratio: float = 1.0) -> None:
+        """``images`` are in device pixels; tagging the ratio keeps them crisp on HiDPI displays."""
         for preset_id, image in images.items():
             button = self.buttons.get(preset_id)
             if button is not None:
-                button.setIcon(QIcon(QPixmap.fromImage(image)))
+                pixmap = QPixmap.fromImage(image)
+                pixmap.setDevicePixelRatio(device_pixel_ratio)
+                button.setIcon(QIcon(pixmap))
 
     def clear_thumbnails(self) -> None:
         for button in self.buttons.values():

@@ -1,0 +1,95 @@
+"""The GUI thread must not decode frames or estimate noise (UI review, iteration C)."""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication
+
+from space_video_enhancer.pipeline import denoise as denoise_module
+from space_video_enhancer.pipeline import filters as filters_module
+from space_video_enhancer.settings import DenoiseMode
+from space_video_enhancer.ui.main_window import MainWindow
+from space_video_enhancer.ui.tabs.base import select_combo_data
+from space_video_enhancer.ui.tabs.filters import FiltersTab
+from space_video_enhancer.video import VideoSource
+from tests.qt_helpers import pump, wait_for_preview
+
+
+def test_frames_are_decoded_on_the_render_thread(
+    app: QApplication, window: MainWindow, ui_video: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decode_threads: list[str] = []
+    original = VideoSource.read_frame
+
+    def spy(self: VideoSource, index: int):  # type: ignore[no-untyped-def]
+        decode_threads.append(threading.current_thread().name)
+        return original(self, index)
+
+    monkeypatch.setattr(VideoSource, "read_frame", spy)
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    window.transport.set_value(2)
+    wait_for_preview(app, window)
+
+    assert len(decode_threads) >= 2
+    assert threading.main_thread().name not in decode_threads
+    assert window._preview_controller.video is window.video, "the worker adopted the decoder"
+    assert window.current_frame is not None and window._decoded_frame_index == 2
+    assert window.current_frame.shape[:2] == (180, 320)
+    assert window._decode_stats.count >= 2 and window._video_read_counters[1] >= 1
+
+
+def test_switching_videos_releases_the_previous_one_on_the_worker(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    first = window.video
+    assert first is not None
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    assert window.video is not first and window._preview_controller.video is window.video
+    assert not first._capture.isOpened(), "the old decoder was released by the worker"
+
+
+def test_denoise_estimate_is_read_from_the_render_trace(
+    app: QApplication, window: MainWindow, ui_video: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    estimate_threads: list[str] = []
+    original = denoise_module.estimate_denoise_strengths
+
+    def spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        estimate_threads.append(threading.current_thread().name)
+        return original(*args, **kwargs)
+
+    for module in (denoise_module, filters_module):
+        if hasattr(module, "estimate_denoise_strengths"):
+            monkeypatch.setattr(module, "estimate_denoise_strengths", spy)
+
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    select_combo_data(window.noise_tab.mode_combo, DenoiseMode.AUTO.value)
+    wait_for_preview(app, window)
+    pump(app, 0.05)
+
+    assert "luminância" in window.noise_tab.info_label.text()
+    assert estimate_threads, "the pipeline still estimates (on the worker)"
+    assert threading.main_thread().name not in estimate_threads
+
+
+def test_thumbnails_are_requested_in_device_pixels(app: QApplication) -> None:
+    tab = FiltersTab()
+    image = QImage(304, 172, QImage.Format.Format_RGB888)
+    image.fill(0x336699)
+    tab.set_thumbnails({"original": image}, device_pixel_ratio=2.0)
+    pixmap = tab.buttons["original"].icon().pixmap(QSize(152, 86), 2.0)
+    assert pixmap.devicePixelRatio() == pytest.approx(2.0)
+    assert pixmap.size() == QSize(304, 172)

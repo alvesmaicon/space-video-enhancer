@@ -50,7 +50,7 @@ Se a ativacao do ambiente virtual for bloqueada, rode antes `Set-ExecutionPolicy
 ```
 space_video_enhancer/
   settings.py              # enums + snapshots imutaveis (RenderSettings) que a UI entrega ao pipeline
-  video.py                 # leitura de frames com decodificacao sequencial (sem seek por frame no playback)
+  video.py                 # leitura de frames com decodificacao sequencial; usado pelo worker de preview e pelo export
   pipeline/
     render.py              # render_frame(frame, settings, ...) — o unico pipeline (preview, miniaturas, export)
     filters.py             # denoise/contraste/gama/saturacao/temperatura/nitidez/escala (CPU ou OpenCL)
@@ -66,7 +66,7 @@ space_video_enhancer/
   ui/
     main_window.py         # orquestra toolbar, splitter, status bar e abas; produz RenderSettings; nao processa imagem
     tabs/                  # uma classe por aba: Cor, Filtros, Estabilizar, Geometria, Ruido, Exportar
-    preview_worker.py      # QThread que renderiza preview e miniaturas; a UI nunca bloqueia
+    preview_worker.py      # QThread que decodifica e renderiza preview e miniaturas; a UI nunca bloqueia
     widgets/               # ComparePreview (+ SelectionOverlay), TransportBar, StatusPanel, LabeledSlider, FrameRangeSlider
     theme.qss              # estilo (icones em ui/icons/)
 tests/                     # pytest; roda sem display (o pipeline nao depende de Qt)
@@ -77,6 +77,7 @@ Regras da arquitetura:
 - O pipeline e puro: `render_frame(frame, settings, ...)` nao le widgets nem estado global. A UI le os widgets uma vez, monta um `RenderSettings` congelado e entrega ao pipeline, ao worker de export e as miniaturas.
 - Ordem fixa: estabilizacao -> filtros basicos (inclui escala) -> preset de imagem -> geometria -> crop. O crop e o ultimo passo, no mesmo sistema de coordenadas do preview rotacionado/espelhado, entao o retangulo desenhado e exatamente o exportado.
 - Preview e miniaturas rodam em um `QThread` proprio (`ui/preview_worker.py`): a UI envia um `PreviewRequest` por ajuste e so o mais recente e renderizado; resultados antigos sao descartados por numero de geracao. Miniaturas so sao calculadas com a aba Filtros visivel.
+- Nada de trabalho por frame na GUI thread: o worker e dono do `VideoSource` (a UI pede um `frame_index` e recebe o frame decodificado junto com o render, em `PreviewImages.source`, que serve de referencia para camera lock e para as miniaturas). A estimativa de denoise mostrada na aba Ruido vem do trace do ultimo render. Miniaturas sao renderizadas em pixels fisicos (`devicePixelRatio`) para ficarem nitidas em telas Retina.
 - Exportacao roda em `QThread` (`export/worker.py`) sobre `run_export` (`export/job.py`). Cancelamento e falha sempre encerram o ffmpeg e apagam o arquivo parcial.
 - O MP4 sai em `yuv420p` com `+faststart` e dimensoes pares, para tocar em QuickTime, iOS e decoders de hardware.
 - Layout: toolbar (Abrir, Exportar, zoom, qualidade, metricas) + `QSplitter` com o preview a esquerda e as abas a direita + barra de status persistente (mensagens, indicador de render, progresso/cancelamento da exportacao, info do video). A largura minima do painel de abas e calculada a partir do conteudo real (`MainWindow._fit_settings_panel`), entao nada e cortado nem escondido atras de setas; `tests/test_ui_layout.py` verifica isso offscreen.
@@ -99,7 +100,7 @@ Os testes de exportacao ponta a ponta usam o `ffmpeg` do `PATH` e sao pulados se
 
 O app grava eventos estruturados (uma linha JSON por evento) em `~/.space-video-enhancer/logs/app.jsonl`, com rotacao em 10 MB x 5. Nada sai do computador: os logs servem para medir e melhorar algoritmos e interface. Nomes de arquivo aparecem sem o diretorio.
 
-Variaveis de ambiente: `SVE_LOG_DIR` (pasta), `SVE_LOG_LEVEL` (`INFO` padrao; `DEBUG` inclui `frame.decode` e `preview.render` durante a reproducao), `SVE_LOG_STDERR=1` (espelha no terminal). O menu `Ajuda > Abrir pasta de logs` abre a pasta; `Exibir > Metricas` (Ctrl+M, ou o botao Metricas na toolbar) mostra um HUD com tempo de render por estagio, fila, decode, estabilizacao e backend.
+Variaveis de ambiente: `SVE_LOG_DIR` (pasta), `SVE_LOG_LEVEL` (`INFO` padrao; `DEBUG` inclui `preview.render` durante a reproducao), `SVE_LOG_STDERR=1` (espelha no terminal). O menu `Ajuda > Abrir pasta de logs` abre a pasta; `Exibir > Metricas` (Ctrl+M, ou o botao Metricas na toolbar) mostra um HUD com tempo de render por estagio, fila, decode, estabilizacao e backend.
 
 Eventos principais:
 
@@ -108,7 +109,7 @@ Eventos principais:
 | `app.start` / `app.stop` | inicio/fim | versoes, CPU, OpenCL (dispositivo), ffmpeg |
 | `video.open` | abrir video | dimensoes, fps, frames, codec, `open_ms` |
 | `settings.snapshot` / `settings.change` | primeiro render de um video / cada ajuste | `changes`: `{"filters.contrast": [50, 62]}` |
-| `preview.render` | cada render do preview (playback em DEBUG) | `total_ms`, `stages` (`stabilize`, `context`, `filters`, `filters.denoise`, `preset`, `geometry`), `queue_wait_ms`, `dropped_total`, notas do pipeline |
+| `preview.render` | cada render do preview (playback em DEBUG) | `total_ms`, `decode_ms`, `decode_sequential`, `stages` (`decode`, `stabilize`, `context`, `filters`, `filters.denoise`, `preset`, `geometry`), `queue_wait_ms`, `dropped_total`, notas do pipeline |
 | `playback.start` / `playback.stop` | reproducao | `effective_fps`, `frames_shown`, `seeks`, `sequential_reads`, `decode_ms` |
 | `export.start` / `export.progress` / `export.finish` / `export.cancelled` / `export.failed` | exportacao | `fps`, `elapsed_s`, `render` (estatisticas por estagio), `stabilization` (histograma de estimadores/resultados), `encoder`, `backend`, `output_bytes`, `stderr_tail` |
 | `ui.*` | interacoes (`ui.tab`, `ui.preset`, `ui.render_mode`, `ui.preview_zoom`, `ui.clip_range`, `ui.hud`) | |

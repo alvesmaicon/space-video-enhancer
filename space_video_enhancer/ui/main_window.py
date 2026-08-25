@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
 from space_video_enhancer.export.ffmpeg import FfmpegProbe, find_ffmpeg, resolve_encoder
 from space_video_enhancer.export.job import ExportRequest, ExportResult
 from space_video_enhancer.export.worker import ExportController
-from space_video_enhancer.pipeline.denoise import estimate_denoise_strengths
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS
 from space_video_enhancer.pipeline.preview import PreviewRequest, ThumbnailRequest
@@ -130,7 +129,7 @@ class MainWindow(QMainWindow):
 
         # --- processing / export infra -----------------------------------------------------
         self._backend = OpenCLBackend()
-        self._preview_controller = PreviewController(self._backend, THUMBNAIL_SIZE, self)
+        self._preview_controller = PreviewController(self._backend, self)
         self._preview_controller.previewReady.connect(self._on_preview_ready)
         self._preview_controller.thumbnailsReady.connect(self._on_thumbnails_ready)
         self._preview_controller.renderFailed.connect(self._on_render_failed)
@@ -149,6 +148,12 @@ class MainWindow(QMainWindow):
         self._playback_intervals = RollingStats(window=60)
         self._playback_last_frame_at: float | None = None
         self._playback_video_counters = (0, 0)
+        # Decode metrics arrive with each render result; the GUI never touches the decoder itself.
+        self._decoded_frame_index = 0
+        self._decode_stats = RollingStats(window=120)
+        self._last_decode_ms = 0.0
+        self._last_decode_sequential: bool | None = None
+        self._video_read_counters = (0, 0)  # (seeks, sequential reads) after the latest decode
         self._hud_visible = False
         self._ffmpeg_probe: FfmpegProbe | None = None
         self._export_controller: ExportController | None = None
@@ -515,13 +520,17 @@ class MainWindow(QMainWindow):
             log_event(LOG, "video.open_failed", level=logging.WARNING, name=path.name, error=str(error))
             QMessageBox.critical(self, "Erro", "Não foi possível abrir o vídeo selecionado.")
             return
-        if self.video is not None:
-            self.video.release()
-
         self.video = video
         self.video_path = path
+        self.current_frame = None
+        self._decoded_frame_index = 0
+        self._decode_stats = RollingStats(window=120)
+        self._last_decode_ms = 0.0
+        self._last_decode_sequential = None
+        self._video_read_counters = (0, 0)
         self._backend.reset()
         self._discard_pending_previews()
+        self._preview_controller.set_video(video)  # the render thread decodes and releases the previous video
         self.frame_count = video.frame_count
         self.fps = video.fps
         width, height = video.size
@@ -569,32 +578,14 @@ class MainWindow(QMainWindow):
         self.preview.setFocus()
 
     def _load_frame(self, frame_index: int) -> None:
+        """Ask the render thread for ``frame_index``; decoding happens there, never on the GUI thread."""
         if self.video is None:
             return
-        frame = self.video.read_frame(frame_index)
-        if frame is None:
-            self.status.show_message("Não foi possível carregar esse frame.")
-            return
-
         playing = self.playback_timer.isActive()
-        log_event(
-            LOG,
-            "frame.decode",
-            level=logging.DEBUG,
-            index=frame_index,
-            decode_ms=round(self.video.last_decode_ms, 2),
-            sequential=self.video.last_read_was_sequential,
-            playing=playing,
-        )
         self.current_frame_index = frame_index
-        self.current_frame = frame
         self.transport.set_position(frame_index)
-        self._update_denoise_controls_state()
-        self._update_stabilization_controls_state()
-        self._update_stabilization_info_label()
         self._schedule_preview_refresh(immediate=True, reason="playback" if playing else "scrub")
 
-    # --- transport -------------------------------------------------------------------------
     def _go_to_first_frame(self) -> None:
         if self.frame_count > 0:
             self._stop_playback()
@@ -639,7 +630,7 @@ class MainWindow(QMainWindow):
         self._playback_frames_shown = 0
         self._playback_intervals = RollingStats(window=60)
         self._playback_last_frame_at = None
-        self._playback_video_counters = (self.video.seeks, self.video.sequential_reads) if self.video else (0, 0)
+        self._playback_video_counters = self._video_read_counters
         log_event(
             LOG,
             "playback.start",
@@ -663,16 +654,16 @@ class MainWindow(QMainWindow):
     def _log_playback_stop(self) -> None:
         seconds = time.monotonic() - self._playback_started_at if self._playback_started_at else 0.0
         seeks_before, sequential_before = self._playback_video_counters
+        seeks_now, sequential_now = self._video_read_counters
         fields: dict[str, Any] = {
             "seconds": round(seconds, 2),
             "frames_shown": self._playback_frames_shown,
             "effective_fps": round(self._playback_frames_shown / seconds, 2) if seconds > 0 else None,
             "dropped_total": self._preview_controller.mailbox.dropped,
+            "seeks": seeks_now - seeks_before,
+            "sequential_reads": sequential_now - sequential_before,
+            "decode_ms": self._decode_stats.summary(),
         }
-        if self.video is not None:
-            fields["seeks"] = self.video.seeks - seeks_before
-            fields["sequential_reads"] = self.video.sequential_reads - sequential_before
-            fields["decode_ms"] = self.video.decode_stats.summary()
         self._counters["playback_frames"] += self._playback_frames_shown
         log_event(LOG, "playback.stop", **fields)
         self._playback_started_at = None
@@ -839,8 +830,8 @@ class MainWindow(QMainWindow):
         self._sync_stabilization_preview()
 
     def _refresh_preview_impl(self) -> None:
-        """Snapshot the widgets and hand the frame to the render thread (latest request wins)."""
-        if self.current_frame is None:
+        """Snapshot the widgets and ask the render thread for the current frame (latest request wins)."""
+        if self.video is None:
             return
 
         settings = self._current_render_settings()
@@ -861,7 +852,7 @@ class MainWindow(QMainWindow):
         self._preview_controller.submit_preview(
             PreviewRequest(
                 generation=self._preview_generation,
-                frame=self.current_frame,
+                frame=None,  # decoded on the render thread
                 frame_index=self.current_frame_index,
                 settings=preview_settings,
                 size_limit=PREVIEW_SIZE_LIMIT.get(self._preview_render_mode()),
@@ -889,7 +880,14 @@ class MainWindow(QMainWindow):
         self._applied_preview_generation = images.generation
         self.last_preview_render_ms = images.elapsed_ms
         self._last_preview = images
+        self.current_frame = images.source
+        self._decoded_frame_index = images.frame_index
         self._counters["renders"] += 1
+        if images.decode_sequential is not None:
+            self._last_decode_ms = images.decode_ms
+            self._last_decode_sequential = images.decode_sequential
+            self._decode_stats.add(images.decode_ms)
+            self._video_read_counters = (images.video_seeks, images.video_sequential_reads)
         if images.reason == "playback":
             now = time.perf_counter()
             if self._playback_last_frame_at is not None:
@@ -899,6 +897,7 @@ class MainWindow(QMainWindow):
         self.preview.set_images(images.before, images.after)
         if images.generation >= self._preview_generation:
             self.status.set_render_busy(False)
+        self._update_denoise_info()
         self._update_hud()
         self._schedule_filter_thumbnails_refresh()
 
@@ -918,17 +917,21 @@ class MainWindow(QMainWindow):
 
         settings = self._current_render_settings()
         settings = replace(settings, filters=replace(settings.filters, scale_factor=1.0))
+        ratio = self.devicePixelRatioF()  # render thumbnails in device pixels so Retina shows them crisp
+        icon_size = (round(THUMBNAIL_SIZE.width() * ratio), round(THUMBNAIL_SIZE.height() * ratio))
         reference = None
         if self.stabilization_reference_frame is not None:
-            reference = self._thumbnail_source_frame(self.stabilization_reference_frame)
+            reference = self._thumbnail_source_frame(self.stabilization_reference_frame, icon_size)
         self._thumbnail_generation += 1
         self._preview_controller.submit_thumbnails(
             ThumbnailRequest(
                 generation=self._thumbnail_generation,
-                frame=self._thumbnail_source_frame(self.current_frame),
+                frame=self._thumbnail_source_frame(self.current_frame, icon_size),
                 settings=settings,
                 stabilization_reference=reference,
                 preset_ids=tuple(preset.filter_id for preset in IMAGE_FILTER_PRESETS),
+                icon_size=icon_size,
+                device_pixel_ratio=ratio,
             )
         )
 
@@ -937,7 +940,7 @@ class MainWindow(QMainWindow):
         if result.generation <= self._applied_thumbnail_generation:
             return
         self._applied_thumbnail_generation = result.generation
-        self.filters_tab.set_thumbnails(result.images)
+        self.filters_tab.set_thumbnails(result.images, result.device_pixel_ratio)
 
     @Slot(str)
     def _on_render_failed(self, message: str) -> None:
@@ -946,9 +949,9 @@ class MainWindow(QMainWindow):
         self.status.show_message(f"Falha ao renderizar o preview: {message}")
 
     @staticmethod
-    def _thumbnail_source_frame(frame: np.ndarray) -> np.ndarray:
+    def _thumbnail_source_frame(frame: np.ndarray, icon_size: tuple[int, int]) -> np.ndarray:
         height, width = frame.shape[:2]
-        scale = min(THUMBNAIL_SIZE.width() / max(1, width), THUMBNAIL_SIZE.height() / max(1, height))
+        scale = min(icon_size[0] / max(1, width), icon_size[1] / max(1, height))
         if scale >= 1.0:
             return frame.copy()
         return cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
@@ -1007,14 +1010,17 @@ class MainWindow(QMainWindow):
         self.noise_tab.update_controls_state(self.frame_count > 0)
         self._sync_denoise_sample_preview()
         self._update_denoise_sample_info_label()
+        self._update_denoise_info()
 
-        denoise_mode = self.noise_tab.mode()
-        if denoise_mode is DenoiseMode.OFF:
+    def _update_denoise_info(self) -> None:
+        """Mode explanation plus the strengths the last render actually used (nothing is estimated here)."""
+        mode = self.noise_tab.mode()
+        if mode is DenoiseMode.OFF:
             self.noise_tab.set_info(
                 "Denoise desativado: o preview e a exportação pulam esta etapa para poupar processamento."
             )
             return
-        if denoise_mode is DenoiseMode.MANUAL:
+        if mode is DenoiseMode.MANUAL:
             self.noise_tab.set_info(
                 "Manual: ajuste força de luminância, força de cor e o tamanho das janelas do filtro."
             )
@@ -1022,16 +1028,18 @@ class MainWindow(QMainWindow):
 
         source = (
             "Auto: calcula a intensidade com base no frame atual inteiro."
-            if denoise_mode is DenoiseMode.AUTO
+            if mode is DenoiseMode.AUTO
             else "Amostra: usa a região azul selecionada no preview como referência de ruído."
         )
-        if self.current_frame is None:
+        if self.video is None:
             self.noise_tab.set_info(source)
             return
-        luma, color = estimate_denoise_strengths(
-            self.current_frame, denoise_mode, qrect_to_norm(self.denoise_sample_rect_norm)
-        )
-        self.noise_tab.set_info(f"{source} Estimativa atual: luminância {luma:.1f} | cor {color:.1f}.")
+        trace = self._last_preview.trace if self._last_preview is not None else {}
+        estimate = trace.get("denoise.h")
+        if trace.get("denoise.mode") == mode.value and isinstance(estimate, (list, tuple)) and len(estimate) == 2:
+            self.noise_tab.set_info(f"{source} Último render: luminância {estimate[0]:.1f} | cor {estimate[1]:.1f}.")
+        else:
+            self.noise_tab.set_info(f"{source} Aguardando o render para mostrar a estimativa…")
 
     def _handle_preview_sample_changed(self, rect: QRectF) -> None:
         self.denoise_sample_rect_norm = QRectF(rect)
@@ -1098,7 +1106,7 @@ class MainWindow(QMainWindow):
         if self.current_frame is None:
             return
         self.stabilization_reference_frame = self.current_frame.copy()
-        self.stabilization_reference_frame_index = self.current_frame_index
+        self.stabilization_reference_frame_index = self._decoded_frame_index
 
     def _update_stabilization_controls_state(self) -> None:
         self.stabilization_tab.update_controls_state(self.frame_count > 0)
@@ -1422,10 +1430,8 @@ class MainWindow(QMainWindow):
         if self._export_controller is not None:
             self._export_controller.stop()
             self._export_controller = None
-        self._preview_controller.stop()
-        if self.video is not None:
-            self.video.release()
-            self.video = None
+        self._preview_controller.stop()  # also releases the video it owns
+        self.video = None
         super().closeEvent(event)
 
     # =====================================================================================
@@ -1466,9 +1472,11 @@ class MainWindow(QMainWindow):
         if self.video is not None:
             fps = self._playback_fps()
             playback = f"  playback {fps:.1f} fps" if fps else ""
+            seeks, sequential = self._video_read_counters
+            mean_decode = self._decode_stats.mean if len(self._decode_stats) else 0.0
             lines.append(
-                f"decode {self.video.last_decode_ms:.1f} ms (med {self.video.decode_stats.mean:.1f})  "
-                f"seeks {self.video.seeks}  seq {self.video.sequential_reads}{playback}"
+                f"decode {self._last_decode_ms:.1f} ms (med {mean_decode:.1f}, worker)  "
+                f"seeks {seeks}  seq {sequential}{playback}"
             )
         backend = str(trace.get("filters.backend", self._backend.label))
         shape_in = trace.get("input_shape")

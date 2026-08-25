@@ -1,7 +1,9 @@
 """Qt-free building blocks for asynchronous preview rendering.
 
 The UI puts requests into a :class:`RenderMailbox`; a worker thread drains it. Only the
-newest request of each kind survives, so a burst of slider moves costs one render.
+newest request of each kind survives, so a burst of slider moves costs one render. The
+worker also owns the decoder: a preview request normally carries just ``frame_index`` and
+the frame is read on the worker thread (see :func:`render_preview`), never on the GUI.
 """
 
 from __future__ import annotations
@@ -20,12 +22,20 @@ from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import ImageFilterSelection, RenderSettings
 from space_video_enhancer.telemetry.trace import RenderTrace
+from space_video_enhancer.video import VideoSource
+
+DEFAULT_THUMBNAIL_SIZE = (152, 86)
+
+
+class FrameUnavailableError(RuntimeError):
+    """The decoder could not deliver the requested frame (no video open, or the stream ended early)."""
 
 
 @dataclass(frozen=True)
 class PreviewRequest:
     generation: int
-    frame: np.ndarray
+    frame: np.ndarray | None
+    """An already decoded frame, or ``None`` to have the worker decode ``frame_index`` itself."""
     frame_index: int
     settings: RenderSettings
     """Already adjusted for the preview (output scale capped by the render mode)."""
@@ -43,22 +53,33 @@ class PreviewRequest:
 class PreviewResult:
     generation: int
     frame_index: int
+    source: np.ndarray
+    """The decoded frame the render started from (full resolution): reference captures, thumbnails."""
     before: np.ndarray
     after: np.ndarray
     elapsed_ms: float
     queue_wait_ms: float
     """Time the request sat in the mailbox (or behind another render) before starting."""
     trace: RenderTrace
+    decode_ms: float = 0.0
+    decode_sequential: bool | None = None
+    """``None`` when the request already carried a frame (nothing was decoded here)."""
+    video_seeks: int = 0
+    video_sequential_reads: int = 0
+    """Decoder counters after this read, so the UI can report them without touching the decoder."""
 
 
 @dataclass(frozen=True)
 class ThumbnailRequest:
     generation: int
     frame: np.ndarray
-    """Already thumbnail-sized."""
+    """Already thumbnail-sized (in device pixels)."""
     settings: RenderSettings
     stabilization_reference: np.ndarray | None
     preset_ids: tuple[str, ...]
+    icon_size: tuple[int, int] = DEFAULT_THUMBNAIL_SIZE
+    """Target size in device pixels (logical icon size times the display's pixel ratio)."""
+    device_pixel_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -87,14 +108,32 @@ def render_preview(
     request: PreviewRequest,
     state: StabilizationState | None,
     backend: OpenCLBackend | None,
+    video: VideoSource | None = None,
 ) -> PreviewResult:
+    """Decode (if needed) and render one preview frame; raises :class:`FrameUnavailableError` when it cannot."""
     started = time.perf_counter()
     queue_wait_ms = (started - request.requested_at) * 1000.0
     trace = RenderTrace()
     trace.note("preview.reason", request.reason)
     trace.note("preview.size_limit", request.size_limit)
 
-    source = downscale_to_limit(request.frame, request.size_limit)
+    frame = request.frame
+    decode_ms = 0.0
+    decode_sequential: bool | None = None
+    seeks = sequential_reads = 0
+    if frame is None:
+        if video is None:
+            raise FrameUnavailableError("nenhum vídeo aberto para decodificar o frame")
+        with trace.stage("decode"):
+            frame = video.read_frame(request.frame_index)
+        if frame is None:
+            raise FrameUnavailableError(f"o frame {request.frame_index + 1} não pôde ser decodificado")
+        decode_ms = video.last_decode_ms
+        decode_sequential = video.last_read_was_sequential
+        seeks, sequential_reads = video.seeks, video.sequential_reads
+        trace.note("decode.sequential", decode_sequential)
+
+    source = downscale_to_limit(frame, request.size_limit)
     reference = request.stabilization_reference
     if reference is not None:
         reference = downscale_to_limit(reference, request.size_limit)
@@ -111,7 +150,20 @@ def render_preview(
         trace=trace,
     )
     trace.finish()
-    return PreviewResult(request.generation, request.frame_index, before, after, trace.total_ms, queue_wait_ms, trace)
+    return PreviewResult(
+        request.generation,
+        request.frame_index,
+        frame,
+        before,
+        after,
+        trace.total_ms,
+        queue_wait_ms,
+        trace,
+        decode_ms,
+        decode_sequential,
+        seeks,
+        sequential_reads,
+    )
 
 
 def render_thumbnails(request: ThumbnailRequest, backend: OpenCLBackend | None) -> ThumbnailResult:

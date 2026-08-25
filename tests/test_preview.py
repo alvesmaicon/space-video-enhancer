@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from space_video_enhancer.pipeline.geometry import apply_geometry
 from space_video_enhancer.pipeline.preview import (
+    FrameUnavailableError,
     PreviewRequest,
     RenderMailbox,
     ThumbnailRequest,
@@ -20,9 +24,10 @@ from space_video_enhancer.settings import (
     RenderSettings,
     RotationMode,
 )
+from space_video_enhancer.video import VideoSource
 
 
-def _preview_request(frame: np.ndarray, generation: int, **overrides: object) -> PreviewRequest:
+def _preview_request(frame: np.ndarray | None, generation: int, **overrides: object) -> PreviewRequest:
     fields: dict[str, object] = {
         "generation": generation,
         "frame": frame,
@@ -88,3 +93,21 @@ def test_render_thumbnails_returns_one_frame_per_preset(textured_frame: np.ndarr
     result = render_thumbnails(_thumbnail_request(textured_frame, 3), None)
     assert set(result.frames) == {"original", "shadow_lift"}
     assert not np.array_equal(result.frames["original"], result.frames["shadow_lift"])
+
+
+def test_render_preview_decodes_the_requested_frame_on_demand(ui_video: Path) -> None:
+    video = VideoSource(ui_video)
+    try:
+        result = render_preview(_preview_request(None, 3, frame_index=5), StabilizationState(), None, video=video)
+        assert result.frame_index == 5 and result.source.shape[:2] == (180, 320)
+        assert result.decode_sequential is True  # 5 frames ahead of the decoder: grab(), no seek
+        assert result.decode_ms >= 0.0 and "decode" in result.trace.stages
+        assert (result.video_seeks, result.video_sequential_reads) == (0, 1)
+        assert np.array_equal(result.after, render_frame(result.source, RenderSettings()))
+    finally:
+        video.release()
+
+
+def test_render_preview_without_a_frame_needs_a_video() -> None:
+    with pytest.raises(FrameUnavailableError):
+        render_preview(_preview_request(None, 1, frame_index=0), StabilizationState(), None, video=None)
