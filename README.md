@@ -50,12 +50,14 @@ Se a ativacao do ambiente virtual for bloqueada, rode antes `Set-ExecutionPolicy
 ```
 space_video_enhancer/
   settings.py              # enums + snapshots imutaveis (RenderSettings) que a UI entrega ao pipeline
+  video.py                 # leitura de frames com decodificacao sequencial (sem seek por frame no playback)
   pipeline/
     render.py              # render_frame(frame, settings, ...) — o unico pipeline (preview, miniaturas, export)
     filters.py             # denoise/contraste/gama/saturacao/temperatura/nitidez/escala (CPU ou OpenCL)
     presets.py             # presets tonais ("Sombras abertas", "Atenuar quentes", ...)
     denoise.py             # estimativa de ruido (modos Auto e Amostra)
     geometry.py            # rotacao, espelhamento e crop
+    preview.py             # pedidos de preview/miniaturas e a caixa postal "o ultimo vence" do worker
     stabilization/         # estado, transformacoes, estimadores e orquestracao
   export/
     ffmpeg.py              # descoberta do ffmpeg, escolha de encoder e montagem do comando
@@ -63,6 +65,7 @@ space_video_enhancer/
     worker.py              # adaptador QThread com sinais de progresso/termino
   ui/
     main_window.py         # monta widgets e produz RenderSettings; nao processa imagem
+    preview_worker.py      # QThread que renderiza preview e miniaturas; a UI nunca bloqueia
     widgets/               # LabeledSlider, FrameRangeSlider, ComparePreview (+ SelectionOverlay)
     theme.qss              # estilo
 tests/                     # pytest; roda sem display (o pipeline nao depende de Qt)
@@ -72,6 +75,7 @@ Regras da arquitetura:
 
 - O pipeline e puro: `render_frame(frame, settings, ...)` nao le widgets nem estado global. A UI le os widgets uma vez, monta um `RenderSettings` congelado e entrega ao pipeline, ao worker de export e as miniaturas.
 - Ordem fixa: estabilizacao -> filtros basicos (inclui escala) -> preset de imagem -> geometria -> crop. O crop e o ultimo passo, no mesmo sistema de coordenadas do preview rotacionado/espelhado, entao o retangulo desenhado e exatamente o exportado.
+- Preview e miniaturas rodam em um `QThread` proprio (`ui/preview_worker.py`): a UI envia um `PreviewRequest` por ajuste e so o mais recente e renderizado; resultados antigos sao descartados por numero de geracao. Miniaturas so sao calculadas com a aba Filtros visivel.
 - Exportacao roda em `QThread` (`export/worker.py`) sobre `run_export` (`export/job.py`). Cancelamento e falha sempre encerram o ffmpeg e apagam o arquivo parcial.
 - O MP4 sai em `yuv420p` com `+faststart` e dimensoes pares, para tocar em QuickTime, iOS e decoders de hardware.
 

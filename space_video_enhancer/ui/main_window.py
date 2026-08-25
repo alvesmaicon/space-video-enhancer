@@ -43,15 +43,13 @@ from space_video_enhancer.export.job import ExportRequest, ExportResult
 from space_video_enhancer.export.worker import ExportController
 from space_video_enhancer.pipeline.denoise import estimate_denoise_strengths
 from space_video_enhancer.pipeline.filters import OpenCLBackend
-from space_video_enhancer.pipeline.geometry import apply_geometry
 from space_video_enhancer.pipeline.presets import (
     IMAGE_FILTER_PRESETS,
     ORIGINAL_PRESET_ID,
     ImageFilterPreset,
     get_image_filter_preset,
 )
-from space_video_enhancer.pipeline.render import render_frame
-from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.pipeline.preview import PreviewRequest, ThumbnailRequest
 from space_video_enhancer.settings import (
     DEFAULT_CROP_RECT,
     DEFAULT_DENOISE_SAMPLE_RECT,
@@ -71,11 +69,12 @@ from space_video_enhancer.settings import (
     StabilizationSettings,
     clamp_unit,
 )
-from space_video_enhancer.ui.images import frame_to_qimage, thumbnail_qimage
+from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.theme import load_stylesheet
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
 from space_video_enhancer.ui.widgets.frame_range_slider import FrameRangeSlider
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
+from space_video_enhancer.video import VideoOpenError, VideoSource
 
 E = TypeVar("E", DenoiseMode, StabilizationMode, RotationMode, PreviewRenderMode)
 
@@ -153,7 +152,7 @@ class MainWindow(QMainWindow):
 
         # --- media state -------------------------------------------------------------------
         self.video_path: Path | None = None
-        self.capture: cv2.VideoCapture | None = None
+        self.video: VideoSource | None = None
         self.frame_count = 0
         self.fps = 30.0
         self.source_size = (0, 0)
@@ -172,10 +171,19 @@ class MainWindow(QMainWindow):
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
         self.stabilization_reference_frame: np.ndarray | None = None
         self.stabilization_reference_frame_index = 0
-        self._preview_stabilization_state = StabilizationState()
+        self._stabilization_epoch = 0  # bumped whenever inter-frame stabilization memory must restart
 
         # --- processing / export infra -----------------------------------------------------
         self._backend = OpenCLBackend()
+        self._preview_controller = PreviewController(self._backend, self.FILTER_THUMBNAIL_SIZE, self)
+        self._preview_controller.previewReady.connect(self._on_preview_ready)
+        self._preview_controller.thumbnailsReady.connect(self._on_thumbnails_ready)
+        self._preview_controller.renderFailed.connect(self._on_render_failed)
+        self._preview_generation = 0
+        self._applied_preview_generation = -1
+        self._thumbnail_generation = 0
+        self._applied_thumbnail_generation = -1
+        self.last_preview_render_ms = 0.0
         self._ffmpeg_probe: FfmpegProbe | None = None
         self._export_controller: ExportController | None = None
         self._export_backend_label = ""
@@ -406,7 +414,7 @@ class MainWindow(QMainWindow):
         self.settings_tabs.setObjectName("settingsTabs")
         self.settings_tabs.setMinimumWidth(340)
         self.settings_tabs.addTab(self._build_color_tab(), "Cor e detalhe")
-        self.settings_tabs.addTab(self._build_filters_tab(), "Filtros")
+        self._filters_tab_index = self.settings_tabs.addTab(self._build_filters_tab(), "Filtros")
         self.settings_tabs.addTab(self._build_stabilization_tab(), "Estabilizacao")
         self.settings_tabs.addTab(self._build_geometry_tab(), "Geometria")
         self.settings_tabs.addTab(self._build_noise_tab(), "Ruido")
@@ -635,6 +643,7 @@ class MainWindow(QMainWindow):
         self.preview.sampleChanged.connect(self._handle_preview_sample_changed)
         self.preview.stabilizationChanged.connect(self._handle_preview_stabilization_changed)
 
+        self.settings_tabs.currentChanged.connect(self._handle_tab_changed)
         self.select_button.clicked.connect(self._select_video)
         self.export_button.clicked.connect(self._export_video)
         self.cancel_export_button.clicked.connect(self._request_export_cancel)
@@ -805,21 +814,21 @@ class MainWindow(QMainWindow):
 
     def _open_video(self, path: Path) -> None:
         self._stop_playback()
-        if self.capture is not None:
-            self.capture.release()
-
-        capture = cv2.VideoCapture(str(path))
-        if not capture.isOpened():
+        try:
+            video = VideoSource(path)
+        except VideoOpenError:
             QMessageBox.critical(self, "Erro", "Nao foi possivel abrir o video selecionado.")
             return
+        if self.video is not None:
+            self.video.release()
 
+        self.video = video
         self.video_path = path
-        self.capture = capture
         self._backend.reset()
-        self.frame_count = max(1, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
-        self.fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._discard_pending_previews()
+        self.frame_count = video.frame_count
+        self.fps = video.fps
+        width, height = video.size
         self.source_size = (width, height)
         self.preview.set_display_reference_size(width, height)
         self.current_frame_index = 0
@@ -830,7 +839,7 @@ class MainWindow(QMainWindow):
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
         self.stabilization_reference_frame = None
         self.stabilization_reference_frame_index = 0
-        self._preview_stabilization_state.reset()
+        self._stabilization_epoch += 1
         self.file_label.setText(f"{path.name} | {width}x{height} @ {self.fps:.2f} fps")
         self.frame_slider.setRange(0, self.frame_count - 1)
         self.progress_bar.setValue(0)
@@ -852,11 +861,10 @@ class MainWindow(QMainWindow):
         self._load_frame(midpoint)
 
     def _load_frame(self, frame_index: int) -> None:
-        if self.capture is None:
+        if self.video is None:
             return
-        self.capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ok, frame = self.capture.read()
-        if not ok:
+        frame = self.video.read_frame(frame_index)
+        if frame is None:
             self.status_label.setText("Nao foi possivel carregar esse frame.")
             return
 
@@ -917,7 +925,7 @@ class MainWindow(QMainWindow):
             self.playback_timer.stop()
         self.play_button.setText("⏵")
         if was_active:
-            self._refresh_filter_thumbnails()
+            self._schedule_filter_thumbnails_refresh()
 
     def _advance_playback_frame(self) -> None:
         if self.frame_slider.value() >= self.playback_end_frame:
@@ -990,7 +998,7 @@ class MainWindow(QMainWindow):
 
     def _handle_preview_render_mode_changed(self, _index: int) -> None:
         self.preview.set_render_quality(self._preview_render_mode() is not PreviewRenderMode.FAST)
-        self._preview_stabilization_state.reset()
+        self._stabilization_epoch += 1
         self._schedule_preview_refresh(immediate=True)
 
     def _handle_preview_frame_skip_changed(self, _index: int) -> None:
@@ -1021,31 +1029,20 @@ class MainWindow(QMainWindow):
         self._preview_refresh_timer.start(PREVIEW_REFRESH_DELAY_MS[self._preview_render_mode()])
 
     def _schedule_filter_thumbnails_refresh(self) -> None:
-        if not self.playback_timer.isActive():
-            self._thumbnail_refresh_timer.start(THUMBNAIL_REFRESH_DELAY_MS)
+        if self.playback_timer.isActive() or not self._filters_tab_visible():
+            return
+        self._thumbnail_refresh_timer.start(THUMBNAIL_REFRESH_DELAY_MS)
 
-    def _prepare_preview_frame(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
-        """Downscale the source (and the stabilization reference) for the faster preview modes."""
-        size_limit = PREVIEW_SIZE_LIMIT.get(self._preview_render_mode())
-        reference = self.stabilization_reference_frame
-        if size_limit is None:
-            return frame, reference
+    def _filters_tab_visible(self) -> bool:
+        return self.settings_tabs.currentIndex() == self._filters_tab_index
 
-        largest_dimension = max(frame.shape[1], frame.shape[0])
-        if largest_dimension <= 0:
-            return frame, reference
-        input_scale = min(1.0, size_limit / largest_dimension)
-        if input_scale >= 0.999:
-            return frame, reference
-
-        preview_frame = cv2.resize(frame, None, fx=input_scale, fy=input_scale, interpolation=cv2.INTER_AREA)
-        if reference is not None:
-            reference = cv2.resize(reference, None, fx=input_scale, fy=input_scale, interpolation=cv2.INTER_AREA)
-        return preview_frame, reference
+    def _handle_tab_changed(self, _index: int) -> None:
+        if self._filters_tab_visible():
+            self._schedule_filter_thumbnails_refresh()
 
     def _refresh_preview_impl(self) -> None:
+        """Snapshot the widgets and hand the frame to the render thread (latest request wins)."""
         if self.current_frame is None:
-            self._schedule_filter_thumbnails_refresh()
             return
 
         settings = self._current_render_settings()
@@ -1053,30 +1050,43 @@ class MainWindow(QMainWindow):
         self._sync_denoise_sample_preview()
         self._sync_stabilization_preview()
 
-        preview_source, reference = self._prepare_preview_frame(self.current_frame)
         preview_settings = replace(
             settings,
             filters=replace(
                 settings.filters, scale_factor=self._preview_output_scale_factor(settings.filters.scale_factor)
             ),
         )
-        before = apply_geometry(preview_source, settings.geometry)
-        after = render_frame(
-            preview_source,
-            preview_settings,
-            frame_index=self.current_frame_index,
-            stabilization_state=self._preview_stabilization_state,
-            stabilization_reference=reference,
-            backend=self._backend,
+        self._preview_generation += 1
+        self._preview_controller.submit_preview(
+            PreviewRequest(
+                generation=self._preview_generation,
+                frame=self.current_frame,
+                frame_index=self.current_frame_index,
+                settings=preview_settings,
+                size_limit=PREVIEW_SIZE_LIMIT.get(self._preview_render_mode()),
+                stabilization_reference=self.stabilization_reference_frame,
+                stabilization_epoch=self._stabilization_epoch,
+            )
         )
-        self.preview.set_images(frame_to_qimage(before), frame_to_qimage(after))
+
+    @Slot(object)
+    def _on_preview_ready(self, images: PreviewImages) -> None:
+        if images.generation <= self._applied_preview_generation:
+            return  # stale: a newer request already landed (or the video changed)
+        self._applied_preview_generation = images.generation
+        self.last_preview_render_ms = images.elapsed_ms
+        self.preview.set_images(images.before, images.after)
         self._schedule_filter_thumbnails_refresh()
 
-    def _refresh_filter_thumbnails(self) -> None:
-        if self.playback_timer.isActive():
-            return
-        self._thumbnail_refresh_timer.stop()
+    def _discard_pending_previews(self) -> None:
+        """Results still in flight for the previous video must not land on the new one."""
+        self._applied_preview_generation = self._preview_generation
+        self._applied_thumbnail_generation = self._thumbnail_generation
 
+    def _refresh_filter_thumbnails(self) -> None:
+        self._thumbnail_refresh_timer.stop()
+        if self.playback_timer.isActive() or not self._filters_tab_visible():
+            return
         if self.current_frame is None:
             for button in self.filter_preset_buttons.values():
                 button.setIcon(QIcon())
@@ -1084,21 +1094,33 @@ class MainWindow(QMainWindow):
 
         settings = self._current_render_settings()
         settings = replace(settings, filters=replace(settings.filters, scale_factor=1.0))
-        source = self._thumbnail_source_frame(self.current_frame)
         reference = None
         if self.stabilization_reference_frame is not None:
             reference = self._thumbnail_source_frame(self.stabilization_reference_frame)
-        for preset in IMAGE_FILTER_PRESETS:
-            thumbnail = render_frame(
-                source,
-                settings,
-                image_filter=ImageFilterSelection(preset.filter_id, 1.0),
+        self._thumbnail_generation += 1
+        self._preview_controller.submit_thumbnails(
+            ThumbnailRequest(
+                generation=self._thumbnail_generation,
+                frame=self._thumbnail_source_frame(self.current_frame),
+                settings=settings,
                 stabilization_reference=reference,
-                backend=self._backend,
+                preset_ids=tuple(preset.filter_id for preset in IMAGE_FILTER_PRESETS),
             )
-            self.filter_preset_buttons[preset.filter_id].setIcon(
-                QIcon(QPixmap.fromImage(thumbnail_qimage(thumbnail, self.FILTER_THUMBNAIL_SIZE)))
-            )
+        )
+
+    @Slot(object)
+    def _on_thumbnails_ready(self, result: ThumbnailImages) -> None:
+        if result.generation <= self._applied_thumbnail_generation:
+            return
+        self._applied_thumbnail_generation = result.generation
+        for preset_id, image in result.images.items():
+            button = self.filter_preset_buttons.get(preset_id)
+            if button is not None:
+                button.setIcon(QIcon(QPixmap.fromImage(image)))
+
+    @Slot(str)
+    def _on_render_failed(self, message: str) -> None:
+        self.status_label.setText(f"Falha ao renderizar o preview: {message}")
 
     def _thumbnail_source_frame(self, frame: np.ndarray) -> np.ndarray:
         height, width = frame.shape[:2]
@@ -1288,7 +1310,7 @@ class MainWindow(QMainWindow):
     # Stabilization
     # =====================================================================================
     def _handle_stabilization_mode_changed(self, *_args: object) -> None:
-        self._preview_stabilization_state.reset()
+        self._stabilization_epoch += 1
         mode = self._current_stabilization_mode()
         if mode.uses_focal_point:
             self._capture_stabilization_reference_from_current_frame()
@@ -1313,7 +1335,7 @@ class MainWindow(QMainWindow):
         self._handle_stabilization_control_change()
 
     def _handle_stabilization_control_change(self, *_args: object) -> None:
-        self._preview_stabilization_state.reset()
+        self._stabilization_epoch += 1
         self._update_stabilization_controls_state()
         self._update_stabilization_info_label()
         self._schedule_preview_refresh()
@@ -1321,7 +1343,7 @@ class MainWindow(QMainWindow):
     def _handle_preview_stabilization_changed(self, rect: QRectF) -> None:
         self.stabilization_rect_norm = QRectF(rect)
         self._capture_stabilization_reference_from_current_frame()
-        self._preview_stabilization_state.reset()
+        self._stabilization_epoch += 1
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
         self._schedule_preview_refresh()
@@ -1329,7 +1351,7 @@ class MainWindow(QMainWindow):
     def _reset_stabilization_rect(self) -> None:
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
         self._capture_stabilization_reference_from_current_frame()
-        self._preview_stabilization_state.reset()
+        self._stabilization_epoch += 1
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
         self._schedule_preview_refresh()
@@ -1654,9 +1676,10 @@ class MainWindow(QMainWindow):
         if self._export_controller is not None:
             self._export_controller.stop()
             self._export_controller = None
-        if self.capture is not None:
-            self.capture.release()
-            self.capture = None
+        self._preview_controller.stop()
+        if self.video is not None:
+            self.video.release()
+            self.video = None
         super().closeEvent(event)
 
     # =====================================================================================
