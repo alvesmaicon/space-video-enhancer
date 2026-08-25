@@ -1,8 +1,14 @@
-"""Qt adapter that renders preview/thumbnail requests on a ``QThread`` and emits ``QImage`` results."""
+"""Qt adapter that renders preview/thumbnail requests on a ``QThread`` and emits ``QImage`` results.
+
+Every preview render is logged as a ``preview.render`` event with its stage timings and
+pipeline notes; playback frames go to DEBUG so an INFO log stays readable.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import asdict, dataclass
+from typing import Any
 
 from PySide6.QtCore import QObject, QSize, QThread, Signal, Slot
 from PySide6.QtGui import QImage
@@ -16,7 +22,10 @@ from space_video_enhancer.pipeline.preview import (
     render_thumbnails,
 )
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.ui.images import frame_to_qimage, thumbnail_qimage
+
+LOG = get_logger("preview")
 
 
 @dataclass(frozen=True)
@@ -26,6 +35,10 @@ class PreviewImages:
     before: QImage
     after: QImage
     elapsed_ms: float
+    queue_wait_ms: float
+    reason: str
+    trace: dict[str, Any]
+    """``RenderTrace.as_dict()``: total_ms, stages and pipeline notes (for the HUD)."""
 
 
 @dataclass(frozen=True)
@@ -60,7 +73,16 @@ class PreviewWorker(QObject):
                     self._render_preview(job)
                 else:
                     self._render_thumbnails(job)
-            except Exception as error:
+            except Exception as error:  # keep the worker alive, report to the UI and the log
+                log_event(
+                    LOG,
+                    "preview.error",
+                    level=logging.ERROR,
+                    exc_info=True,
+                    kind=type(job).__name__,
+                    generation=job.generation,
+                    settings=asdict(job.settings),
+                )
                 self.renderFailed.emit(f"{type(error).__name__}: {error}")
 
     def _render_preview(self, job: PreviewRequest) -> None:
@@ -68,6 +90,18 @@ class PreviewWorker(QObject):
             self._state.reset()
             self._epoch = job.stabilization_epoch
         result = render_preview(job, self._state, self._backend)
+        trace = result.trace.as_dict()
+        log_event(
+            LOG,
+            "preview.render",
+            level=logging.DEBUG if job.reason == "playback" else logging.INFO,
+            generation=job.generation,
+            frame_index=job.frame_index,
+            reason=job.reason,
+            queue_wait_ms=round(result.queue_wait_ms, 1),
+            dropped_total=self._mailbox.dropped,
+            **trace,
+        )
         self.previewReady.emit(
             PreviewImages(
                 result.generation,
@@ -75,6 +109,9 @@ class PreviewWorker(QObject):
                 frame_to_qimage(result.before),
                 frame_to_qimage(result.after),
                 result.elapsed_ms,
+                result.queue_wait_ms,
+                job.reason,
+                trace,
             )
         )
 
@@ -83,6 +120,13 @@ class PreviewWorker(QObject):
         images = {
             preset_id: thumbnail_qimage(frame, self._thumbnail_size) for preset_id, frame in result.frames.items()
         }
+        log_event(
+            LOG,
+            "thumbnails.render",
+            generation=job.generation,
+            count=len(images),
+            elapsed_ms=round(result.elapsed_ms, 1),
+        )
         self.thumbnailsReady.emit(ThumbnailImages(result.generation, images, result.elapsed_ms))
 
 

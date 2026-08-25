@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Union
 
 import cv2
@@ -19,6 +19,7 @@ from space_video_enhancer.pipeline.geometry import apply_geometry
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import ImageFilterSelection, RenderSettings
+from space_video_enhancer.telemetry.trace import RenderTrace
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,9 @@ class PreviewRequest:
     stabilization_reference: np.ndarray | None
     stabilization_epoch: int
     """Changes whenever the inter-frame stabilization memory must start over."""
+    reason: str = "settings"
+    """Why the UI asked: open | scrub | playback | settings | mode. Drives log verbosity."""
+    requested_at: float = field(default_factory=time.perf_counter)
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,9 @@ class PreviewResult:
     before: np.ndarray
     after: np.ndarray
     elapsed_ms: float
+    queue_wait_ms: float
+    """Time the request sat in the mailbox (or behind another render) before starting."""
+    trace: RenderTrace
 
 
 @dataclass(frozen=True)
@@ -82,12 +89,18 @@ def render_preview(
     backend: OpenCLBackend | None,
 ) -> PreviewResult:
     started = time.perf_counter()
+    queue_wait_ms = (started - request.requested_at) * 1000.0
+    trace = RenderTrace()
+    trace.note("preview.reason", request.reason)
+    trace.note("preview.size_limit", request.size_limit)
+
     source = downscale_to_limit(request.frame, request.size_limit)
     reference = request.stabilization_reference
     if reference is not None:
         reference = downscale_to_limit(reference, request.size_limit)
 
-    before = apply_geometry(source, request.settings.geometry)
+    with trace.stage("before"):
+        before = apply_geometry(source, request.settings.geometry)
     after = render_frame(
         source,
         request.settings,
@@ -95,9 +108,10 @@ def render_preview(
         stabilization_state=state,
         stabilization_reference=reference,
         backend=backend,
+        trace=trace,
     )
-    elapsed_ms = (time.perf_counter() - started) * 1000.0
-    return PreviewResult(request.generation, request.frame_index, before, after, elapsed_ms)
+    trace.finish()
+    return PreviewResult(request.generation, request.frame_index, before, after, trace.total_ms, queue_wait_ms, trace)
 
 
 def render_thumbnails(request: ThumbnailRequest, backend: OpenCLBackend | None) -> ThumbnailResult:
