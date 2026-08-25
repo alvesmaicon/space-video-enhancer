@@ -19,8 +19,9 @@ PERSPECTIVE_AREA_MIN_FRACTION = 0.45
 PERSPECTIVE_AREA_MAX_FRACTION = 1.8
 
 ZOOM_OUT_SAFE_FRACTION = 0.98
-AUTO_CROP_EROSION_FRACTION = 0.015
-AUTO_CROP_MIN_FRACTION = 0.55
+CROP_EROSION_FRACTION = 0.015
+CROP_MIN_FRACTION = 0.55
+CROP_SAFETY_PX = 2.0
 
 
 def is_affine(transform: np.ndarray) -> bool:
@@ -181,9 +182,9 @@ def warp(frame: np.ndarray, transform: np.ndarray) -> np.ndarray:
     return cv2.warpPerspective(frame, transform, (width, height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 
-def auto_crop(frame: np.ndarray, transform: np.ndarray) -> np.ndarray:
-    """Crop away reflected borders introduced by ``warp`` and scale back to the original size."""
-    height, width = frame.shape[:2]
+def valid_area_rect(transform: np.ndarray, frame_shape: tuple[int, ...]) -> tuple[int, int, int, int] | None:
+    """Bounding rect of the pixels ``warp`` fills with real content (reflected borders excluded)."""
+    height, width = frame_shape[:2]
     mask = np.full((height, width), 255, dtype=np.uint8)
     warp_fn = cv2.warpAffine if is_affine(transform) else cv2.warpPerspective
     valid_mask = warp_fn(
@@ -194,25 +195,68 @@ def auto_crop(frame: np.ndarray, transform: np.ndarray) -> np.ndarray:
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
-
-    erosion_size = max(1, round(min(width, height) * AUTO_CROP_EROSION_FRACTION))
+    erosion_size = max(1, round(min(width, height) * CROP_EROSION_FRACTION))
     if erosion_size > 1:
         kernel = np.ones((erosion_size, erosion_size), dtype=np.uint8)
         valid_mask = cv2.erode(valid_mask, kernel, iterations=1)
-
     non_zero = cv2.findNonZero(valid_mask)
     if non_zero is None:
-        return frame
+        return None
+    left, top, rect_width, rect_height = cv2.boundingRect(non_zero)
+    return (int(left), int(top), int(rect_width), int(rect_height))
 
-    left, top, cropped_width, cropped_height = cv2.boundingRect(non_zero)
-    if cropped_width >= (width - 2) and cropped_height >= (height - 2):
-        return frame
-    min_width = max(16, int(width * AUTO_CROP_MIN_FRACTION))
-    min_height = max(16, int(height * AUTO_CROP_MIN_FRACTION))
-    if cropped_width < min_width or cropped_height < min_height:
-        return frame
 
-    cropped = frame[top : top + cropped_height, left : left + cropped_width]
+def rect_inside_projection(rect: tuple[int, int, int, int], transform: np.ndarray, width: int, height: int) -> bool:
+    """True when every corner of ``rect`` lands on real content after ``warp`` (with a small safety margin)."""
+    projected = project_corners(transform, width, height)
+    if not np.isfinite(projected).all():
+        return False
+    contour = projected.astype(np.float32).reshape(-1, 1, 2)
+    x, y, rect_width, rect_height = rect
+    corners = ((x, y), (x + rect_width - 1, y), (x + rect_width - 1, y + rect_height - 1), (x, y + rect_height - 1))
+    return all(
+        cv2.pointPolygonTest(contour, (float(corner_x), float(corner_y)), True) >= CROP_SAFETY_PX
+        for corner_x, corner_y in corners
+    )
+
+
+def crop_rect_for(
+    transform: np.ndarray | None, frame_shape: tuple[int, ...], margin_fraction: float
+) -> tuple[int, int, int, int]:
+    """The crop that hides stabilization borders: a fixed inset of ``margin_fraction`` per side.
+
+    The inset is the same for every frame, so the zoom does not breathe with the correction. It
+    only grows (toward the actually valid area) when a correction exceeds the margin, which the
+    inter-frame modes never do because their translation is capped at the same fraction.
+    """
+    height, width = frame_shape[:2]
+    margin_x = round(width * margin_fraction)
+    margin_y = round(height * margin_fraction)
+    rect = (margin_x, margin_y, max(1, width - 2 * margin_x), max(1, height - 2 * margin_y))
+    if transform is None or rect_inside_projection(rect, transform, width, height):
+        return rect
+
+    valid = valid_area_rect(transform, frame_shape)
+    if valid is None:
+        return rect
+    left = max(rect[0], valid[0])
+    top = max(rect[1], valid[1])
+    right = min(rect[0] + rect[2], valid[0] + valid[2])
+    bottom = min(rect[1] + rect[3], valid[1] + valid[3])
+    min_width = max(16, int(width * CROP_MIN_FRACTION))
+    min_height = max(16, int(height * CROP_MIN_FRACTION))
+    if right - left < min_width or bottom - top < min_height:
+        return rect
+    return (left, top, right - left, bottom - top)
+
+
+def stabilization_crop(frame: np.ndarray, transform: np.ndarray | None, margin_fraction: float) -> np.ndarray:
+    """Apply :func:`crop_rect_for` and scale back to the original size."""
+    height, width = frame.shape[:2]
+    x, y, rect_width, rect_height = crop_rect_for(transform, frame.shape, margin_fraction)
+    if x == 0 and y == 0 and rect_width >= width and rect_height >= height:
+        return frame
+    cropped = frame[y : y + rect_height, x : x + rect_width]
     if cropped.size == 0:
         return frame
     return cv2.resize(cropped, (width, height), interpolation=cv2.INTER_CUBIC)

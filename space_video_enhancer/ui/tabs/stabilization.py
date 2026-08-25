@@ -79,6 +79,9 @@ class StabilizationTab(TabPage):
         self.reset_button.setObjectName("secondaryButton")
         self.auto_crop_checkbox = QCheckBox("Crop automático para esconder bordas")
         self.auto_crop_checkbox.setChecked(True)
+        self.auto_crop_checkbox.setToolTip(
+            "Recorta uma margem fixa em todos os frames (o mesmo teto da correção), então o zoom não oscila."
+        )
         self.zoom_out_checkbox = QCheckBox("Zoom out automático para preservar bordas")
         self.zoom_out_checkbox.setChecked(False)
         self.info_label = QLabel()

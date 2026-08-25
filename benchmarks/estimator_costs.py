@@ -70,28 +70,16 @@ def main() -> None:
     transform = transforms.translation_to_affine(5.3, -3.1)
     timeit("warp affine 720p", lambda: transforms.warp(frames[0], transform))
     timeit(
-        "auto_crop 720p (mascara + erode + boundingRect + resize)", lambda: transforms.auto_crop(frames[0], transform)
+        "stabilization_crop 720p (margem fixa + resize)",
+        lambda: transforms.stabilization_crop(frames[0], transform, 0.05),
     )
 
     rng = np.random.default_rng(1)
-    zooms = []
-    for _ in range(40):
-        dx, dy = rng.normal(0.0, 6.0, 2)
-        mask = np.full((HEIGHT, WIDTH), 255, dtype=np.uint8)
-        valid = cv2.warpAffine(
-            mask,
-            transforms.translation_to_affine(dx, dy),
-            (WIDTH, HEIGHT),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        _x, _y, cropped_width, _height = cv2.boundingRect(cv2.findNonZero(valid))
-        zooms.append(WIDTH / cropped_width)
-    print(
-        f"  auto_crop por frame com tremor std 6 px: zoom min {min(zooms):.4f} max {max(zooms):.4f} "
-        f"(variacao {100 * (max(zooms) - min(zooms)):.2f}% frame a frame)"
-    )
+    rects = {
+        transforms.crop_rect_for(transforms.translation_to_affine(*rng.normal(0.0, 6.0, 2)), (HEIGHT, WIDTH, 3), 0.05)
+        for _ in range(40)
+    }
+    print(f"  crop_rect_for com tremor std 6 px: {len(rects)} retangulo(s) distinto(s) em 40 frames (constante = 1)")
 
 
 if __name__ == "__main__":

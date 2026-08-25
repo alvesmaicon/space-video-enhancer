@@ -12,6 +12,7 @@ from space_video_enhancer.pipeline.stabilization.estimators import (
     reference_cache_stats,
 )
 from space_video_enhancer.pipeline.stabilization.stabilize import (
+    CORRECTION_BUDGET_FRACTION,
     apply_stabilization,
     estimate_correction,
     lock_weight,
@@ -37,11 +38,11 @@ def previous_frame(textured_frame: np.ndarray) -> np.ndarray:
 def shaky_sequence(count: int = 40, jitter: float = 5.0, pan: float = 16.0) -> tuple[list[np.ndarray], np.ndarray]:
     """Frames of a textured scene seen through a jittering window that also pans ``pan`` px to the right."""
     rng = np.random.default_rng(7)
-    width, height = 320, 180
+    width, height = 480, 270  # 5% (the correction budget) is 24 x 13 px here, well above the jitter
     canvas = cv2.resize(
-        rng.integers(0, 255, (30, 50, 3), dtype=np.uint8), (width + 120, height + 120), interpolation=cv2.INTER_CUBIC
+        rng.integers(0, 255, (45, 75, 3), dtype=np.uint8), (width + 120, height + 120), interpolation=cv2.INTER_CUBIC
     )
-    for _ in range(30):
+    for _ in range(40):
         x, y = int(rng.integers(0, width + 90)), int(rng.integers(0, height + 100))
         cv2.rectangle(canvas, (x, y), (x + 24, y + 16), tuple(int(c) for c in rng.integers(0, 255, 3)), -1)
     drift = np.stack([np.linspace(0.0, pan, count), np.zeros(count)], axis=1)
@@ -241,9 +242,36 @@ def test_disabled_or_zero_intensity_returns_input(textured_frame: np.ndarray) ->
     assert apply_stabilization(textured_frame, settings, reference_frame=textured_frame) is textured_frame
 
 
-def test_camera_lock_without_reference_is_noop(textured_frame: np.ndarray) -> None:
-    settings = StabilizationSettings(mode=StabilizationMode.CAMERA_LOCK)
-    assert apply_stabilization(textured_frame, settings, reference_frame=None) is textured_frame
+def test_camera_lock_without_reference_only_applies_the_constant_crop(textured_frame: np.ndarray) -> None:
+    plain = StabilizationSettings(mode=StabilizationMode.CAMERA_LOCK, auto_crop=False)
+    assert apply_stabilization(textured_frame, plain, reference_frame=None) is textured_frame
+    cropping = StabilizationSettings(mode=StabilizationMode.CAMERA_LOCK, auto_crop=True)
+    cropped = apply_stabilization(textured_frame, cropping, reference_frame=None)
+    assert cropped.shape == textured_frame.shape and not np.array_equal(cropped, textured_frame)
+    # Same crop as a frame that did get a correction: the zoom does not pop.
+    expected = transforms.stabilization_crop(textured_frame, None, CORRECTION_BUDGET_FRACTION)
+    assert np.array_equal(cropped, expected)
+
+
+def test_crop_rect_is_constant_for_corrections_within_the_margin() -> None:
+    shape = (270, 480, 3)
+    margin = CORRECTION_BUDGET_FRACTION
+    baseline = transforms.crop_rect_for(None, shape, margin)
+    assert baseline == (24, 14, 432, 242)
+    for shift in ((0.0, 0.0), (3.0, 2.0), (-8.0, 5.0), (480 * margin - 3, -(270 * margin - 3))):
+        assert transforms.crop_rect_for(transforms.translation_to_affine(*shift), shape, margin) == baseline
+    beyond = transforms.crop_rect_for(transforms.translation_to_affine(60.0, 0.0), shape, margin)
+    assert beyond != baseline and beyond[0] >= 60 - 1 and beyond[1] == baseline[1]
+
+
+def test_stabilization_crop_returns_same_size(textured_frame: np.ndarray) -> None:
+    transform = transforms.translation_to_affine(12.0, 8.0)
+    warped = transforms.warp(textured_frame, transform)
+    assert transforms.stabilization_crop(warped, transform, 0.05).shape == textured_frame.shape
+    assert transforms.stabilization_crop(warped, transforms.translation_to_affine(200.0, 0.0), 0.05).shape == (
+        textured_frame.shape
+    )
+    assert transforms.stabilization_crop(textured_frame, None, 0.0) is textured_frame
 
 
 def test_blend_and_negligible() -> None:
@@ -281,13 +309,6 @@ def test_rescale_homography_roundtrip() -> None:
     affine = np.array([[1.0, 0.0, 3.0], [0.0, 1.0, -2.0]], dtype=np.float32)
     rescaled = transforms.rescale_affine(affine, 0.5)  # estimated at half resolution -> double the translation
     assert rescaled[0, 2] == pytest.approx(6.0) and rescaled[1, 2] == pytest.approx(-4.0)
-
-
-def test_auto_crop_returns_same_size(textured_frame: np.ndarray) -> None:
-    transform = transforms.translation_to_affine(12.0, 8.0)
-    warped = transforms.warp(textured_frame, transform)
-    cropped = transforms.auto_crop(warped, transform)
-    assert cropped.shape == textured_frame.shape
 
 
 def test_state_reset_clears_everything() -> None:

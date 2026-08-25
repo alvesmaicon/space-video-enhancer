@@ -9,7 +9,8 @@ into a correction that follows a low-passed version of the camera path::
 ``delta_k`` aligns frame k onto frame k-1; ``decay`` comes from the smoothing slider and is
 how slowly the virtual camera follows the real one (a time constant in frames), so fast
 jitter is removed while pans survive. The translation part is capped so the corrected
-frame never wanders further than :data:`CORRECTION_BUDGET_FRACTION` of the frame.
+frame never wanders further than :data:`CORRECTION_BUDGET_FRACTION` of the frame — which
+is also the fixed margin the automatic crop removes, on every frame, so the zoom is constant.
 
 Camera lock estimates an absolute transform onto the reference frame every frame and holds
 the last one while the target is lost. Hybrid does the same but, while lost, keeps the lock
@@ -31,7 +32,8 @@ SMOOTHING_MAX_FRAMES = 60.0
 """Time constant of the virtual camera at smoothing 0 and 1 (log scale in between)."""
 LOCK_SMOOTHING_MAX = 0.7
 """At smoothing 1 a fresh camera-lock estimate replaces only 30% of the previous correction."""
-CORRECTION_BUDGET_FRACTION = 0.08
+CORRECTION_BUDGET_FRACTION = 0.05
+"""Cap on the accumulated translation per axis, and the fixed margin of the automatic crop."""
 HYBRID_RELEASE_FRAMES = 30.0
 HYBRID_REACQUIRE_WEIGHT = 0.5
 HYBRID_REACQUIRE_FRAMES = 6
@@ -71,22 +73,24 @@ def apply_stabilization(
     note("stabilization.mode", settings.mode.value)
 
     correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
+    applied: np.ndarray | None = None
     if correction is None:
         note("stabilization.result", "no_transform")
-        return frame
+    else:
+        blended = transforms.blend_with_identity(correction, settings.intensity)
+        if settings.zoom_out:
+            blended = transforms.fit_with_zoom_out(blended, frame.shape)
+        note("stabilization.translation_px", [round(float(blended[0, 2]), 2), round(float(blended[1, 2]), 2)])
+        if transforms.is_negligible(blended):
+            note("stabilization.result", "negligible")
+        else:
+            note("stabilization.result", "applied")
+            applied = blended
 
-    blended = transforms.blend_with_identity(correction, settings.intensity)
-    if settings.zoom_out:
-        blended = transforms.fit_with_zoom_out(blended, frame.shape)
-    note("stabilization.translation_px", [round(float(blended[0, 2]), 2), round(float(blended[1, 2]), 2)])
-    if transforms.is_negligible(blended):
-        note("stabilization.result", "negligible")
-        return frame
-
-    stabilized = transforms.warp(frame, blended)
+    stabilized = frame if applied is None else transforms.warp(frame, applied)
     if settings.auto_crop:
-        stabilized = transforms.auto_crop(stabilized, blended)
-    note("stabilization.result", "applied")
+        # Always, even without a correction: the zoom must not pop in and out between frames.
+        stabilized = transforms.stabilization_crop(stabilized, applied, CORRECTION_BUDGET_FRACTION)
     return stabilized
 
 

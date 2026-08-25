@@ -42,6 +42,7 @@ from space_video_enhancer.export.worker import ExportController
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS
 from space_video_enhancer.pipeline.preview import PreviewRequest, ThumbnailRequest
+from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
 from space_video_enhancer.settings import (
     DEFAULT_CROP_RECT,
     DEFAULT_DENOISE_SAMPLE_RECT,
@@ -1132,7 +1133,11 @@ class MainWindow(QMainWindow):
             return
 
         facts = [
-            f"Crop automático {'ligado' if settings.auto_crop else 'desligado'}",
+            (
+                f"Crop automático ligado (margem fixa de {CORRECTION_BUDGET_FRACTION:.0%})"
+                if settings.auto_crop
+                else "Crop automático desligado"
+            ),
             f"zoom out {'ligado' if settings.zoom_out else 'desligado'}",
             f"suavização {int(settings.temporal_smoothing * 100)}%",
         ]
