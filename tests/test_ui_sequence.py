@@ -8,7 +8,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.export.ffmpeg import LIBX264
@@ -221,3 +222,27 @@ def test_filmstrip_and_waveform_read_every_source(
     for path in (ui_video, ui_video_b):
         wait_until(app, lambda path=path: timeline.audio_state(path) != "loading", what="waveform state")
         assert timeline.audio_state(path) in ("none", "unavailable")
+
+
+def test_dragging_a_clip_on_the_strip_reorders_the_sequence(
+    app: QApplication, window: MainWindow, ui_video: Path, ui_video_b: Path
+) -> None:
+    _open_two(app, window, ui_video, ui_video_b)
+    _go_to(app, window, 3)
+    timeline = window.transport.timeline
+    scale = timeline.scale
+    y = timeline.clip_track_rect().center().y()
+    for kind, x, buttons in (
+        (QEvent.Type.MouseButtonPress, scale.x_of(4), Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseMove, scale.x_of(10), Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseMove, scale.x_of(TOTAL - 0.5), Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseButtonRelease, scale.x_of(TOTAL - 0.5), Qt.MouseButton.NoButton),
+    ):
+        point = QPointF(x, y)
+        QApplication.sendEvent(
+            timeline,
+            QMouseEvent(kind, point, point, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier),
+        )
+    assert [clip.name for clip in window.sequence.clips] == [ui_video_b.name, ui_video.name]
+    assert window.current_frame_index == UI_VIDEO_B_FRAMES + 3, "the playhead stays on its frame of the moved clip"
+    assert [block.name for block in timeline.clips()] == [ui_video_b.name, ui_video.name]

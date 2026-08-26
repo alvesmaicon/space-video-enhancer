@@ -324,15 +324,16 @@ def test_clip_strip_names_the_clips_and_offers_split_and_remove(app: QApplicatio
     assert timeline.hit_test(QPointF(scale.x_of(70.5), timeline.clip_track_rect().center().y())) == Hit("clip", 1)
     assert timeline.hit_test(QPointF(scale.x_of(70.5), timeline.video_track_rect().center().y())) == Hit("seek")
 
-    press = QMouseEvent(
-        QEvent.Type.MouseButtonPress,
-        QPointF(scale.x_of(70.5), timeline.clip_track_rect().center().y()),
-        QPointF(scale.x_of(70.5), timeline.clip_track_rect().center().y()),
-        Qt.MouseButton.LeftButton,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    QApplication.sendEvent(timeline, press)
+    strip_y = timeline.clip_track_rect().center().y()
+    for kind, buttons in (
+        (QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+    ):
+        point = QPointF(scale.x_of(70.5), strip_y)
+        QApplication.sendEvent(
+            timeline,
+            QMouseEvent(kind, point, point, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier),
+        )
     assert timeline.value() == 70, "clicking the strip seeks like the empty timeline"
 
     splits: list[int] = []
@@ -361,4 +362,61 @@ def test_clip_strip_names_the_clips_and_offers_split_and_remove(app: QApplicatio
     assert timeline.value() == 59 and timeline.active_clip() == -1
     assert scale.pixels_per_frame == pytest.approx(zoom), "the zoom level survives a layout change"
     timeline.grab()
+    timeline.close()
+
+
+def _strip_drag(timeline: TimelineWidget, xs: list[float]) -> None:
+    y = timeline.clip_track_rect().center().y()
+    events = [(QEvent.Type.MouseButtonPress, xs[0], Qt.MouseButton.LeftButton)]
+    events += [(QEvent.Type.MouseMove, x, Qt.MouseButton.LeftButton) for x in xs[1:]]
+    events.append((QEvent.Type.MouseButtonRelease, xs[-1], Qt.MouseButton.NoButton))
+    for kind, x, buttons in events:
+        point = QPointF(x, y)
+        QApplication.sendEvent(
+            timeline,
+            QMouseEvent(kind, point, point, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier),
+        )
+
+
+def test_dragging_a_clip_block_asks_to_move_it_to_the_nearest_gap(app: QApplication) -> None:
+    timeline = TimelineWidget()
+    timeline.resize(800, timeline.sizeHint().height())
+    timeline.show()
+    timeline.set_media(100, 24.0)
+    blocks = [
+        ClipBlock(0, 40, "a.mp4", Path("a.mp4")),
+        ClipBlock(40, 30, "b.mp4", Path("b.mp4")),
+        ClipBlock(70, 30, "c.mp4", Path("c.mp4")),
+    ]
+    timeline.set_clips(blocks)
+    scale = timeline.scale
+    moves: list[tuple[int, int]] = []
+    timeline.clipMoveRequested.connect(lambda index, new_index: moves.append((index, new_index)))
+    timeline.setValue(5)
+
+    _strip_drag(timeline, [scale.x_of(20), scale.x_of(20.5)])  # 4 px, below the threshold: a click, not a drag
+    assert moves == [] and timeline.value() == 20
+
+    _strip_drag(timeline, [scale.x_of(20), scale.x_of(40), scale.x_of(98)])  # a -> after c
+    assert moves == [(0, 2)]
+    _strip_drag(timeline, [scale.x_of(85), scale.x_of(60), scale.x_of(3)])  # c -> before a
+    assert moves == [(0, 2), (2, 0)]
+    _strip_drag(timeline, [scale.x_of(50), scale.x_of(60), scale.x_of(41)])  # b dropped on its own gap: no move
+    assert moves == [(0, 2), (2, 0)] and timeline.value() == 20, "a real drag never seeks"
+    assert timeline.clip_insertion_index(scale.x_of(55)) == 1 and timeline.clip_insertion_index(scale.x_of(99)) == 3
+
+    y = timeline.clip_track_rect().center().y()
+    for kind, x, buttons in (
+        (QEvent.Type.MouseButtonPress, scale.x_of(20), Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseMove, scale.x_of(60), Qt.MouseButton.LeftButton),
+    ):
+        point = QPointF(x, y)
+        QApplication.sendEvent(
+            timeline,
+            QMouseEvent(kind, point, point, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier),
+        )
+    assert timeline.clip_drag_target() == 2, "a drag in progress reports where the block would land"
+    timeline.grab()  # paints the ghost and the insertion bar
+    timeline.set_clips(blocks[:2])
+    assert timeline.clip_drag_target() is None, "a layout change cancels the drag"
     timeline.close()

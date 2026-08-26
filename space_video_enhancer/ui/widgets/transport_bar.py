@@ -59,6 +59,7 @@ class TransportBar(QWidget):
     cutToggleRequested = Signal()
     clipSplitRequested = Signal()
     clipRemoveRequested = Signal(int)
+    clipMoveRequested = Signal(int, int)
     soundToggled = Signal(bool)
     """The speaker button: ``True`` = play sound with the preview."""
     thumbnailsRequested = Signal(object, int, float)
@@ -127,6 +128,7 @@ class TransportBar(QWidget):
         self.timeline.cutToggleRequested.connect(self.cutToggleRequested.emit)
         self.timeline.clipSplitRequested.connect(self.clipSplitRequested.emit)
         self.timeline.clipRemoveRequested.connect(self.clipRemoveRequested.emit)
+        self.timeline.clipMoveRequested.connect(self.clipMoveRequested.emit)
         self.timeline.zoomChanged.connect(self._update_zoom_buttons)
         self.timeline.thumbnailsRequested.connect(self.thumbnailsRequested.emit)
         self.zoom_out_button.clicked.connect(self.timeline.zoom_out)

@@ -84,6 +84,10 @@ CLIP_BORDER_COLOR = QColor("#0f766e")
 CLIP_BOUNDARY_COLOR = QColor(31, 41, 55, 110)
 CLIP_TEXT_COLOR = QColor("#1f2937")
 CLIP_MIN_TEXT_WIDTH = 28
+CLIP_DRAG_THRESHOLD_PX = 6
+"""A press on the clip strip becomes a reorder drag after this much horizontal travel; less is a click (seek)."""
+CLIP_GHOST_COLOR = QColor(15, 118, 110, 90)
+CLIP_INSERT_COLOR = QColor("#0f766e")
 PLAYHEAD_COLOR = QColor("#1f2937")
 PLAYHEAD_CELL_COLOR = QColor(31, 41, 55, 40)
 TRACK_LABEL_COLOR = QColor("#57534e")
@@ -247,7 +251,7 @@ class Hit:
     def cursor(self) -> Qt.CursorShape:
         if self.kind in ("cut_start", "cut_end", "clip_start", "clip_end"):
             return Qt.CursorShape.SizeHorCursor
-        if self.kind == "cut_body":
+        if self.kind in ("cut_body", "clip"):
             return Qt.CursorShape.OpenHandCursor
         return Qt.CursorShape.ArrowCursor
 
@@ -260,6 +264,18 @@ class _Drag:
     clip: tuple[int, int]
     moved: bool = False
     last_cuts: list[tuple[int, int]] = field(default_factory=list)
+
+
+@dataclass
+class _ClipDrag:
+    """A press on the clip strip: a click until the mouse travels, then a reorder drag with an insertion point."""
+
+    index: int
+    press_x: float
+    current_x: float
+    target: int
+    """Insertion gap (``0`` .. number of clips) nearest to the mouse."""
+    active: bool = False
 
 
 class TimelineWidget(QWidget):
@@ -279,6 +295,8 @@ class TimelineWidget(QWidget):
     clipSplitRequested = Signal()
     """Context menu: split the clip at the playhead (moved there first)."""
     clipRemoveRequested = Signal(int)
+    clipMoveRequested = Signal(int, int)
+    """``(index, new_index)``: a clip block dragged to another place on the strip."""
     zoomChanged = Signal()
     thumbnailsRequested = Signal(object, int, float)
     """``(frames, height_device_px, device_pixel_ratio)``: filmstrip thumbnails missing from the view."""
@@ -307,6 +325,7 @@ class TimelineWidget(QWidget):
         self._pending_cut: int | None = None
         self._selected_cut = -1
         self._drag: _Drag | None = None
+        self._clip_drag: _ClipDrag | None = None
         self._scrubbing = False
         self._syncing_scrollbar = False
         self._hover = Hit("seek")
@@ -395,6 +414,7 @@ class TimelineWidget(QWidget):
         may now show a different source frame, waveforms of files still in use are kept.
         """
         self._clips = list(clips)
+        self._clip_drag = None
         total = sum(clip.count for clip in self._clips)
         if total != self.scale.frame_count:
             self.scale.frame_count = total
@@ -754,7 +774,11 @@ class TimelineWidget(QWidget):
         hit = self.hit_test(pos)
         if hit.kind == "none":
             return
-        if hit.kind in ("seek", "clip"):
+        if hit.kind == "clip":
+            self._set_selected(-1)
+            self._clip_drag = _ClipDrag(hit.index, pos.x(), pos.x(), hit.index)  # click or reorder: decided on move
+            return
+        if hit.kind == "seek":
             self._set_selected(-1)
             self._scrubbing = True
             self.setValue(self.scale.frame_index_at(pos.x()))
@@ -766,6 +790,9 @@ class TimelineWidget(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
+        if self._clip_drag is not None:
+            self._move_clip_drag(pos.x())
+            return
         if self._scrubbing:
             self.setValue(self.scale.frame_index_at(pos.x()))
             return
@@ -781,6 +808,10 @@ class TimelineWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             super().mouseReleaseEvent(event)
             return
+        if self._clip_drag is not None:
+            self._finish_clip_drag()
+            self.setCursor(self.hit_test(event.position()).cursor)
+            return
         if self._scrubbing:
             self._scrubbing = False
             return
@@ -792,6 +823,42 @@ class TimelineWidget(QWidget):
         super().leaveEvent(event)
         self._hover = Hit("seek")
         self.unsetCursor()
+
+    # --- reordering clips on the strip ------------------------------------------------------
+    def clip_insertion_index(self, x: float) -> int:
+        """The gap between clips (``0`` .. ``len(clips)``) whose boundary is nearest to pixel ``x``."""
+        if not self._clips:
+            return 0
+        boundaries = [self.scale.x_of(clip.start) for clip in self._clips]
+        boundaries.append(self.scale.x_of(self._clips[-1].end + 1))
+        return min(range(len(boundaries)), key=lambda gap: abs(boundaries[gap] - x))
+
+    def _move_clip_drag(self, x: float) -> None:
+        drag = self._clip_drag
+        assert drag is not None
+        drag.current_x = x
+        if not drag.active and abs(x - drag.press_x) >= CLIP_DRAG_THRESHOLD_PX:
+            drag.active = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        if drag.active:
+            drag.target = self.clip_insertion_index(x)
+            self.update()
+
+    def _finish_clip_drag(self) -> None:
+        drag, self._clip_drag = self._clip_drag, None
+        assert drag is not None
+        if not drag.active:
+            self.setValue(self.scale.frame_index_at(drag.press_x))  # a plain click on the strip seeks there
+            return
+        self.update()
+        new_index = drag.target if drag.target <= drag.index else drag.target - 1
+        if new_index != drag.index:
+            self.clipMoveRequested.emit(drag.index, new_index)
+
+    def clip_drag_target(self) -> int | None:
+        """Insertion gap of the reorder drag in progress, ``None`` when nothing is being dragged."""
+        drag = self._clip_drag
+        return drag.target if drag is not None and drag.active else None
 
     def _apply_drag(self, x: float, *, finished: bool) -> None:
         drag = self._drag
@@ -897,6 +964,7 @@ class TimelineWidget(QWidget):
         self._paint_cuts(painter)
         self._paint_clip_markers(painter)
         self._paint_playhead(painter)
+        self._paint_clip_drag(painter)
         self._paint_track_labels(painter)
 
     def _paint_ruler(self, painter: QPainter) -> None:
@@ -1014,6 +1082,33 @@ class TimelineWidget(QWidget):
                     pen.setStyle(Qt.PenStyle.DashLine)
                     painter.setPen(pen)
                     painter.drawLine(QPointF(x, media.top()), QPointF(x, media.bottom() + 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _paint_clip_drag(self, painter: QPainter) -> None:
+        """The dragged block follows the mouse as a ghost; a bar marks where it would be inserted."""
+        drag = self._clip_drag
+        if drag is None or not drag.active or not (0 <= drag.index < len(self._clips)):
+            return
+        clip = self._clips[drag.index]
+        track = self.clip_track_rect()
+        width = self.scale.x_of(clip.end + 1) - self.scale.x_of(clip.start)
+        left = self.scale.x_of(clip.start) + (drag.current_x - drag.press_x)
+        ghost = self._span_rect(track, left, left + width, min_width=4.0)
+        if not ghost.isEmpty():
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(CLIP_GHOST_COLOR)
+            painter.drawRect(ghost.adjusted(0, 1, 0, -1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+        boundaries = [self.scale.x_of(block.start) for block in self._clips]
+        boundaries.append(self.scale.x_of(self._clips[-1].end + 1))
+        x = _clamp(boundaries[drag.target], 1.0, self.width() - 1.0)
+        painter.setPen(QPen(CLIP_INSERT_COLOR, 3))
+        painter.drawLine(QPointF(x, track.top()), QPointF(x, self.content_height()))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(CLIP_INSERT_COLOR)
+        painter.drawPolygon(
+            QPolygonF([QPointF(x - 5, track.top() - 1), QPointF(x + 5, track.top() - 1), QPointF(x, track.top() + 6)])
+        )
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_cuts(self, painter: QPainter) -> None:

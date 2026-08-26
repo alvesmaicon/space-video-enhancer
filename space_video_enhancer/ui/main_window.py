@@ -526,6 +526,7 @@ class MainWindow(QMainWindow):
         self.transport.thumbnailsRequested.connect(self._request_filmstrip)
         self.transport.clipSplitRequested.connect(self._split_clip_at_playhead)
         self.transport.clipRemoveRequested.connect(self._remove_clip)
+        self.transport.clipMoveRequested.connect(self._move_clip)
         self.export_tab.clipAddRequested.connect(self._select_video_to_add)
         self.export_tab.clipRemoveRequested.connect(self._remove_clip)
         self.export_tab.clipMoveRequested.connect(self._move_clip)
