@@ -1,8 +1,9 @@
-"""Tab "HSL": white balance (tint, neutral gray region) and per-hue-band hue/saturation/luminance.
+"""Tab "HSL": white balance, the exposure lock and per-hue-band hue/saturation/luminance.
 
-The gray reference region is edited directly on the preview while this tab is active; the
+The purple reference region is edited directly on the preview while this tab is active; the
 window turns it into channel gains with :func:`pipeline.grade.neutral_gains` when the user
-clicks "Neutralizar". The eight color swatches select which band the three sliders edit.
+clicks "Neutralizar", and into the exposure-lock reference (:mod:`pipeline.exposure`) when the
+user clicks "Usar este frame". The eight color swatches select which band the three sliders edit.
 """
 
 from __future__ import annotations
@@ -10,20 +11,24 @@ from __future__ import annotations
 from dataclasses import replace
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QPushButton, QToolButton
+from PySide6.QtWidgets import QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QToolButton
 
 from space_video_enhancer.settings import (
     BAND_LUMINANCE_LIMIT,
     BAND_SATURATION_LIMIT,
     DEFAULT_HUE_BANDS,
+    EXPOSURE_DEFAULT_MAX_EV,
+    EXPOSURE_MAX_EV_LIMIT,
     HUE_BAND_NAMES,
     HUE_SHIFT_LIMIT_DEG,
     NEUTRAL_GAINS,
     ColorGradeSettings,
+    ExposureLockSettings,
     HueBandAdjust,
+    NormalizedRect,
 )
-from space_video_enhancer.ui.format import format_signed
-from space_video_enhancer.ui.tabs.base import TabPage, group_box
+from space_video_enhancer.ui.format import format_percent, format_signed
+from space_video_enhancer.ui.tabs.base import TabPage, form_rows, group_box
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
 DEFAULT_TINT = 50
@@ -48,6 +53,10 @@ BAND_SWATCHES = {
     "magenta": "#ec4899",
 }
 SWATCH_SIZE = QSize(34, 26)
+EXPOSURE_LIMIT_STEP_EV = 0.25
+"""The limit slider moves in quarter stops."""
+EXPOSURE_SCOPES: list[tuple[str, bool]] = [("Região roxa do preview", True), ("Frame inteiro", False)]
+EXPOSURE_MODES: list[tuple[str, bool]] = [("Brilho e cor (B/G/R)", True), ("Só brilho", False)]
 
 
 def format_degrees(value: int) -> str:
@@ -58,17 +67,29 @@ def format_signed_percent(value: int) -> str:
     return f"{value:+d}%" if value else "0%"
 
 
+def format_ev_limit(value: int) -> str:
+    return f"±{value * EXPOSURE_LIMIT_STEP_EV:.2f} EV"
+
+
 class ColorGradeTab(TabPage):
     valueChanged = Signal()
     neutralizeRequested = Signal(bool)
     """``True`` = whole frame (gray world), ``False`` = the gray reference region on the preview."""
     gainsResetRequested = Signal()
     regionResetRequested = Signal()
+    exposureChanged = Signal()
+    """Any exposure-lock control moved (the window re-renders the preview)."""
+    exposureCaptureRequested = Signal()
+    """Meter the current frame's region and make it the exposure reference."""
+    exposureClearRequested = Signal()
+    exposureScopeChanged = Signal()
+    """Region <-> whole frame: the reference was metered the other way and must be re-metered."""
 
     def __init__(self) -> None:
         super().__init__()
         self._bands: list[HueBandAdjust] = list(DEFAULT_HUE_BANDS)
         self._current_band = 0
+        self._exposure_reference: tuple[float, float, float] | None = None
 
         self.tint_slider = LabeledSlider("Tint (verde ↔ magenta)", 0, 100, DEFAULT_TINT, display=format_signed)
         self.tint_slider.setToolTip(
@@ -127,6 +148,42 @@ class ColorGradeTab(TabPage):
         self.all_bands_reset_button = QPushButton("Redefinir todas as cores")
         self.all_bands_reset_button.setObjectName("secondaryButton")
 
+        self.exposure_checkbox = QCheckBox("Travar exposição no frame de referência")
+        self.exposure_checkbox.setToolTip(
+            "Mede a região em cada frame e aplica ganhos B/G/R para ela ficar igual ao frame de referência: "
+            "corrige o brilho e o balanço de branco que a câmera muda sozinha (auto-exposição / AWB)."
+        )
+        self.exposure_capture_button = QPushButton("Usar este frame como referência")
+        self.exposure_capture_button.setToolTip(
+            "Escolha um frame com a exposição certa e sem nada tapando a região; a região deve ser uma parte fixa "
+            "da cena (parede, chão), em meio-tom e sem estourar."
+        )
+        self.exposure_clear_button = QPushButton("Limpar referência")
+        self.exposure_clear_button.setObjectName("secondaryButton")
+        self.exposure_scope_combo = QComboBox()
+        for label, use_region in EXPOSURE_SCOPES:
+            self.exposure_scope_combo.addItem(label, use_region)
+        self.exposure_scope_combo.setToolTip(
+            "Frame inteiro só funciona em cena parada: alguém entrando no quadro muda a média e a correção pulsa."
+        )
+        self.exposure_mode_combo = QComboBox()
+        for label, color in EXPOSURE_MODES:
+            self.exposure_mode_combo.addItem(label, color)
+        self.exposure_strength_slider = LabeledSlider("Intensidade", 0, 100, 100, display=format_percent)
+        self.exposure_limit_slider = LabeledSlider(
+            "Limite",
+            1,
+            round(EXPOSURE_MAX_EV_LIMIT / EXPOSURE_LIMIT_STEP_EV),
+            round(EXPOSURE_DEFAULT_MAX_EV / EXPOSURE_LIMIT_STEP_EV),
+            display=format_ev_limit,
+        )
+        self.exposure_limit_slider.setToolTip("Maior correção permitida, em stops (EV), para cima ou para baixo.")
+        self.exposure_label = QLabel()
+        self.exposure_label.setWordWrap(True)
+        self.exposure_status_label = QLabel()
+        self.exposure_status_label.setObjectName("hintLabel")
+        self.exposure_status_label.setWordWrap(True)
+
         self.tint_slider.valueChanged.connect(lambda _value: self.valueChanged.emit())
         self.tint_slider.resetRequested.connect(lambda: self.tint_slider.setValue(DEFAULT_TINT))
         self.neutralize_button.clicked.connect(lambda: self.neutralizeRequested.emit(False))
@@ -139,6 +196,18 @@ class ColorGradeTab(TabPage):
             slider.resetRequested.connect(lambda slider=slider: slider.setValue(0))
         self.band_reset_button.clicked.connect(lambda: self.set_band(self._current_band, HueBandAdjust(), emit=True))
         self.all_bands_reset_button.clicked.connect(self.reset_bands)
+        self.exposure_checkbox.toggled.connect(lambda _checked: self._exposure_controls_changed())
+        self.exposure_capture_button.clicked.connect(self.exposureCaptureRequested.emit)
+        self.exposure_clear_button.clicked.connect(self.exposureClearRequested.emit)
+        self.exposure_scope_combo.currentIndexChanged.connect(lambda _index: self.exposureScopeChanged.emit())
+        self.exposure_scope_combo.currentIndexChanged.connect(lambda _index: self._exposure_controls_changed())
+        self.exposure_mode_combo.currentIndexChanged.connect(lambda _index: self._exposure_controls_changed())
+        self.exposure_strength_slider.valueChanged.connect(lambda _value: self.exposureChanged.emit())
+        self.exposure_strength_slider.resetRequested.connect(lambda: self.exposure_strength_slider.setValue(100))
+        self.exposure_limit_slider.valueChanged.connect(lambda _value: self.exposureChanged.emit())
+        self.exposure_limit_slider.resetRequested.connect(
+            lambda: self.exposure_limit_slider.setValue(round(EXPOSURE_DEFAULT_MAX_EV / EXPOSURE_LIMIT_STEP_EV))
+        )
 
         buttons_row = QHBoxLayout()
         buttons_row.addWidget(self.neutralize_button)
@@ -151,6 +220,10 @@ class ColorGradeTab(TabPage):
         band_reset_row.addWidget(self.band_reset_button)
         band_reset_row.addWidget(self.all_bands_reset_button)
         band_reset_row.addStretch(1)
+        exposure_buttons = QHBoxLayout()
+        exposure_buttons.addWidget(self.exposure_capture_button)
+        exposure_buttons.addWidget(self.exposure_clear_button)
+        exposure_buttons.addStretch(1)
         self.add_sections(
             group_box(
                 "Balanço de branco",
@@ -159,6 +232,17 @@ class ColorGradeTab(TabPage):
                 reset_row,
                 self.gains_label,
                 self.region_label,
+            ),
+            group_box(
+                "Iluminação constante",
+                self.exposure_checkbox,
+                exposure_buttons,
+                form_rows(("Medir em", self.exposure_scope_combo), ("Corrigir", self.exposure_mode_combo)),
+                self.exposure_strength_slider,
+                self.exposure_limit_slider,
+                self.exposure_label,
+                self.exposure_status_label,
+                spacing=10,
             ),
             group_box(
                 "Por cor (HSL)",
@@ -172,6 +256,8 @@ class ColorGradeTab(TabPage):
         )
         self.set_gains(NEUTRAL_GAINS)
         self.set_region_info("")
+        self.set_exposure_reference(None)
+        self.set_exposure_status("")
         self.select_band(0)
 
     # --- settings -------------------------------------------------------------------------
@@ -212,6 +298,53 @@ class ColorGradeTab(TabPage):
         self._bands[self._current_band] = replace(self._bands[self._current_band], **{field_name: value})
         self.valueChanged.emit()
 
+    # --- exposure lock --------------------------------------------------------------------
+    def exposure_uses_region(self) -> bool:
+        return bool(self.exposure_scope_combo.currentData())
+
+    def exposure_settings(self, region: NormalizedRect | None) -> ExposureLockSettings:
+        """``region`` is the purple rectangle; ignored (whole frame) when the scope says so."""
+        return ExposureLockSettings(
+            enabled=self.exposure_checkbox.isChecked(),
+            region=region if self.exposure_uses_region() else None,
+            reference=self._exposure_reference,
+            strength=self.exposure_strength_slider.value(),
+            max_ev=self.exposure_limit_slider.value() * EXPOSURE_LIMIT_STEP_EV,
+            color=bool(self.exposure_mode_combo.currentData()),
+        )
+
+    def exposure_reference(self) -> tuple[float, float, float] | None:
+        return self._exposure_reference
+
+    def set_exposure_reference(
+        self, reference: tuple[float, float, float] | None, *, frame_index: int | None = None
+    ) -> None:
+        """The reference medians (or ``None``); also turns the lock on when a reference is captured."""
+        self._exposure_reference = reference
+        if reference is None:
+            self.exposure_label.setText(
+                "Sem referência. Vá até um frame bem exposto e clique em “Usar este frame como referência”."
+            )
+        else:
+            where = f" (frame {frame_index + 1})" if frame_index is not None else ""
+            self.exposure_label.setText(
+                f"Referência{where}: medianas B {reference[0]:.0f} · G {reference[1]:.0f} · R {reference[2]:.0f}."
+            )
+            if not self.exposure_checkbox.isChecked():
+                self.exposure_checkbox.setChecked(True)  # emits exposureChanged through the toggle
+        self._update_exposure_buttons()
+
+    def set_exposure_status(self, text: str) -> None:
+        self.exposure_status_label.setText(text)
+
+    def _exposure_controls_changed(self) -> None:
+        self._update_exposure_buttons()
+        self.exposureChanged.emit()
+
+    def _update_exposure_buttons(self) -> None:
+        enabled = self.exposure_capture_button.isEnabled() or self.exposure_clear_button.isEnabled()
+        self.exposure_clear_button.setEnabled(enabled and self._exposure_reference is not None)
+
     # --- white balance --------------------------------------------------------------------
     def set_gains(self, gains: tuple[float, float, float]) -> None:
         neutral = all(abs(gain - 1.0) <= 1e-3 for gain in gains)
@@ -236,8 +369,15 @@ class ColorGradeTab(TabPage):
             self.luminance_slider,
             self.band_reset_button,
             self.all_bands_reset_button,
+            self.exposure_checkbox,
+            self.exposure_capture_button,
+            self.exposure_scope_combo,
+            self.exposure_mode_combo,
+            self.exposure_strength_slider,
+            self.exposure_limit_slider,
         ):
             widget.setEnabled(enabled)
         for button in self.band_buttons.values():
             button.setEnabled(enabled)
         self.gains_reset_button.setEnabled(enabled and "neutro" not in self.gains_label.text())
+        self.exposure_clear_button.setEnabled(enabled and self._exposure_reference is not None)

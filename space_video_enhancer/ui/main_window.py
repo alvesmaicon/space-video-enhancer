@@ -40,6 +40,7 @@ from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.export.ffmpeg import FfmpegProbe, find_ffmpeg, resolve_encoder
 from space_video_enhancer.export.job import ExportRequest, ExportResult
 from space_video_enhancer.export.worker import ExportController
+from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.grade import neutral_gains
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS
@@ -142,6 +143,8 @@ class MainWindow(QMainWindow):
         self.denoise_sample_rect_norm = norm_to_qrect(DEFAULT_DENOISE_SAMPLE_RECT)
         self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
         self.white_balance_gains: tuple[float, float, float] = NEUTRAL_GAINS
+        self._exposure_reference_frame: int | None = None
+        """Frame the exposure-lock reference was metered on (the medians live in the HSL tab)."""
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
         self.stabilization_reference_frame: np.ndarray | None = None
         self.stabilization_reference_frame_index = 0
@@ -477,6 +480,10 @@ class MainWindow(QMainWindow):
         self.grade_tab.neutralizeRequested.connect(self._neutralize_white_balance)
         self.grade_tab.gainsResetRequested.connect(self._reset_white_balance_gains)
         self.grade_tab.regionResetRequested.connect(self._reset_white_balance_rect)
+        self.grade_tab.exposureChanged.connect(self._handle_exposure_change)
+        self.grade_tab.exposureCaptureRequested.connect(self._capture_exposure_reference)
+        self.grade_tab.exposureClearRequested.connect(self._clear_exposure_reference)
+        self.grade_tab.exposureScopeChanged.connect(self._exposure_region_moved)
         self.filters_tab.filterSelected.connect(self._handle_image_filter_changed)
         self.filters_tab.intensityChanged.connect(self._handle_image_filter_changed)
         self.stabilization_tab.modeChanged.connect(self._handle_stabilization_mode_changed)
@@ -549,6 +556,7 @@ class MainWindow(QMainWindow):
             stabilization=self._current_stabilization(),
             denoise_sample_rect=qrect_to_norm(self.denoise_sample_rect_norm),
             grade=self.grade_tab.settings(self.white_balance_gains),
+            exposure=self.grade_tab.exposure_settings(qrect_to_norm(self.white_balance_rect_norm)),
         )
 
     def _preview_render_mode(self) -> PreviewRenderMode:
@@ -611,6 +619,8 @@ class MainWindow(QMainWindow):
         self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
         self.white_balance_gains = NEUTRAL_GAINS
         self.grade_tab.set_gains(NEUTRAL_GAINS)
+        self.grade_tab.set_exposure_reference(None)
+        self._exposure_reference_frame = None
         self.stabilization_reference_frame = None
         self.stabilization_reference_frame_index = 0
         self._stabilization_epoch += 1
@@ -633,6 +643,7 @@ class MainWindow(QMainWindow):
         self._sync_stabilization_preview()
         self._sync_white_balance_preview()
         self._update_white_balance_info()
+        self._update_exposure_info()
         self._update_crop_info_label()
         self._update_stabilization_info_label()
         self.status.show_message(
@@ -1122,6 +1133,7 @@ class MainWindow(QMainWindow):
         if images.generation >= self._preview_generation:
             self.status.set_render_busy(False)
         self._update_denoise_info()
+        self._update_exposure_info()
         self._update_hud()
         self._schedule_filter_thumbnails_refresh()
 
@@ -1284,11 +1296,13 @@ class MainWindow(QMainWindow):
         self.white_balance_rect_norm = QRectF(rect)
         self._sync_white_balance_preview()
         self._update_white_balance_info()
+        self._exposure_region_moved()
 
     def _reset_white_balance_rect(self) -> None:
         self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
         self._sync_white_balance_preview()
         self._update_white_balance_info()
+        self._exposure_region_moved()
 
     def _sync_white_balance_preview(self) -> None:
         enabled = self.frame_count > 0 and self._tab_is_active(self.grade_tab)
@@ -1318,6 +1332,75 @@ class MainWindow(QMainWindow):
 
     def _reset_white_balance_gains(self) -> None:
         self._set_white_balance_gains(NEUTRAL_GAINS)
+
+    # --- exposure lock ---------------------------------------------------------------------
+    def _handle_exposure_change(self) -> None:
+        self._update_exposure_info()
+        self._schedule_preview_refresh()
+
+    def _exposure_region(self) -> NormalizedRect | None:
+        return qrect_to_norm(self.white_balance_rect_norm) if self.grade_tab.exposure_uses_region() else None
+
+    def _capture_exposure_reference(self) -> None:
+        """Meter the decoded frame (same frame and coordinates as the "Antes" preview) and lock to it."""
+        if self.current_frame is None:
+            self.status.show_message("Abra um vídeo e aguarde o primeiro render para capturar a referência.")
+            return
+        reference = region_medians(self.current_frame, self._exposure_region())
+        self._exposure_reference_frame = self._decoded_frame_index
+        self.grade_tab.set_exposure_reference(reference, frame_index=self._decoded_frame_index)
+        log_event(
+            LOG,
+            "ui.exposure",
+            action="capture",
+            frame=self._decoded_frame_index,
+            reference=[round(value, 1) for value in reference],
+            region=self.grade_tab.exposure_uses_region(),
+        )
+        self.status.show_message(f"Referência de exposição capturada no frame {self._decoded_frame_index + 1}.")
+        self._handle_exposure_change()
+
+    def _clear_exposure_reference(self, reason: str | None = None) -> None:
+        if self.grade_tab.exposure_reference() is None:
+            return
+        self.grade_tab.set_exposure_reference(None)
+        self._exposure_reference_frame = None
+        log_event(LOG, "ui.exposure", action="clear", reason=reason or "user")
+        if reason:
+            self.status.show_message(reason)
+        self._handle_exposure_change()
+
+    def _exposure_region_moved(self) -> None:
+        """The metering area changed: re-meter if we are still on the reference frame, else forget the reference."""
+        if self.grade_tab.exposure_reference() is None:
+            return
+        if self.current_frame is not None and self._decoded_frame_index == self._exposure_reference_frame:
+            self._capture_exposure_reference()
+        else:
+            self._clear_exposure_reference(
+                "Região de referência alterada: volte ao frame de referência e capture a exposição de novo."
+            )
+
+    def _update_exposure_info(self) -> None:
+        if self.frame_count <= 0:
+            self.grade_tab.set_exposure_status("")
+            return
+        settings = self.grade_tab.exposure_settings(self._exposure_region())
+        if not settings.enabled:
+            text = "Desligado."
+        elif settings.reference is None:
+            text = "Ligado, mas sem referência: capture um frame bem exposto."
+        else:
+            trace = self._last_preview.trace if self._last_preview is not None else {}
+            gains = trace.get("exposure.gains")
+            if isinstance(gains, (list, tuple)) and len(gains) == 3:
+                stops = gains_in_ev((float(gains[0]), float(gains[1]), float(gains[2])))
+                text = (
+                    f"Último render: ganhos B {gains[0]:.2f} · G {gains[1]:.2f} · R {gains[2]:.2f} ({stops:+.2f} EV)."
+                )
+            else:
+                text = "Aguardando o render para mostrar os ganhos…"
+        self.grade_tab.set_exposure_status(text)
 
     def _set_white_balance_gains(self, gains: tuple[float, float, float]) -> None:
         self.white_balance_gains = gains
