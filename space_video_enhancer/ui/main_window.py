@@ -66,6 +66,7 @@ from space_video_enhancer.telemetry.diff import diff as diff_settings
 from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
 from space_video_enhancer.telemetry.stats import RollingStats
 from space_video_enhancer.timeline import FrameRange, frame_count, kept_segments, next_kept_frame, normalize_cuts
+from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.format import format_duration, format_timecode, parse_timecode
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo, select_combo_data
@@ -308,6 +309,7 @@ class MainWindow(QMainWindow):
         self.hud_action.setShortcut("Ctrl+M")
         self.hud_action.setToolTip("Mostrar métricas de render, fila e decode sobre o preview (Ctrl+M)")
         self.hud_action.toggled.connect(self._toggle_hud)
+        self.diagnostics_action = self._make_action("Diagnóstico do sistema…", self._show_diagnostics)
         self.open_logs_action = self._make_action("Abrir pasta de logs", self._open_log_folder)
         self.about_action = self._make_action("Sobre", self._show_about_dialog)
 
@@ -440,6 +442,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.hud_action)
 
         help_menu = menu_bar.addMenu("Ajuda")
+        help_menu.addAction(self.diagnostics_action)
         help_menu.addAction(self.open_logs_action)
         help_menu.addAction(self.about_action)
 
@@ -1857,6 +1860,11 @@ class MainWindow(QMainWindow):
         zoom = f"  zoom {self.preview.effective_zoom() * 100:.0f}%"
         lines.append(f"{backend}  {self.preview_render_mode_combo.currentText()}{shapes}{zoom}")
         self.preview.set_hud_lines(lines)
+
+    def _show_diagnostics(self) -> None:
+        """OpenCL device, ICDs and ffmpeg encoders with hints — what to paste when asking for help."""
+        self._diagnostics_dialog = DiagnosticsDialog(find_ffmpeg(), self)
+        self._diagnostics_dialog.show()
 
     def _open_log_folder(self) -> None:
         session = current_session()

@@ -11,6 +11,7 @@ from types import TracebackType
 from PySide6.QtCore import QMessageLogContext, QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 
+from space_video_enhancer.diagnostics import log_diagnostics
 from space_video_enhancer.export.ffmpeg import find_ffmpeg
 from space_video_enhancer.telemetry.environment import collect_environment
 from space_video_enhancer.telemetry.log import get_logger, log_event, setup_logging
@@ -59,7 +60,10 @@ def main() -> int:
     session = setup_logging()
     install_crash_hooks()
     started = time.monotonic()
-    log_event(LOG, "app.start", log_path=str(session.log_path), **collect_environment(find_ffmpeg()))
+    ffmpeg_path = find_ffmpeg()
+    log_event(LOG, "app.start", log_path=str(session.log_path), **collect_environment(ffmpeg_path))
+    # OpenCL device + ffmpeg encoders with hints; off the GUI thread so startup does not wait for ffmpeg.
+    threading.Thread(target=log_diagnostics, args=(ffmpeg_path,), name="diagnostics", daemon=True).start()
 
     app = QApplication(sys.argv)
     window = MainWindow()

@@ -87,3 +87,14 @@ def test_status_bar_reports_the_open_video(app: QApplication, window: MainWindow
     assert window.export_action.isEnabled()
     assert window.transport.isEnabled()
     assert not window.status.render_label.isVisible()
+
+
+def test_diagnostics_dialog_shows_and_copies_the_report(app: QApplication, window: MainWindow) -> None:
+    assert window.diagnostics_action.text().startswith("Diagnóstico")
+    window._show_diagnostics()
+    dialog = window._diagnostics_dialog
+    pump(app, 0.05)
+    assert dialog.isVisible() and "[OpenCL]" in dialog.text() and "[FFmpeg]" in dialog.text()
+    dialog.copy_to_clipboard()
+    assert app.clipboard().text() == dialog.text() and "Copiado" in dialog.feedback_label.text()
+    dialog.close()

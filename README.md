@@ -13,6 +13,12 @@ No macOS com Homebrew:
 brew install ffmpeg
 ```
 
+No Ubuntu/Debian (veja tambem "Linux com GPU" mais abaixo para OpenCL e NVENC):
+
+```bash
+sudo apt install ffmpeg python3-venv ocl-icd-libopencl1 clinfo
+```
+
 No Windows, instale Python 3.9+ 64-bit e FFmpeg com a pasta `bin` no `PATH` (por exemplo `winget install --id Python.Python.3.12 -e` e `winget install --id Gyan.FFmpeg -e`). Confirme com `python --version` e `ffmpeg -version` em um PowerShell novo. Microsoft Visual C++ Redistributable 2015-2022 x64 so e necessario se aparecer erro de DLL ao abrir o app.
 
 ## Executar
@@ -88,6 +94,7 @@ Regras da arquitetura:
 - Overlays: o crop aparece sempre que estiver ativo, mas so e editavel na aba Geometria; a amostra de ruido e o ponto focal aparecem apenas nas abas Ruido e Estabilizar, editaveis direto no preview (nao existe modo "editar").
 - Cortes internos (`timeline.py`): alem do inicio/fim (I/O), a aba Exportar guarda uma lista de trechos removidos — X marca inicio e fim no frame atual, ou digite os tempos (`mm:ss`, `h:mm:ss`, `mm:ss.ff`). Os trechos aparecem em vermelho na linha do tempo, o playback pula por cima deles e o export le so os trechos mantidos (com seek entre eles) concatenando o audio correspondente (`atrim`/`concat`); fontes sem audio saem mudas em vez de falhar.
 - Trava de exposicao (`pipeline/exposure.py`): cameras em auto-exposicao/AWB re-medem quando o foco caça; a correcao e sem estado — mede a mediana B/G/R de uma regiao estatica da cena no frame fonte (antes da estabilizacao, mesmas coordenadas do retangulo roxo do preview), compara com a mesma regiao no frame de referencia e aplica a razao como ganhos por canal (uma `cv2.LUT` logo apos o denoise, cuja intensidade foi estimada no frame sem ganho). Ganhos limitados a ±`max_ev` stops e atenuados por `strength`; `color=False` usa um ganho unico pela luma. Sem estado, preview e export (serial ou paralelo) produzem o mesmo resultado. Medir o frame inteiro e opcional e sensivel ao conteudo (uma pessoa entrando escurece a media e a correcao 'pulsa'); a regiao fixa nao sofre disso, mas erra enquanto algo a tapa. Realces estourados no frame nao voltam. Na aba HSL (grupo "Iluminacao constante") a regiao e o mesmo retangulo roxo do balanco de branco; "Usar este frame como referencia" mede o frame decodificado atual (mesmo frame do lado "Antes"), mover a regiao ou trocar o escopo re-mede se ainda estamos no frame de referencia e caso contrario apaga a referencia (aviso na barra de status); o rotulo mostra os ganhos do ultimo render lidos do trace. Eventos `ui.exposure`.
+- Diagnostico (`diagnostics.py`, `ui/diagnostics_dialog.py`): relatorio puro (sem Qt) com sistema, OpenCL (linha `OpenCL:` do build, `haveOpenCL`, dispositivo, ICDs) e ffmpeg (versao, encoders conhecidos, `/dev/dri/renderD*`), mais dicas em portugues por caso (`opencl_hint`, `ffmpeg_hint`) e o rotulo esperado na barra de status. Logado na abertura em thread daemon (`diagnostics`) e mostrado em Ajuda; `diagnostics.shown` quando o dialogo abre.
 - Linha do tempo (`widgets/timeline.py`): regua + trilhas com zoom (Ctrl+roda, pinca do trackpad, botoes −/Ajustar/+) e rolagem (roda, barra). `TimelineScale` faz a conversao frame<->pixel (zoom = pixels por frame, scroll = primeiro frame visivel) e todo hit-test usa a mesma conversao. Um corte `(inicio, fim)` ocupa os pixels de `x_of(inicio)` a `x_of(fim + 1)`; arrastar uma borda redimensiona, arrastar o corpo move, clicar seleciona (Delete remove; a selecao e a mesma da lista na aba Exportar), botao direito abre o menu. Os marcadores I/O sao arrastados na regua. Enquanto um corte esta sendo arrastado, o widget ignora `set_cuts` (o arraste e a fonte da verdade) e so na soltura o modelo normalizado volta para ele. Na reproducao, quando o playhead sai da area visivel a vista rola para deixa-lo a 10% da borda esquerda.
 - Filmstrip (`ui/timeline_media.py`): a trilha de video mostra miniaturas decodificadas por um `FilmstripController` com thread e `VideoSource` proprios (um seek de miniatura nunca atrasa o preview). As celulas sao ancoradas no frame 0 (rolar reaproveita o cache LRU de 600 imagens), o widget pede apenas as celulas visiveis que faltam apos 60 ms de descanso do zoom/scroll, um pedido novo cancela o anterior entre dois frames e, enquanto a miniatura exata nao chega, a vizinha mais proxima dentro de uma celula e desenhada no lugar. Evento `filmstrip.render` (DEBUG) com quantidade e tempos de decode.
 - Forma de onda (`audio.py`, `WaveformController`): ffmpeg decodifica o primeiro stream de audio para PCM mono 8 kHz e o numpy reduz a picos min/max por bucket (4 buckets por frame de video; 1 h cabe em ~4 MB). Cada coluna de pixel da trilha mostra os extremos dos buckets que cobre (`np.minimum/maximum.reduceat`). O resultado chega marcado com o caminho do video e e descartado se outro video ja foi aberto; sem ffmpeg a trilha avisa, sem stream de audio mostra \"Sem audio\". Evento `waveform.load`.
@@ -155,3 +162,32 @@ print(pd.json_normalize(renders.stages).describe())
 ## Aceleracao por GPU
 
 O processamento em OpenCV pode usar OpenCL (T-API) e o encode pode usar NVENC ou VAAPI. O OpenCL so entra quando o denoise NLMeans esta ligado (num M1, 260 ms contra 1.340 ms na CPU em 720p); os filtros leves rodam na CPU porque a transferencia para o dispositivo custa mais do que o trabalho. Nesse caminho toda a cadeia (denoise, contraste, gama, saturacao, temperatura, nitidez, escala) roda no `UMat` com um unico upload e download. Saturacao e temperatura sao tabelas (`cv2.LUT`), nao aritmetica em float32. Se OpenCL ou o encoder de hardware falharem, o app cai para CPU e `libx264` automaticamente. No Linux, VAAPI exige um dispositivo como `/dev/dri/renderD128`; para NVIDIA, o FFmpeg precisa ter sido compilado com `nvenc`.
+
+**Ajuda -> Diagnostico do sistema** mostra o que a maquina oferece (ICDs OpenCL, dispositivo que o OpenCV usaria, encoders do ffmpeg) com a dica do que falta, e o mesmo relatorio vai para o log na abertura (evento `diagnostics`). O rotulo da barra de status durante o export e `backend + encoder`, por exemplo `OpenCL + NVIDIA NVENC` ou `CPU (OpenCL indisponivel) + libx264 (fallback)`.
+
+### Linux com GPU (Ubuntu 22.04/24.04)
+
+O OpenCV do PyPI ja vem com OpenCL compilado, mas em tempo de execucao ele carrega `libOpenCL.so.1` (o *ICD loader*) e, por ele, o driver da GPU (`/etc/OpenCL/vendors/*.icd`). O caso mais comum de "OpenCL indisponivel" e o driver da NVIDIA instalado sem o loader.
+
+1. Driver da GPU. NVIDIA: `sudo ubuntu-drivers install` (ou `sudo apt install nvidia-driver-550`) e reinicie; o metapacote traz `libnvidia-compute-550`, que e o ICD OpenCL. Intel: `sudo apt install intel-opencl-icd`. AMD: `sudo apt install mesa-opencl-icd` (ou o ROCm).
+2. Loader e utilitario: `sudo apt install ocl-icd-libopencl1 clinfo`.
+3. Confira, dentro da `.venv` do projeto:
+
+```bash
+clinfo | grep -E "Number of platforms|Device Name|Device Version"
+ls /etc/OpenCL/vendors/
+python -c "import cv2; print(cv2.ocl.haveOpenCL()); cv2.ocl.setUseOpenCL(True); print(cv2.ocl.useOpenCL()); d=cv2.ocl.Device.getDefault(); print(d.name(), d.version())"
+ffmpeg -hide_banner -encoders | grep -E "nvenc|vaapi|qsv"
+```
+
+Esperado com uma RTX: `Number of platforms 1`, `NVIDIA GeForce RTX ...`, `True` / `True` e `h264_nvenc` na lista do ffmpeg (o ffmpeg do apt ja vem com nvenc; ele carrega as bibliotecas da NVIDIA em tempo de execucao).
+
+Problemas comuns:
+
+- `Number of platforms 0` e `vendors/` vazio: falta o ICD do driver (`libnvidia-compute-<versao>`), reinstale o metapacote do driver.
+- `clinfo` lista a GPU mas `haveOpenCL()` e `False`: falta o loader (`ocl-icd-libopencl1`); `ldconfig -p | grep libOpenCL` deve mostrar `libOpenCL.so.1`.
+- WSL: a NVIDIA expoe CUDA, mas nao OpenCL, dentro do WSL; o denoise fica na CPU.
+- VAAPI (Intel/AMD): precisa de `/dev/dri/renderD128` acessivel (usuario nos grupos `render` e `video`) e do driver (`intel-media-va-driver-non-free` ou `mesa-va-drivers`); `vainfo` confirma.
+- A variavel `OPENCV_OPENCL_RUNTIME=disabled` desliga o OpenCL no OpenCV; nao a defina.
+
+Lembre que o OpenCL so acelera o denoise NLMeans (a cadeia leve e a estabilizacao sao CPU por escolha); o NVENC acelera a codificacao de todo export.
