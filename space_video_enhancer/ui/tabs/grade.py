@@ -28,7 +28,7 @@ from space_video_enhancer.settings import (
     NormalizedRect,
 )
 from space_video_enhancer.ui.format import format_percent, format_signed
-from space_video_enhancer.ui.tabs.base import TabPage, form_rows, group_box
+from space_video_enhancer.ui.tabs.base import TabPage, form_rows, group_box, select_combo_data, set_checked_silently
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
 DEFAULT_TINT = 50
@@ -267,6 +267,41 @@ class ColorGradeTab(TabPage):
     def band(self, index: int) -> HueBandAdjust:
         return self._bands[index]
 
+    def apply(
+        self,
+        grade: ColorGradeSettings,
+        exposure: ExposureLockSettings,
+        *,
+        exposure_frame: int | None = None,
+    ) -> None:
+        """Show another clip's white balance, hue bands and exposure lock without emitting any signal."""
+        widgets = (
+            self.tint_slider,
+            self.exposure_checkbox,
+            self.exposure_scope_combo,
+            self.exposure_mode_combo,
+            self.exposure_strength_slider,
+            self.exposure_limit_slider,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.tint_slider.slider.setValue(int(grade.tint))
+            self._bands = list(grade.bands) if len(grade.bands) == len(HUE_BAND_NAMES) else list(DEFAULT_HUE_BANDS)
+            self._show_band(self._bands[self._current_band])
+            self.set_gains(grade.white_balance_gains)
+            set_checked_silently(self.exposure_checkbox, exposure.enabled)
+            select_combo_data(self.exposure_scope_combo, exposure.region is not None)
+            select_combo_data(self.exposure_mode_combo, exposure.color)
+            self.exposure_strength_slider.slider.setValue(int(exposure.strength))
+            self.exposure_limit_slider.slider.setValue(max(1, round(exposure.max_ev / EXPOSURE_LIMIT_STEP_EV)))
+            self._exposure_reference = exposure.reference
+            self._show_exposure_reference(exposure.reference, exposure_frame)
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+        self._update_exposure_buttons()
+
     # --- bands ----------------------------------------------------------------------------
     def select_band(self, index: int) -> None:
         self._current_band = index
@@ -321,6 +356,12 @@ class ColorGradeTab(TabPage):
     ) -> None:
         """The reference medians (or ``None``); also turns the lock on when a reference is captured."""
         self._exposure_reference = reference
+        self._show_exposure_reference(reference, frame_index)
+        if reference is not None and not self.exposure_checkbox.isChecked():
+            self.exposure_checkbox.setChecked(True)  # emits exposureChanged through the toggle
+        self._update_exposure_buttons()
+
+    def _show_exposure_reference(self, reference: tuple[float, float, float] | None, frame_index: int | None) -> None:
         if reference is None:
             self.exposure_label.setText(
                 "Sem referência. Vá até um frame bem exposto e clique em “Usar este frame como referência”."
@@ -330,9 +371,6 @@ class ColorGradeTab(TabPage):
             self.exposure_label.setText(
                 f"Referência{where}: medianas B {reference[0]:.0f} · G {reference[1]:.0f} · R {reference[2]:.0f}."
             )
-            if not self.exposure_checkbox.isChecked():
-                self.exposure_checkbox.setChecked(True)  # emits exposureChanged through the toggle
-        self._update_exposure_buttons()
 
     def set_exposure_status(self, text: str) -> None:
         self.exposure_status_label.setText(text)

@@ -5,8 +5,16 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QCheckBox, QComboBox, QLabel, QPushButton
 
-from space_video_enhancer.settings import GeometrySettings, RotationMode
-from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo, form_rows, group_box
+from space_video_enhancer.settings import CropSettings, GeometrySettings, RotationMode
+from space_video_enhancer.ui.tabs.base import (
+    TabPage,
+    combo_enum,
+    enum_combo,
+    form_rows,
+    group_box,
+    select_combo_data,
+    set_checked_silently,
+)
 
 ROTATION_OPTIONS: list[tuple[str, RotationMode]] = [
     ("Sem rotação", RotationMode.NONE),
@@ -71,6 +79,36 @@ class GeometryTab(TabPage):
             flip_horizontal=self.flip_horizontal_checkbox.isChecked(),
             flip_vertical=self.flip_vertical_checkbox.isChecked(),
         )
+
+    def apply(self, geometry: GeometrySettings, crop: CropSettings) -> None:
+        """Show another clip's orientation and crop mode without emitting any signal."""
+        widgets = (
+            self.rotation_combo,
+            self.flip_horizontal_checkbox,
+            self.flip_vertical_checkbox,
+            self.crop_mode_combo,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            select_combo_data(self.rotation_combo, geometry.rotation.value)
+            set_checked_silently(self.flip_horizontal_checkbox, geometry.flip_horizontal)
+            set_checked_silently(self.flip_vertical_checkbox, geometry.flip_vertical)
+            self.crop_mode_combo.setCurrentIndex(self._crop_mode_index(crop))
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+    def _crop_mode_index(self, crop: CropSettings) -> int:
+        if not crop.enabled:
+            return 0
+        if crop.aspect_ratio is None:
+            return self.crop_mode_combo.findData(FREE_CROP)
+        for index in range(self.crop_mode_combo.count()):
+            data = self.crop_mode_combo.itemData(index)
+            if isinstance(data, float) and abs(data - crop.aspect_ratio) < 1e-6:
+                return index
+        return self.crop_mode_combo.findData(FREE_CROP)
 
     def crop_mode_data(self) -> object:
         return self.crop_mode_combo.currentData()

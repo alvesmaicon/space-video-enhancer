@@ -71,6 +71,25 @@ def fit_to_canvas(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     return canvas
 
 
+def fit_to_aspect(frame: np.ndarray, aspect_ratio: float | None, tolerance: float = 0.01) -> np.ndarray:
+    """Pad ``frame`` with black (never scale it) until its width/height is ``aspect_ratio``.
+
+    The preview uses it to show the letterbox the export adds when a clip's output does not
+    match the sequence canvas. Identity for ``None`` or when the aspect already matches.
+    """
+    if aspect_ratio is None or aspect_ratio <= 0:
+        return frame
+    height, width = frame.shape[:2]
+    if width <= 0 or height <= 0:
+        return frame
+    current = width / height
+    if abs(current - aspect_ratio) <= tolerance * aspect_ratio:
+        return frame
+    if current < aspect_ratio:
+        return fit_to_canvas(frame, max(width, round(height * aspect_ratio)), height)
+    return fit_to_canvas(frame, width, max(height, round(width / aspect_ratio)))
+
+
 def ensure_even_size(frame: np.ndarray) -> np.ndarray:
     """Trim at most one row/column so both dimensions are even (required by yuv420p encoders)."""
     height, width = frame.shape[:2]

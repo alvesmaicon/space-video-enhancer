@@ -111,3 +111,14 @@ def test_render_preview_decodes_the_requested_frame_on_demand(ui_video: Path) ->
 def test_render_preview_without_a_frame_needs_a_video() -> None:
     with pytest.raises(FrameUnavailableError):
         render_preview(_preview_request(None, 1, frame_index=0), StabilizationState(), None, video=None)
+
+
+def test_render_preview_letterboxes_to_the_canvas_aspect(textured_frame: np.ndarray) -> None:
+    frame = textured_frame[:, :360]  # 360x270, 4:3
+    result = render_preview(_preview_request(frame, 1, canvas_aspect=16 / 9), None, None)
+    assert result.after.shape[:2] == (270, 480)
+    assert result.after[:, :50].max() == 0 and result.after[:, 60:420].mean() > 20
+    assert result.before.shape[:2] == (270, 360), "the 'before' image stays the source"
+    assert "letterbox" in result.trace.as_dict()["stages"]
+    same = render_preview(_preview_request(frame, 2, canvas_aspect=4 / 3), None, None)
+    assert same.after.shape[:2] == (270, 360)

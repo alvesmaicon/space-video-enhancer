@@ -3,6 +3,11 @@
 No image processing lives here. Everything the pipeline needs is read from widgets
 exactly once per render into an immutable snapshot (see :mod:`space_video_enhancer.settings`).
 The tabs (:mod:`space_video_enhancer.ui.tabs`) own their widgets; this class orchestrates.
+
+The media is a :class:`~space_video_enhancer.sequence.Sequence` of clips. The playhead, the
+export range and the cuts live in *timeline frames*; the tabs always show (and edit) the
+settings of the clip under the playhead — the *active clip* — and every render stores the
+widgets back into that clip, so switching clips swaps the whole panel.
 """
 
 from __future__ import annotations
@@ -46,6 +51,8 @@ from space_video_enhancer.pipeline.grade import neutral_gains
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS
 from space_video_enhancer.pipeline.preview import PreviewRequest, ThumbnailRequest
 from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
+from space_video_enhancer.sequence import Clip, ClipSource
+from space_video_enhancer.sequence import Sequence as ClipSequence
 from space_video_enhancer.settings import (
     DEFAULT_CROP_RECT,
     DEFAULT_DENOISE_SAMPLE_RECT,
@@ -65,7 +72,7 @@ from space_video_enhancer.settings import (
 from space_video_enhancer.telemetry.diff import diff as diff_settings
 from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
 from space_video_enhancer.telemetry.stats import RollingStats
-from space_video_enhancer.timeline import FrameRange, frame_count, kept_segments, next_kept_frame, normalize_cuts
+from space_video_enhancer.timeline import FrameRange, frame_count, kept_segments, next_kept_frame
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.format import format_duration, format_timecode, parse_timecode
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
@@ -78,9 +85,10 @@ from space_video_enhancer.ui.tabs.grade import ColorGradeTab
 from space_video_enhancer.ui.tabs.noise import NoiseTab
 from space_video_enhancer.ui.tabs.stabilization import StabilizationTab
 from space_video_enhancer.ui.theme import load_stylesheet
-from space_video_enhancer.ui.timeline_media import FilmstripController, WaveformController
+from space_video_enhancer.ui.timeline_media import FilmstripCell, FilmstripController, WaveformController
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
 from space_video_enhancer.ui.widgets.status_panel import StatusPanel
+from space_video_enhancer.ui.widgets.timeline import ClipBlock
 from space_video_enhancer.ui.widgets.transport_bar import TransportBar
 from space_video_enhancer.video import VideoOpenError, VideoSource
 
@@ -107,6 +115,7 @@ PREVIEW_RENDER_MODE_OPTIONS: list[tuple[str, PreviewRenderMode]] = [
     ("Rápido", PreviewRenderMode.FAST),
 ]
 PREVIEW_FRAME_SKIP_OPTIONS = [("Sem pulo", 0), ("Pular 1", 1), ("Pular 2", 2), ("Pular 3", 3)]
+VIDEO_FILE_FILTER = "Vídeos (*.mp4 *.mov *.mkv *.avi *.m4v)"
 
 
 def qrect_to_norm(rect: QRectF) -> NormalizedRect:
@@ -124,17 +133,21 @@ class MainWindow(QMainWindow):
         self.resize(DEFAULT_WINDOW_SIZE)
 
         # --- media state -------------------------------------------------------------------
-        self.video_path: Path | None = None
-        self.video: VideoSource | None = None
-        self.frame_count = 0
-        self.fps = 30.0
-        self.source_size = (0, 0)
+        self.sequence = ClipSequence()
+        """The clips on the timeline; each carries its own settings, cuts and references (see sequence.py)."""
+        self._sources: dict[Path, VideoSource] = {}
+        """Decoders handed to the preview worker, one per file; the GUI thread only reads their metadata."""
+        self._reference_frames: dict[tuple[Path, int], np.ndarray] = {}
+        """Camera-lock reference frames by (file, source frame); clips split from one another share them."""
+        self._waveforms_requested: set[Path] = set()
+        self.active_clip_index = -1
+        """The clip under the playhead: the tabs show and edit its settings."""
         self.current_frame_index = 0
+        """Playhead, in timeline frames."""
         self.clip_start_frame = 0
         self.clip_end_frame = 0
+        """Export range, in timeline frames (the I/O markers on the ruler)."""
         self.playback_end_frame = 0
-        self.cuts: list[tuple[int, int]] = []
-        """Frame ranges removed from inside the clip (inclusive, absolute); see timeline.py."""
         self._pending_cut_start: int | None = None
         self.current_frame: np.ndarray | None = None
 
@@ -144,8 +157,6 @@ class MainWindow(QMainWindow):
         self.denoise_sample_rect_norm = norm_to_qrect(DEFAULT_DENOISE_SAMPLE_RECT)
         self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
         self.white_balance_gains: tuple[float, float, float] = NEUTRAL_GAINS
-        self._exposure_reference_frame: int | None = None
-        """Frame the exposure-lock reference was metered on (the medians live in the HSL tab)."""
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
         self.stabilization_reference_frame: np.ndarray | None = None
         self.stabilization_reference_frame_index = 0
@@ -179,6 +190,8 @@ class MainWindow(QMainWindow):
         self._playback_video_counters = (0, 0)
         # Decode metrics arrive with each render result; the GUI never touches the decoder itself.
         self._decoded_frame_index = 0
+        """Source frame of ``current_frame`` (in ``_decoded_source``), for reference captures."""
+        self._decoded_source: Path | None = None
         self._decode_stats = RollingStats(window=120)
         self._last_decode_ms = 0.0
         self._last_decode_sequential: bool | None = None
@@ -270,12 +283,21 @@ class MainWindow(QMainWindow):
             QKeySequence.StandardKey.Open,
             icon=style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton),
         )
+        self.add_video_action = self._make_action(
+            "Adicionar vídeo à sequência…",
+            self._select_video_to_add,
+            "Ctrl+Shift+O",
+            icon=style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder),
+        )
+        self.add_video_action.setToolTip("Junta outro arquivo ao fim da linha do tempo (Ctrl+Shift+O)")
         self.export_action = self._make_action(
             "Exportar…",
             self._export_video,
             "Ctrl+E",
             icon=style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton),
         )
+        self.split_clip_action = self._make_action("Dividir clipe no playhead", self._split_clip_at_playhead, "Ctrl+K")
+        self.remove_clip_action = self._make_action("Remover clipe ativo", self._remove_active_clip)
         self.quit_action = self._make_action("Sair", self.close, QKeySequence.StandardKey.Quit)
         self.restore_preset_action = self._make_action(
             "Restaurar preset ativo", self._restore_active_preset_settings, "Ctrl+R"
@@ -385,6 +407,7 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(QSize(16, 16))
         toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
         toolbar.addAction(self.open_action)
+        toolbar.addAction(self.add_video_action)
         toolbar.addAction(self.export_action)
         for action in (self.open_action, self.export_action):
             widget = toolbar.widgetForAction(action)
@@ -412,6 +435,7 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("Arquivo")
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.add_video_action)
         file_menu.addAction(self.export_action)
         file_menu.addSeparator()
         file_menu.addAction(self.quit_action)
@@ -420,6 +444,9 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.restore_preset_action)
         edit_menu.addAction(self.reset_crop_action)
         edit_menu.addAction(self.reset_range_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.split_clip_action)
+        edit_menu.addAction(self.remove_clip_action)
 
         playback_menu = menu_bar.addMenu("Reprodução")
         playback_menu.addAction(self.play_action)
@@ -475,6 +502,13 @@ class MainWindow(QMainWindow):
         self.transport.cutToggleRequested.connect(self._toggle_cut_mark)
         self.export_tab.cutSelectionChanged.connect(self.transport.select_cut)
         self.transport.thumbnailsRequested.connect(self._request_filmstrip)
+        self.transport.clipSplitRequested.connect(self._split_clip_at_playhead)
+        self.transport.clipRemoveRequested.connect(self._remove_clip)
+        self.export_tab.clipAddRequested.connect(self._select_video_to_add)
+        self.export_tab.clipRemoveRequested.connect(self._remove_clip)
+        self.export_tab.clipMoveRequested.connect(self._move_clip)
+        self.export_tab.clipSplitRequested.connect(self._split_clip_at_playhead)
+        self.export_tab.clipActivated.connect(self._go_to_clip)
 
         self.color_tab.presetChanged.connect(self._handle_preset_changed)
         self.color_tab.valueChanged.connect(self._handle_filter_control_change)
@@ -515,7 +549,9 @@ class MainWindow(QMainWindow):
         for _title, tab in self._tabs:
             tab.set_controls_enabled(enabled)
         self.transport.setEnabled(enabled)
-        self.export_action.setEnabled(enabled and self.video is not None)
+        self.export_action.setEnabled(enabled and not self.sequence.is_empty)
+        self.split_clip_action.setEnabled(enabled and not self.sequence.is_empty)
+        self.remove_clip_action.setEnabled(enabled and len(self.sequence) > 1)
         self.filters_tab.set_video_loaded(self.frame_count > 0)
         self._update_denoise_controls_state()
         self._update_stabilization_controls_state()
@@ -545,7 +581,11 @@ class MainWindow(QMainWindow):
         return self.geometry_tab.geometry_settings()
 
     def _current_crop(self) -> CropSettings:
-        return CropSettings(enabled=self.geometry_tab.crop_enabled(), rect=qrect_to_norm(self.crop_rect_norm))
+        return CropSettings(
+            enabled=self.geometry_tab.crop_enabled(),
+            rect=qrect_to_norm(self.crop_rect_norm),
+            aspect_ratio=self.geometry_tab.crop_aspect_ratio(),
+        )
 
     def _current_stabilization(self) -> StabilizationSettings:
         return self.stabilization_tab.settings(qrect_to_norm(self.stabilization_rect_norm))
@@ -558,7 +598,9 @@ class MainWindow(QMainWindow):
             crop=self._current_crop(),
             stabilization=self._current_stabilization(),
             denoise_sample_rect=qrect_to_norm(self.denoise_sample_rect_norm),
-            grade=self.grade_tab.settings(self.white_balance_gains),
+            grade=replace(
+                self.grade_tab.settings(self.white_balance_gains), region=qrect_to_norm(self.white_balance_rect_norm)
+            ),
             exposure=self.grade_tab.exposure_settings(qrect_to_norm(self.white_balance_rect_norm)),
         )
 
@@ -566,89 +608,138 @@ class MainWindow(QMainWindow):
         return combo_enum(self.preview_render_mode_combo, PreviewRenderMode, PreviewRenderMode.HIGH)
 
     # =====================================================================================
-    # Media
+    # Media: the sequence and its sources
     # =====================================================================================
+    @property
+    def frame_count(self) -> int:
+        """Timeline frames of the whole sequence (cuts included)."""
+        return self.sequence.timeline_count
+
+    @property
+    def fps(self) -> float:
+        return self.sequence.fps
+
+    @property
+    def active_clip(self) -> Clip | None:
+        if 0 <= self.active_clip_index < len(self.sequence.clips):
+            return self.sequence.clips[self.active_clip_index]
+        return None
+
+    @property
+    def video_path(self) -> Path | None:
+        """File of the active clip (the first clip's before any frame was shown)."""
+        clip = self.active_clip
+        if clip is None and self.sequence.clips:
+            clip = self.sequence.clips[0]
+        return clip.source.path if clip is not None else None
+
+    @property
+    def video(self) -> VideoSource | None:
+        """Decoder of the active clip's file (adopted by the preview worker; read metadata only)."""
+        path = self.video_path
+        return self._sources.get(path) if path is not None else None
+
+    @property
+    def source_size(self) -> tuple[int, int]:
+        """Frame size of the active clip's source (the regions and labels refer to it)."""
+        clip = self.active_clip
+        if clip is None and self.sequence.clips:
+            clip = self.sequence.clips[0]
+        return (clip.source.width, clip.source.height) if clip is not None else (0, 0)
+
+    @property
+    def cuts(self) -> list[tuple[int, int]]:
+        """Removed ranges in timeline frames (inclusive), merged and sorted."""
+        return [(cut.start, cut.end) for cut in self.sequence.timeline_cuts()]
+
     def _select_video(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Selecionar vídeo", str(Path.home()), "Vídeos (*.mp4 *.mov *.mkv *.avi *.m4v)"
-        )
+        file_path, _ = QFileDialog.getOpenFileName(self, "Selecionar vídeo", str(Path.home()), VIDEO_FILE_FILTER)
         if file_path:
             self._open_video(Path(file_path))
 
+    def _select_video_to_add(self) -> None:
+        start_dir = str(self.video_path.parent) if self.video_path is not None else str(Path.home())
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Adicionar vídeos à sequência", start_dir, VIDEO_FILE_FILTER)
+        for file_path in file_paths:
+            self._add_video(Path(file_path))
+
+    def _open_source(self, path: Path) -> ClipSource | None:
+        """Open (or reuse) the decoder for ``path`` and describe the file; ``None`` with a message on failure."""
+        video = self._sources.get(path)
+        if video is None:
+            opened_at = time.perf_counter()
+            try:
+                video = VideoSource(path)
+            except VideoOpenError as error:
+                log_event(LOG, "video.open_failed", level=logging.WARNING, name=path.name, error=str(error))
+                QMessageBox.critical(self, "Erro", f"Não foi possível abrir o vídeo {path.name}.")
+                return None
+            self._sources[path] = video
+            log_event(
+                LOG,
+                "video.open",
+                name=path.name,
+                width=video.width,
+                height=video.height,
+                fps=round(video.fps, 3),
+                frame_count=video.frame_count,
+                codec=video.codec,
+                open_ms=round((time.perf_counter() - opened_at) * 1000.0, 1),
+            )
+        return ClipSource(path, video.frame_count, video.fps, video.width, video.height)
+
+    def _fresh_clip_settings(self, source: ClipSource) -> RenderSettings:
+        """Settings for a clip that is new to the sequence: the current look, with regions and references reset."""
+        base = self._current_render_settings()
+        crop_aspect = self.geometry_tab.crop_aspect_ratio()
+        displayed_width, displayed_height = base.geometry.output_size(source.width, source.height)
+        displayed_aspect = displayed_width / displayed_height if displayed_width > 0 and displayed_height > 0 else 1.0
+        crop_rect = self._default_crop_rect(None if crop_aspect is None else crop_aspect / displayed_aspect)
+        return replace(
+            base,
+            crop=replace(base.crop, rect=qrect_to_norm(crop_rect)),
+            denoise_sample_rect=DEFAULT_DENOISE_SAMPLE_RECT,
+            stabilization=replace(base.stabilization, focus_rect=DEFAULT_STABILIZATION_RECT),
+            grade=replace(base.grade, white_balance_gains=NEUTRAL_GAINS, region=DEFAULT_WHITE_BALANCE_RECT),
+            exposure=replace(
+                base.exposure,
+                reference=None,
+                region=DEFAULT_WHITE_BALANCE_RECT if base.exposure.region is not None else None,
+            ),
+        )
+
     def _open_video(self, path: Path) -> None:
+        """Start over with a sequence of one clip (the sliders carry over; regions and references reset)."""
         self._stop_playback()
-        opened_at = time.perf_counter()
-        try:
-            video = VideoSource(path)
-        except VideoOpenError as error:
-            log_event(LOG, "video.open_failed", level=logging.WARNING, name=path.name, error=str(error))
-            QMessageBox.critical(self, "Erro", "Não foi possível abrir o vídeo selecionado.")
+        previous_sources = self._sources
+        self._sources = {}  # a fresh decoder even for the same file; the worker releases the old ones
+        source = self._open_source(path)
+        if source is None:
+            self._sources = previous_sources
             return
-        self.video = video
-        self.video_path = path
+        self.active_clip_index = -1
+        self.sequence = ClipSequence.single(source, settings=self._fresh_clip_settings(source))
+        self._reference_frames.clear()
+        self._waveforms_requested.clear()
         self.current_frame = None
         self._decoded_frame_index = 0
+        self._decoded_source = None
         self._decode_stats = RollingStats(window=120)
         self._last_decode_ms = 0.0
         self._last_decode_sequential = None
         self._video_read_counters = (0, 0)
         self._backend.reset()
         self._discard_pending_previews()
-        self._preview_controller.set_video(video)  # the render thread decodes and releases the previous video
-        self.frame_count = video.frame_count
-        self.fps = video.fps
-        width, height = video.size
-        self.source_size = (width, height)
-        self._last_logged_settings = None  # next preview logs a full settings.snapshot for this video
-        log_event(
-            LOG,
-            "video.open",
-            name=path.name,
-            width=width,
-            height=height,
-            fps=round(self.fps, 3),
-            frame_count=self.frame_count,
-            codec=video.codec,
-            open_ms=round((time.perf_counter() - opened_at) * 1000.0, 1),
-        )
+        self._preview_controller.set_videos(tuple(self._sources.values()))  # the worker releases the previous ones
+        self._last_logged_settings = None  # next preview logs a full settings.snapshot for this sequence
         self.current_frame_index = 0
         self.clip_start_frame = 0
         self.clip_end_frame = self.frame_count - 1
-        self.cuts = []
         self._pending_cut_start = None
-        self.crop_rect_norm = self._default_crop_rect(self._normalized_crop_aspect_ratio())
-        self.denoise_sample_rect_norm = norm_to_qrect(DEFAULT_DENOISE_SAMPLE_RECT)
-        self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
-        self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
-        self.white_balance_gains = NEUTRAL_GAINS
-        self.grade_tab.set_gains(NEUTRAL_GAINS)
-        self.grade_tab.set_exposure_reference(None)
-        self._exposure_reference_frame = None
-        self.stabilization_reference_frame = None
-        self.stabilization_reference_frame_index = 0
         self._stabilization_epoch += 1
-        self.status.set_video_info(f"{path.name} · {width}x{height} · {self.fps:.2f} fps · {self.frame_count} frames")
-        self.setWindowTitle(f"{path.name} — Space Video Enhancer")
-        self.transport.set_frame_count(self.frame_count, self.fps, width / height if height else 16 / 9)
-        self._filmstrip.set_video(path)
-        ffmpeg_path = find_ffmpeg()
-        if ffmpeg_path is None:
-            self.transport.set_audio_state("unavailable")
-        else:
-            self.transport.set_audio_state("loading")
-            self._waveform.load(path, ffmpeg_path, self.fps * WAVEFORM_BUCKETS_PER_FRAME)
-        self.preview.set_display_reference_size(*self._displayed_size())
+        self.transport.set_frame_count(self.frame_count, self.fps, source.aspect_ratio)
+        self._sequence_changed()
         self._set_controls_enabled(True)
-        self._update_timeline_markers()
-        self._update_range_label()
-        self._sync_crop_preview()
-        self._sync_denoise_sample_preview()
-        self._sync_stabilization_preview()
-        self._sync_white_balance_preview()
-        self._update_white_balance_info()
-        self._update_exposure_info()
-        self._update_crop_info_label()
-        self._update_stabilization_info_label()
         self.status.show_message(
             "Arraste o divisor na imagem e ajuste os controles à direita para comparar o resultado."
         )
@@ -658,13 +749,263 @@ class MainWindow(QMainWindow):
         self._load_frame(midpoint)
         self.preview.setFocus()
 
+    def _add_video(self, path: Path) -> None:
+        """Append ``path`` as a clip (same fps as the sequence); the new clip starts with the current look."""
+        if self.sequence.is_empty:
+            self._open_video(path)
+            return
+        self._stop_playback()
+        already_open = path in self._sources
+        source = self._open_source(path)
+        if source is None:
+            return
+        self._store_active_clip_settings()
+        candidate = self.sequence.add(Clip.whole(source, settings=self._fresh_clip_settings(source)))
+        mismatch = candidate.fps_mismatch()
+        if mismatch is not None:
+            if not already_open:
+                self._sources.pop(path).release()  # never handed to the worker, so releasing here is safe
+            log_event(LOG, "sequence.add_refused", name=path.name, reason=mismatch)
+            QMessageBox.warning(self, "fps diferente", mismatch)
+            return
+        covers_end = self.clip_end_frame >= self.frame_count - 1
+        self.active_clip_index = -1
+        self.sequence = candidate
+        if covers_end:
+            self.clip_end_frame = self.frame_count - 1  # an export range that reached the end keeps reaching it
+        self._preview_controller.set_videos(tuple(self._sources.values()))
+        log_event(LOG, "sequence.add", name=path.name, clips=len(self.sequence), frames=self.frame_count)
+        self._sequence_changed()
+        self.status.show_message(
+            f"{path.name} adicionado à sequência: {len(self.sequence)} clipes, "
+            f"{format_duration(self.frame_count / self.fps)}."
+        )
+
+    def _begin_sequence_edit(self) -> None:
+        """Before changing the clip list: save the widgets into the active clip, then forget which one it was."""
+        self._stop_playback()
+        self._store_active_clip_settings()
+        self.active_clip_index = -1
+
+    def _split_clip_at_playhead(self) -> None:
+        if self.sequence.is_empty:
+            return
+        self._store_active_clip_settings()
+        split = self.sequence.split(self.current_frame_index)
+        if split is None:
+            self.status.show_message("O playhead já está no início de um clipe: nada a dividir.")
+            return
+        self._begin_sequence_edit()
+        self.sequence = split
+        log_event(LOG, "sequence.split", frame=self.current_frame_index, clips=len(self.sequence))
+        self._sequence_changed()
+        self.status.show_message(
+            f"Clipe dividido em {format_timecode(self.current_frame_index, self.fps)}: "
+            "cada parte agora tem ajustes próprios."
+        )
+
+    def _remove_clip(self, index: int) -> None:
+        if not (0 <= index < len(self.sequence.clips)) or len(self.sequence) <= 1:
+            return
+        self._begin_sequence_edit()
+        removed = self.sequence.clips[index]
+        span = self.sequence.clip_span(index)
+        self.sequence = self.sequence.remove(index)
+        if self.current_frame_index > span.end:
+            self.current_frame_index -= span.count
+        elif self.current_frame_index >= span.start:
+            self.current_frame_index = min(span.start, self.frame_count - 1)
+        self.clip_start_frame, self.clip_end_frame = 0, self.frame_count - 1  # the range referred to the old layout
+        self._prune_reference_frames()
+        self._sources = {path: video for path, video in self._sources.items() if path in self.sequence.source_paths}
+        self._preview_controller.set_videos(tuple(self._sources.values()))  # the worker releases the dropped ones
+        log_event(LOG, "sequence.remove", name=removed.name, clips=len(self.sequence))
+        self._sequence_changed()
+        self.transport.set_value_silently(self.current_frame_index)
+        self._load_frame(self.current_frame_index)
+
+    def _remove_active_clip(self) -> None:
+        self._remove_clip(self.active_clip_index)
+
+    def _move_clip(self, index: int, new_index: int) -> None:
+        if index == new_index or not (0 <= index < len(self.sequence.clips)):
+            return
+        self._begin_sequence_edit()
+        local = self.current_frame_index - self.sequence.clip_span(index).start
+        self.sequence = self.sequence.move(index, new_index)
+        moved = max(0, min(new_index, len(self.sequence.clips) - 1))
+        if 0 <= local < self.sequence.clips[moved].timeline_count:
+            self.current_frame_index = self.sequence.clip_span(moved).start + local  # the playhead follows its clip
+        self.clip_start_frame, self.clip_end_frame = 0, self.frame_count - 1
+        log_event(LOG, "sequence.move", index=index, new_index=moved)
+        self._sequence_changed()
+        self.transport.set_value_silently(self.current_frame_index)
+        self._load_frame(self.current_frame_index)
+
+    def _go_to_clip(self, index: int) -> None:
+        """The clip picked in the export tab's list: put the playhead on it (that makes it the active clip)."""
+        if 0 <= index < len(self.sequence.clips) and self.sequence.clip_at(self.current_frame_index) != index:
+            self._stop_playback()
+            self.transport.set_value(self.sequence.clip_span(index).start)
+
+    def _sequence_changed(self) -> None:
+        """The clips changed (added, removed, moved, split): push the layout everywhere it is shown."""
+        last = self.frame_count - 1
+        self.clip_start_frame = max(0, min(self.clip_start_frame, last))
+        self.clip_end_frame = max(self.clip_start_frame, min(self.clip_end_frame, last))
+        self.current_frame_index = max(0, min(self.current_frame_index, last))
+        if self._pending_cut_start is not None and self._pending_cut_start > last:
+            self._pending_cut_start = None
+        self.transport.set_clips(self._clip_blocks())
+        self._filmstrip.set_videos(self.sequence.source_paths)
+        self._load_waveforms()
+        self._sync_active_clip(force=True)
+        self.export_tab.set_clips(self._clip_items(), self.active_clip_index)
+        self._update_timeline_markers()
+        self._update_range_label()
+        self._update_sequence_info()
+        self.export_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
+        self.remove_clip_action.setEnabled(len(self.sequence) > 1 and self._export_controller is None)
+        self.split_clip_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
+
+    def _clip_blocks(self) -> list[ClipBlock]:
+        offsets = self.sequence.clip_offsets()
+        return [
+            ClipBlock(offset, clip.timeline_count, clip.name, clip.source.path, clip.range.start)
+            for offset, clip in zip(offsets, self.sequence.clips)
+        ]
+
+    def _clip_items(self) -> list[str]:
+        items = []
+        for number, (offset, clip) in enumerate(zip(self.sequence.clip_offsets(), self.sequence.clips), start=1):
+            text = (
+                f"{number}. {clip.name} · {format_timecode(offset, self.fps)} → "
+                f"{format_timecode(offset + clip.timeline_count, self.fps)} ({clip.timeline_count} frames)"
+            )
+            if clip.range != clip.source.full_range:
+                text += f" · frames {clip.range.start + 1}–{clip.range.end + 1} do arquivo"
+            items.append(text)
+        return items
+
+    def _update_sequence_info(self) -> None:
+        clip = self.active_clip
+        if clip is None:
+            self.status.set_video_info("")
+            self.setWindowTitle("Space Video Enhancer")
+            return
+        first = self.sequence.clips[0]
+        width, height = clip.source.width, clip.source.height
+        if len(self.sequence) == 1:
+            info = f"{clip.name} · {width}x{height} · {self.fps:.2f} fps · {self.frame_count} frames"
+            title = f"{clip.name} — Space Video Enhancer"
+        else:
+            info = (
+                f"{len(self.sequence)} clipes · {self.frame_count} frames · {self.fps:.2f} fps · "
+                f"clipe ativo {self.active_clip_index + 1}: {clip.name} ({width}x{height})"
+            )
+            title = f"{first.name} +{len(self.sequence) - 1} — Space Video Enhancer"
+        self.status.set_video_info(info)
+        self.setWindowTitle(title)
+
+    def _load_waveforms(self) -> None:
+        """One ffmpeg decode per file of the sequence (files already requested are not decoded again)."""
+        ffmpeg_path = find_ffmpeg()
+        for path in self.sequence.source_paths:
+            if path in self._waveforms_requested:
+                continue
+            self._waveforms_requested.add(path)
+            if ffmpeg_path is None:
+                self.transport.set_audio_state(path, "unavailable")
+            else:
+                self.transport.set_audio_state(path, "loading")
+                self._waveform.load(path, ffmpeg_path, self.fps * WAVEFORM_BUCKETS_PER_FRAME)
+
+    def _canvas_aspect(self) -> float | None:
+        """Width/height of the export canvas (the first clip's output); ``None`` when there is nothing to fit."""
+        if len(self.sequence) < 2:
+            return None
+        first = self.sequence.clips[0]
+        width, height = first.settings.output_size(first.source.width, first.source.height)
+        return width / height if width > 0 and height > 0 else None
+
+    # --- the active clip and its settings ------------------------------------------------------
+    def _sync_active_clip(self, *, force: bool = False) -> None:
+        """Make the clip under the playhead the active one: save the old clip's widgets, load the new one's."""
+        if self.sequence.is_empty:
+            self.active_clip_index = -1
+            return
+        index = self.sequence.clip_at(self.current_frame_index)
+        if not force and index == self.active_clip_index:
+            return
+        self._store_active_clip_settings()
+        self.active_clip_index = index
+        self._load_clip_into_controls(self.sequence.clips[index])
+        self._stabilization_epoch += 1  # inter-frame memory must not cross into another clip
+        self.transport.set_active_clip(index)
+        self.export_tab.select_clip(index)
+        self._update_sequence_info()
+        log_event(LOG, "ui.clip_active", clip=index, name=self.sequence.clips[index].name)
+
+    def _store_active_clip_settings(self) -> None:
+        """Snapshot the widgets into the active clip (called on every render and before switching clips)."""
+        clip = self.active_clip
+        if clip is None:
+            return
+        settings = self._current_render_settings()
+        if settings != clip.settings:
+            self.sequence = self.sequence.with_clip_settings(self.active_clip_index, settings)
+
+    def _update_active_clip(self, update: Callable[[Clip], Clip]) -> None:
+        clip = self.active_clip
+        if clip is not None:
+            self.sequence = self.sequence.replace_clip(self.active_clip_index, update(clip))
+
+    def _load_clip_into_controls(self, clip: Clip) -> None:
+        """Show ``clip.settings`` in every tab and overlay without triggering the change handlers."""
+        settings = clip.settings
+        self.color_tab.apply(settings.filters)
+        self.noise_tab.apply(settings.filters)
+        self.export_tab.apply(settings.filters)
+        self.filters_tab.apply(settings.image_filter)
+        self.geometry_tab.apply(settings.geometry, settings.crop)
+        self.crop_rect_norm = norm_to_qrect(settings.crop.rect)
+        self.denoise_sample_rect_norm = norm_to_qrect(settings.denoise_sample_rect)
+        self.stabilization_tab.apply(settings.stabilization)
+        self.stabilization_rect_norm = norm_to_qrect(settings.stabilization.focus_rect)
+        self.white_balance_gains = settings.grade.white_balance_gains
+        self.white_balance_rect_norm = norm_to_qrect(settings.grade.region)
+        self.grade_tab.apply(settings.grade, settings.exposure, exposure_frame=clip.exposure_reference_frame)
+        reference_frame = clip.stabilization_reference_frame
+        self.stabilization_reference_frame = (
+            self._reference_frames.get((clip.source.path, reference_frame)) if reference_frame is not None else None
+        )
+        self.stabilization_reference_frame_index = reference_frame or 0
+        self._sync_preset_selection()
+        self._update_denoise_controls_state()
+        self._update_stabilization_controls_state()
+        self._sync_overlays()
+        self._update_crop_info_label()
+        self._update_white_balance_info()
+        self._update_exposure_info()
+        self.preview.set_display_reference_size(*self._displayed_size())
+
+    def _prune_reference_frames(self) -> None:
+        wanted = {
+            (clip.source.path, clip.stabilization_reference_frame)
+            for clip in self.sequence.clips
+            if clip.stabilization_reference_frame is not None
+        }
+        for key in [key for key in self._reference_frames if key not in wanted]:
+            del self._reference_frames[key]
+
     def _load_frame(self, frame_index: int) -> None:
-        """Ask the render thread for ``frame_index``; decoding happens there, never on the GUI thread."""
-        if self.video is None:
+        """Ask the render thread for timeline frame ``frame_index``; decoding happens there, never on the GUI."""
+        if self.sequence.is_empty:
             return
         playing = self.playback_timer.isActive()
         self.current_frame_index = frame_index
         self.transport.set_position(frame_index)
+        self._sync_active_clip()
         self._schedule_preview_refresh(immediate=True, reason="playback" if playing else "scrub")
 
     def _go_to_first_frame(self) -> None:
@@ -799,12 +1140,16 @@ class MainWindow(QMainWindow):
             return
         self.clip_start_frame = 0
         self.clip_end_frame = self.frame_count - 1
-        self.cuts = []
+        self._set_timeline_cuts([])
         self._pending_cut_start = None
         self._update_timeline_markers()
         self._update_range_label()
 
     # --- cuts inside the clip -----------------------------------------------------------------
+    def _set_timeline_cuts(self, cuts: Sequence[tuple[int, int]]) -> None:
+        """Replace every clip's cuts from ranges in timeline frames (normalized by the model)."""
+        self.sequence = self.sequence.with_timeline_cuts(cuts)
+
     def _toggle_cut_mark(self) -> None:
         """First press marks where a removed range starts, second press where it ends."""
         if self.frame_count <= 0:
@@ -822,8 +1167,7 @@ class MainWindow(QMainWindow):
         self._update_range_label()
 
     def _add_cut(self, start: int, end: int) -> None:
-        bounds = FrameRange(0, self.frame_count - 1)
-        self.cuts = [(cut.start, cut.end) for cut in normalize_cuts([*self.cuts, (start, end)], bounds)]
+        self._set_timeline_cuts([*self.cuts, (start, end)])
         log_event(LOG, "ui.cuts", action="add", start=min(start, end), end=max(start, end), cuts=self.cuts)
         self._update_timeline_markers()
         self._update_range_label()
@@ -847,8 +1191,10 @@ class MainWindow(QMainWindow):
         self.export_tab.clear_typed_cut()
 
     def _remove_cut(self, index: int) -> None:
-        if 0 <= index < len(self.cuts):
-            removed = self.cuts.pop(index)
+        cuts = self.cuts
+        if 0 <= index < len(cuts):
+            removed = cuts.pop(index)
+            self._set_timeline_cuts(cuts)
             log_event(LOG, "ui.cuts", action="remove", start=removed[0], end=removed[1], cuts=self.cuts)
             self._update_timeline_markers()
             self._update_range_label()
@@ -862,22 +1208,30 @@ class MainWindow(QMainWindow):
             self._remove_cut(index)
 
     def _request_filmstrip(self, frames: Sequence[int], height: int, device_pixel_ratio: float) -> None:
-        if self.frame_count > 0:
-            self._filmstrip.request(tuple(frames), height, device_pixel_ratio)
+        """Timeline frames missing from the filmstrip -> the (file, source frame) each of them shows."""
+        if self.sequence.is_empty:
+            return
+        cells = []
+        for frame in frames:
+            location = self.sequence.locate(frame)
+            cells.append(
+                FilmstripCell(frame, self.sequence.clips[location.clip_index].source.path, location.source_frame)
+            )
+        width = round(self.transport.timeline.thumbnail_size()[0] * device_pixel_ratio)
+        self._filmstrip.request(cells, width, height, device_pixel_ratio)
 
     def _on_filmstrip_thumbnail(self, _generation: int, frame: int, image: QImage) -> None:
         self.transport.set_thumbnail(frame, image)
 
     def _on_waveform_ready(self, path: Path, peaks: AudioPeaks | None) -> None:
-        if path == self.video_path:  # a result for a video that was closed meanwhile is dropped
-            self.transport.set_waveform(peaks)
+        if path in self.sequence.source_paths:  # a result for a file that left the sequence meanwhile is dropped
+            self.transport.set_waveform(path, peaks)
 
     def _set_cuts_from_timeline(self, cuts: Sequence[tuple[int, int]], finished: bool) -> None:
         """A cut edge or body dragged on the timeline; logged once, when the drag ends."""
         if self.frame_count <= 0:
             return
-        bounds = FrameRange(0, self.frame_count - 1)
-        self.cuts = [(cut.start, cut.end) for cut in normalize_cuts(cuts, bounds)]
+        self._set_timeline_cuts(cuts)
         if finished:
             log_event(LOG, "ui.cuts", action="drag", cuts=self.cuts)
         self._update_timeline_markers()
@@ -895,7 +1249,7 @@ class MainWindow(QMainWindow):
     def _clear_cuts(self) -> None:
         if not self.cuts and self._pending_cut_start is None:
             return
-        self.cuts = []
+        self._set_timeline_cuts([])
         self._pending_cut_start = None
         log_event(LOG, "ui.cuts", action="clear", cuts=[])
         self._update_timeline_markers()
@@ -1050,10 +1404,11 @@ class MainWindow(QMainWindow):
         self._sync_white_balance_preview()
 
     def _refresh_preview_impl(self) -> None:
-        """Snapshot the widgets and ask the render thread for the current frame (latest request wins)."""
-        if self.video is None:
+        """Snapshot the widgets into the active clip and ask the render thread for the current frame."""
+        if self.sequence.is_empty:
             return
 
+        self._store_active_clip_settings()
         settings = self._current_render_settings()
         self._log_settings(settings)
         self._sync_crop_preview()
@@ -1073,18 +1428,21 @@ class MainWindow(QMainWindow):
         )
         if interactive:
             size_limit = min(size_limit or INTERACTIVE_DENOISE_SIZE_LIMIT, INTERACTIVE_DENOISE_SIZE_LIMIT)
+        location = self.sequence.locate(self.current_frame_index)
         self._preview_generation += 1
         self.status.set_render_busy(True)
         self._preview_controller.submit_preview(
             PreviewRequest(
                 generation=self._preview_generation,
                 frame=None,  # decoded on the render thread
-                frame_index=self.current_frame_index,
+                frame_index=location.source_frame,
                 settings=preview_settings,
                 size_limit=size_limit,
                 stabilization_reference=self.stabilization_reference_frame,
                 stabilization_epoch=self._stabilization_epoch,
                 reason=self._pending_preview_reason,
+                source_path=self.sequence.clips[location.clip_index].source.path,
+                canvas_aspect=self._canvas_aspect(),
             )
         )
         self._pending_preview_reason = "settings"
@@ -1095,7 +1453,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_preview_at_full_quality(self) -> None:
         """The frame the user stopped on gets a render without the interactive size limit."""
-        if self.video is None or self.playback_timer.isActive():
+        if self.sequence.is_empty or self.playback_timer.isActive():
             return
         self._schedule_preview_refresh(immediate=True, reason="idle")
 
@@ -1118,6 +1476,7 @@ class MainWindow(QMainWindow):
         self._last_preview = images
         self.current_frame = images.source
         self._decoded_frame_index = images.frame_index
+        self._decoded_source = images.source_path
         self._counters["renders"] += 1
         if images.decode_sequential is not None:
             self._last_decode_ms = images.decode_ms
@@ -1271,7 +1630,7 @@ class MainWindow(QMainWindow):
             if mode is DenoiseMode.AUTO
             else "Amostra: usa a região azul selecionada no preview como referência de ruído."
         )
-        if self.video is None:
+        if self.sequence.is_empty:
             self.noise_tab.set_info(source)
             return
         trace = self._last_preview.trace if self._last_preview is not None else {}
@@ -1350,8 +1709,9 @@ class MainWindow(QMainWindow):
             self.status.show_message("Abra um vídeo e aguarde o primeiro render para capturar a referência.")
             return
         reference = region_medians(self.current_frame, self._exposure_region())
-        self._exposure_reference_frame = self._decoded_frame_index
-        self.grade_tab.set_exposure_reference(reference, frame_index=self._decoded_frame_index)
+        frame_index = self._decoded_frame_index
+        self._update_active_clip(lambda clip: clip.with_exposure_reference(frame_index))
+        self.grade_tab.set_exposure_reference(reference, frame_index=frame_index)
         log_event(
             LOG,
             "ui.exposure",
@@ -1367,7 +1727,7 @@ class MainWindow(QMainWindow):
         if self.grade_tab.exposure_reference() is None:
             return
         self.grade_tab.set_exposure_reference(None)
-        self._exposure_reference_frame = None
+        self._update_active_clip(lambda clip: clip.with_exposure_reference(None))
         log_event(LOG, "ui.exposure", action="clear", reason=reason or "user")
         if reason:
             self.status.show_message(reason)
@@ -1377,7 +1737,14 @@ class MainWindow(QMainWindow):
         """The metering area changed: re-meter if we are still on the reference frame, else forget the reference."""
         if self.grade_tab.exposure_reference() is None:
             return
-        if self.current_frame is not None and self._decoded_frame_index == self._exposure_reference_frame:
+        clip = self.active_clip
+        on_reference_frame = (
+            clip is not None
+            and self.current_frame is not None
+            and self._decoded_source == clip.source.path
+            and self._decoded_frame_index == clip.exposure_reference_frame
+        )
+        if on_reference_frame:
             self._capture_exposure_reference()
         else:
             self._clear_exposure_reference(
@@ -1466,10 +1833,14 @@ class MainWindow(QMainWindow):
         self._schedule_preview_refresh()
 
     def _capture_stabilization_reference_from_current_frame(self) -> None:
-        if self.current_frame is None:
+        if self.current_frame is None or self._decoded_source is None:
             return
         self.stabilization_reference_frame = self.current_frame.copy()
         self.stabilization_reference_frame_index = self._decoded_frame_index
+        frame_index = self._decoded_frame_index
+        self._reference_frames[(self._decoded_source, frame_index)] = self.stabilization_reference_frame
+        self._update_active_clip(lambda clip: clip.with_reference(frame_index))
+        self._prune_reference_frames()
 
     def _update_stabilization_controls_state(self) -> None:
         self.stabilization_tab.update_controls_state(self.frame_count > 0)
@@ -1641,10 +2012,17 @@ class MainWindow(QMainWindow):
     # Export
     # =====================================================================================
     def _export_video(self) -> None:
-        if self.video_path is None or self._export_controller is not None:
+        if self.sequence.is_empty or self._export_controller is not None:
+            return
+        self._store_active_clip_settings()
+        start_frame, end_frame = self._selected_frame_range()
+        export_sequence = self.sequence.for_export(start_frame, end_frame)
+        if export_sequence.is_empty:
+            self.status.show_message("Os cortes removem o trecho inteiro: nada a exportar.")
             return
 
-        default_name = self.video_path.with_stem(f"{self.video_path.stem}_enhanced").with_suffix(".mp4")
+        first_path = self.sequence.clips[0].source.path
+        default_name = first_path.with_stem(f"{first_path.stem}_enhanced").with_suffix(".mp4")
         output_path, _ = QFileDialog.getSaveFileName(self, "Salvar vídeo processado", str(default_name), "MP4 (*.mp4)")
         if not output_path:
             return
@@ -1663,24 +2041,8 @@ class MainWindow(QMainWindow):
         encoder = resolve_encoder(self._ffmpeg_probe)
         self._backend.reset()
 
-        start_frame, end_frame = self._selected_frame_range()
-        request = ExportRequest.single(
-            self.video_path,
-            Path(output_path),
-            self._current_render_settings(),
-            start_frame,
-            end_frame,
-            self.fps,
-            self.export_tab.worker_count(),
-            ffmpeg_path,
-            encoder,
-            cuts=tuple(self.cuts),
-            stabilization_reference_frame=(
-                self.stabilization_reference_frame_index if self.stabilization_reference_frame is not None else None
-            ),
-            frame_count=self.frame_count,
-            width=self.source_size[0],
-            height=self.source_size[1],
+        request = ExportRequest(
+            export_sequence, Path(output_path), self.export_tab.worker_count(), ffmpeg_path, encoder
         )
         self._export_backend_label = f"{self._backend.label} + {encoder.label}"
         self._export_output_path = Path(output_path)
@@ -1703,11 +2065,13 @@ class MainWindow(QMainWindow):
         self._stop_playback()
         self._set_controls_enabled(False)
         self.open_action.setEnabled(False)
+        self.add_video_action.setEnabled(False)
         self.status.begin_export(message)
 
     def _end_export_ui(self) -> None:
         self._set_controls_enabled(True)
         self.open_action.setEnabled(True)
+        self.add_video_action.setEnabled(True)
 
     @Slot(int, int)
     def _on_export_progress(self, processed_frames: int, total_frames: int) -> None:
@@ -1810,8 +2174,8 @@ class MainWindow(QMainWindow):
             self._export_controller = None
         self._filmstrip.stop()
         self._waveform.stop()
-        self._preview_controller.stop()  # also releases the video it owns
-        self.video = None
+        self._preview_controller.stop()  # also releases the decoders it owns
+        self._sources.clear()
         super().closeEvent(event)
 
     # =====================================================================================
@@ -1890,6 +2254,7 @@ class MainWindow(QMainWindow):
             export_failures=self._counters["export_failures"],
             render_errors=self._counters["render_errors"],
             video=self.video_path.name if self.video_path else None,
+            clips=len(self.sequence),
         )
 
     def _show_about_dialog(self) -> None:

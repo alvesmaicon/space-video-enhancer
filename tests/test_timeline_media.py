@@ -16,8 +16,8 @@ from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.ui.main_window import MainWindow
-from space_video_enhancer.ui.timeline_media import FilmstripController, WaveformController
-from space_video_enhancer.ui.widgets.timeline import THUMBNAIL_CACHE_SIZE, VIDEO_TRACK_HEIGHT, TimelineWidget
+from space_video_enhancer.ui.timeline_media import FilmstripCell, FilmstripController, WaveformController
+from space_video_enhancer.ui.widgets.timeline import THUMBNAIL_CACHE_SIZE, VIDEO_TRACK_HEIGHT, ClipBlock, TimelineWidget
 from space_video_enhancer.video import VideoSource
 from tests.conftest import UI_VIDEO_FRAMES
 from tests.qt_helpers import pump, wait_for_preview, wait_until
@@ -42,7 +42,8 @@ def test_filmstrip_decodes_on_its_own_thread(
     controller.requestFinished.connect(lambda *args: finished.append(args))
     try:
         controller.set_video(ui_video)
-        generation = controller.request((0, 3, 6, 9), 40, 2.0)
+        cells = [FilmstripCell(frame, ui_video, frame) for frame in (0, 3, 6, 9)]
+        generation = controller.request(cells, round(40 * 320 / 180), 40, 2.0)
         wait_until(app, lambda: len(finished) >= 1, what="filmstrip request")
         assert finished[-1][0] == generation and finished[-1][1] == 4
         assert sorted(received) == [0, 3, 6, 9]
@@ -62,8 +63,9 @@ def test_newer_request_supersedes_the_pending_one(app: QApplication, ui_video: P
     controller.requestFinished.connect(lambda *args: finished.append(args))
     try:
         controller.set_video(ui_video)
-        first = controller.request(tuple(range(UI_VIDEO_FRAMES)) * 20, 24, 1.0)  # 240 decodes
-        second = controller.request((1, 2), 24, 1.0)
+        many = [FilmstripCell(frame, ui_video, frame) for frame in tuple(range(UI_VIDEO_FRAMES)) * 20]
+        first = controller.request(many, 43, 24, 1.0)  # 240 decodes
+        second = controller.request([FilmstripCell(frame, ui_video, frame) for frame in (1, 2)], 43, 24, 1.0)
         wait_until(
             app, lambda: any(generation == second for generation, _count, _ms in finished), what="second request"
         )
@@ -148,10 +150,12 @@ def test_waveform_columns_follow_the_zoom(app: QApplication) -> None:
     timeline.show()
     pump(app, 0.02)
     timeline.set_media(1200, 30.0)  # 40 s
+    source = Path("a.mp4")
+    timeline.set_clips([ClipBlock(0, 1200, "a.mp4", source)])
     assert timeline.audio_state() == "none"
-    timeline.set_audio_state("loading")
+    timeline.set_audio_state(source, "loading")
     timeline.grab()  # paints the state text
-    timeline.set_waveform(_loud_between(10.0, 20.0, 40.0, 120.0))
+    timeline.set_waveform(source, _loud_between(10.0, 20.0, 40.0, 120.0))
     assert timeline.audio_state() == "ready"
     columns = timeline.waveform_columns(0, 800)
     assert columns is not None
@@ -168,7 +172,7 @@ def test_waveform_columns_follow_the_zoom(app: QApplication) -> None:
     columns = timeline.waveform_columns(0, 800)
     assert columns is not None and np.all(columns[1] > 0.5)
     timeline.grab()
-    timeline.set_waveform(None)
+    timeline.set_waveform(source, None)
     assert timeline.audio_state() == "none" and timeline.waveform_columns(0, 800) is None
     timeline.close()
 
@@ -177,10 +181,30 @@ def test_waveform_columns_past_the_audio_end_are_silent(app: QApplication) -> No
     timeline = TimelineWidget()
     timeline.resize(800, timeline.sizeHint().height())
     timeline.set_media(1200, 30.0)  # 40 s of video ...
-    timeline.set_waveform(_loud_between(0.0, 20.0, 20.0, 120.0))  # ... but only 20 s of audio
+    source = Path("a.mp4")
+    timeline.set_clips([ClipBlock(0, 1200, "a.mp4", source)])
+    timeline.set_waveform(source, _loud_between(0.0, 20.0, 20.0, 120.0))  # ... but only 20 s of audio
     columns = timeline.waveform_columns(0, 800)
     assert columns is not None
     assert np.all(columns[1][:395] > 0.5) and np.all(columns[1][405:] == 0.0)
+
+
+def test_waveform_columns_follow_each_clip_to_its_own_file(app: QApplication) -> None:
+    """Two clips of two files: each column reads the file (and the offset) of the clip under it."""
+    timeline = TimelineWidget()
+    timeline.resize(800, timeline.sizeHint().height())
+    timeline.set_media(1200, 30.0)  # 40 s: clip A (20 s of a.mp4 from its 10th second) + clip B (20 s of b.mp4)
+    a, b = Path("a.mp4"), Path("b.mp4")
+    timeline.set_clips([ClipBlock(0, 600, "a.mp4", a, source_start=300), ClipBlock(600, 600, "b.mp4", b)])
+    timeline.set_waveform(a, _loud_between(10.0, 15.0, 40.0, 120.0))  # loud in a's 10-15 s = clip A's first 5 s
+    timeline.set_waveform(b, _loud_between(15.0, 20.0, 20.0, 120.0))  # loud in b's 15-20 s = clip B's last 5 s
+    columns = timeline.waveform_columns(0, 800)
+    assert columns is not None
+    maximums = columns[1]
+    assert np.all(maximums[2:98] > 0.5) and np.all(maximums[102:698] == 0.0) and np.all(maximums[702:798] > 0.5)
+    assert timeline.audio_state(a) == "ready" and timeline.audio_state(b) == "ready"
+    timeline.set_clips([ClipBlock(0, 600, "b.mp4", b)])  # a.mp4 left the sequence: its peaks are dropped
+    assert timeline.audio_state(a) == "none" and timeline.waveform_columns(0, 800) is not None
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not on PATH")

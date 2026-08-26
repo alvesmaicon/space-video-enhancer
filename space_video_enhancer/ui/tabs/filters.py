@@ -65,6 +65,16 @@ class FiltersTab(TabPage):
     def selection(self) -> ImageFilterSelection:
         return ImageFilterSelection(self.active_filter_id, clamp_unit(self.intensity / 100.0))
 
+    def apply(self, selection: ImageFilterSelection) -> None:
+        """Show ``selection`` (another clip's) without emitting ``filterSelected``/``intensityChanged``."""
+        self.active_filter_id = selection.preset_id if selection.preset_id in self.buttons else ORIGINAL_PRESET_ID
+        self.intensity = round(clamp_unit(selection.intensity) * 100)
+        self.intensity_slider.blockSignals(True)
+        self.intensity_slider.slider.setValue(self.intensity)
+        self.intensity_slider.blockSignals(False)
+        self._sync_buttons()
+        self._update_description()
+
     def set_thumbnails(self, images: Mapping[str, QImage], device_pixel_ratio: float = 1.0) -> None:
         """``images`` are in device pixels; tagging the ratio keeps them crisp on HiDPI displays."""
         for preset_id, image in images.items():

@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from space_video_enhancer.pipeline.geometry import apply_crop, apply_geometry, ensure_even_size, fit_to_canvas
+from space_video_enhancer.pipeline.geometry import (
+    apply_crop,
+    apply_geometry,
+    ensure_even_size,
+    fit_to_aspect,
+    fit_to_canvas,
+)
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.settings import (
     CropSettings,
@@ -82,3 +88,14 @@ def test_fit_to_canvas_letterboxes_and_is_identity_when_sizes_match() -> None:
     assert tall.shape == (64, 64, 3) and tall[:, :25].max() == 0 and tall[:, 26:38].min() == 90
     gray = fit_to_canvas(np.full((10, 10), 7, dtype=np.uint8), 20, 12)
     assert gray.shape == (12, 20) and gray[:, 4:16].min() == 7
+
+
+def test_fit_to_aspect_pads_without_scaling() -> None:
+    frame = np.full((180, 240, 3), 200, np.uint8)  # 4:3
+    wide = fit_to_aspect(frame, 16 / 9)
+    assert wide.shape == (180, 320, 3)
+    assert wide[:, :40].max() == 0 and wide[:, -40:].max() == 0 and wide[:, 40:280].min() == 200
+    tall = fit_to_aspect(frame, 1.0)
+    assert tall.shape == (240, 240, 3) and tall[:30].max() == 0 and tall[30:210].min() == 200
+    assert fit_to_aspect(frame, 4 / 3) is frame and fit_to_aspect(frame, None) is frame
+    assert fit_to_aspect(frame, 4 / 3 * 1.005) is frame, "within the tolerance nothing is padded"

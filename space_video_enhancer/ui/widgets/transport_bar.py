@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import re
 from collections.abc import Sequence
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolButton, QVB
 from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.ui.format import format_timecode
 from space_video_enhancer.ui.icons import glyph_icon
-from space_video_enhancer.ui.widgets.timeline import TimelineWidget
+from space_video_enhancer.ui.widgets.timeline import ClipBlock, TimelineWidget
 
 PRIMARY_COLOR = QColor("#0f766e")
 ON_PRIMARY_COLOR = QColor("#ffffff")
@@ -56,6 +57,8 @@ class TransportBar(QWidget):
     cutSelected = Signal(int)
     cutRemoveRequested = Signal(int)
     cutToggleRequested = Signal()
+    clipSplitRequested = Signal()
+    clipRemoveRequested = Signal(int)
     thumbnailsRequested = Signal(object, int, float)
     """Filmstrip cells missing from the timeline view: ``(frames, height_device_px, device_pixel_ratio)``."""
 
@@ -114,6 +117,8 @@ class TransportBar(QWidget):
         self.timeline.cutSelected.connect(self.cutSelected.emit)
         self.timeline.cutRemoveRequested.connect(self.cutRemoveRequested.emit)
         self.timeline.cutToggleRequested.connect(self.cutToggleRequested.emit)
+        self.timeline.clipSplitRequested.connect(self.clipSplitRequested.emit)
+        self.timeline.clipRemoveRequested.connect(self.clipRemoveRequested.emit)
         self.timeline.zoomChanged.connect(self._update_zoom_buttons)
         self.timeline.thumbnailsRequested.connect(self.thumbnailsRequested.emit)
         self.zoom_out_button.clicked.connect(self.timeline.zoom_out)
@@ -231,11 +236,22 @@ class TransportBar(QWidget):
     def select_cut(self, index: int) -> None:
         self.timeline.select_cut(index)
 
+    def set_clips(self, clips: Sequence[ClipBlock]) -> None:
+        """The sequence layout; the labels follow the new total length."""
+        self.timeline.set_clips(clips)
+        self._frame_count = self.timeline.frame_count
+        self._fit_labels()
+        self.set_position(self.timeline.value())
+        self._update_zoom_buttons()
+
+    def set_active_clip(self, index: int) -> None:
+        self.timeline.set_active_clip(index)
+
     def set_thumbnail(self, frame: int, image: QImage) -> None:
         self.timeline.set_thumbnail(frame, image)
 
-    def set_waveform(self, peaks: AudioPeaks | None) -> None:
-        self.timeline.set_waveform(peaks)
+    def set_waveform(self, path: Path, peaks: AudioPeaks | None) -> None:
+        self.timeline.set_waveform(path, peaks)
 
-    def set_audio_state(self, state: str) -> None:
-        self.timeline.set_audio_state(state)
+    def set_audio_state(self, path: Path, state: str) -> None:
+        self.timeline.set_audio_state(path, state)

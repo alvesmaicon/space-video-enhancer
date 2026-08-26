@@ -1,8 +1,8 @@
 """Qt adapter that decodes and renders preview/thumbnail requests on a ``QThread``.
 
-The worker owns the open :class:`VideoSource`: the UI hands it over with
-:meth:`PreviewController.set_video` and from then on only asks for frame indices, so no
-decoding ever happens on the GUI thread. Every preview render is logged as a
+The worker owns the open :class:`VideoSource` objects (one per file of the sequence): the UI
+hands them over with :meth:`PreviewController.set_videos` and from then on only asks for
+``(file, frame index)``, so no decoding ever happens on the GUI thread. Every preview render is logged as a
 ``preview.render`` event with decode time, stage timings and pipeline notes; playback
 frames go to DEBUG so an INFO log stays readable.
 """
@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -52,6 +54,8 @@ class PreviewImages:
     decode_sequential: bool | None
     video_seeks: int
     video_sequential_reads: int
+    source_path: Path | None = None
+    """File ``frame_index`` belongs to (a sequence shows frames of several files)."""
 
 
 @dataclass(frozen=True)
@@ -73,29 +77,44 @@ class PreviewWorker(QObject):
         self._backend = backend
         self._state = StabilizationState()
         self._epoch: int | None = None
-        self._video: VideoSource | None = None
-        self._pending_video: VideoSource | None = None
-        self._video_pending = False
+        self._videos: tuple[VideoSource, ...] = ()
+        self._pending_videos: tuple[VideoSource, ...] = ()
+        self._videos_pending = False
         self._video_lock = threading.Lock()
 
     @property
+    def videos(self) -> tuple[VideoSource, ...]:
+        return self._videos
+
+    @property
     def video(self) -> VideoSource | None:
-        return self._video
+        """The first adopted decoder (the one-video case)."""
+        return self._videos[0] if self._videos else None
 
-    def set_video(self, video: VideoSource | None) -> None:
-        """Called from the GUI thread; the swap (and the old video's release) happens on the worker."""
+    def set_videos(self, videos: Sequence[VideoSource]) -> None:
+        """Called from the GUI thread; the swap (and the release of dropped videos) happens on the worker."""
         with self._video_lock:
-            self._pending_video = video
-            self._video_pending = True
+            self._pending_videos = tuple(videos)
+            self._videos_pending = True
 
-    def release_video(self) -> None:
+    def release_videos(self) -> None:
         """Release whatever is open. Only safe once the worker thread has stopped."""
         with self._video_lock:
-            pending, self._pending_video, self._video_pending = self._pending_video, None, False
-        for video in (self._video, pending):
-            if video is not None:
+            pending, self._pending_videos, self._videos_pending = self._pending_videos, (), False
+        released: list[int] = []
+        for video in (*self._videos, *pending):
+            if id(video) not in released:
+                released.append(id(video))
                 video.release()
-        self._video = None
+        self._videos = ()
+
+    def _video_for(self, path: Path | None) -> VideoSource | None:
+        if path is None:
+            return self.video
+        for video in self._videos:
+            if video.path == path:
+                return video
+        return None
 
     @Slot()
     def process(self) -> None:
@@ -134,18 +153,24 @@ class PreviewWorker(QObject):
 
     def _adopt_pending_video(self) -> None:
         with self._video_lock:
-            if not self._video_pending:
+            if not self._videos_pending:
                 return
-            video, self._pending_video, self._video_pending = self._pending_video, None, False
-        previous, self._video = self._video, video
-        if previous is not None and previous is not video:
-            previous.release()
+            videos, self._pending_videos, self._videos_pending = self._pending_videos, (), False
+        previous, self._videos = self._videos, videos
+        kept = {id(video) for video in videos}
+        for video in previous:
+            if id(video) not in kept:
+                video.release()
 
     def _render_preview(self, job: PreviewRequest) -> None:
         if job.stabilization_epoch != self._epoch:
             self._state.reset()
             self._epoch = job.stabilization_epoch
-        result = render_preview(job, self._state, self._backend, self._video)
+        video = self._video_for(job.source_path)
+        if video is None and job.frame is None:
+            name = job.source_path.name if job.source_path is not None else "?"
+            raise FrameUnavailableError(f"o vídeo {name} não está aberto no worker de preview")
+        result = render_preview(job, self._state, self._backend, video)
         trace = result.trace.as_dict()
         log_event(
             LOG,
@@ -153,6 +178,7 @@ class PreviewWorker(QObject):
             level=logging.DEBUG if job.reason == "playback" else logging.INFO,
             generation=job.generation,
             frame_index=job.frame_index,
+            source=job.source_path.name if job.source_path is not None else None,
             reason=job.reason,
             queue_wait_ms=round(result.queue_wait_ms, 1),
             dropped_total=self._mailbox.dropped,
@@ -175,6 +201,7 @@ class PreviewWorker(QObject):
                 result.decode_sequential,
                 result.video_seeks,
                 result.video_sequential_reads,
+                job.source_path if job.source_path is not None else (video.path if video is not None else None),
             )
         )
 
@@ -216,13 +243,21 @@ class PreviewController(QObject):
 
     @property
     def video(self) -> VideoSource | None:
-        """The decoder currently adopted by the worker (for diagnostics and tests)."""
+        """The first decoder adopted by the worker (for diagnostics and tests)."""
         return self._worker.video
 
-    def set_video(self, video: VideoSource | None) -> None:
-        """Hand a freshly opened video to the render thread; it releases the previous one."""
-        self._worker.set_video(video)
+    @property
+    def videos(self) -> tuple[VideoSource, ...]:
+        return self._worker.videos
+
+    def set_videos(self, videos: Sequence[VideoSource]) -> None:
+        """Hand the sequence's open videos to the render thread; it releases the ones no longer listed."""
+        self._worker.set_videos(videos)
         self._wake.emit()
+
+    def set_video(self, video: VideoSource | None) -> None:
+        """The one-video case of :meth:`set_videos`."""
+        self.set_videos(() if video is None else (video,))
 
     def submit_preview(self, request: PreviewRequest) -> None:
         self.mailbox.put_preview(request)
@@ -236,5 +271,5 @@ class PreviewController(QObject):
         self.mailbox.clear()
         self._thread.quit()
         self._thread.wait(timeout_ms)
-        self._worker.release_video()
+        self._worker.release_videos()
         self._worker.deleteLater()

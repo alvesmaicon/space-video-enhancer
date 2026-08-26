@@ -114,3 +114,27 @@ def test_editing_operations_return_new_sequences() -> None:
     single = Sequence.single(A, FrameRange(5, 9), cuts=[(6, 6)], settings=bright, stabilization_reference_frame=7)
     assert single.export_count == 4 and single.clips[0].settings is bright
     assert single.clips[0].stabilization_reference_frame == 7 and Sequence.single(A).timeline_count == 100
+
+
+def test_for_export_turns_the_range_into_cuts_and_drops_empty_clips() -> None:
+    a = ClipSource(Path("a.mp4"), 10, 24.0)
+    b = ClipSource(Path("b.mp4"), 10, 24.0)
+    sequence = Sequence((Clip.whole(a, cuts=(FrameRange(2, 3),)), Clip.whole(b)))
+    exported = sequence.for_export(5, 14)  # timeline frames 5..14: a[5..9] + b[0..4]
+    assert [clip.segments for clip in exported.clips] == [(FrameRange(5, 9),), (FrameRange(0, 4),)]
+    assert exported.export_count == 10 and exported.duration_seconds == pytest.approx(10 / 24)
+    only_b = sequence.for_export(12, 19)
+    assert [clip.source.path.name for clip in only_b.clips] == ["b.mp4"]
+    assert only_b.clips[0].segments == (FrameRange(2, 9),)
+    assert sequence.for_export().export_count == 18, "no range: everything minus the cuts"
+    assert sequence.with_timeline_cuts([(0, 19)]).for_export().is_empty
+
+
+def test_exposure_reference_and_name_follow_the_clip_through_a_split() -> None:
+    source = ClipSource(Path("clip.mp4"), 20, 24.0)
+    clip = Clip.whole(source).with_exposure_reference(7).with_reference(3)
+    assert clip.name == "clip.mp4"
+    left, right = Sequence((clip,)).split(10).clips
+    assert (left.exposure_reference_frame, right.exposure_reference_frame) == (7, 7)
+    assert (left.stabilization_reference_frame, right.stabilization_reference_frame) == (3, 3)
+    assert left.with_exposure_reference(None).exposure_reference_frame is None

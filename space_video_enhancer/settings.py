@@ -241,6 +241,8 @@ class CropSettings:
     enabled: bool = False
     rect: NormalizedRect = DEFAULT_CROP_RECT
     """Expressed in the *displayed* frame (after rotation/flip), exactly as drawn on the preview."""
+    aspect_ratio: float | None = None
+    """Fixed width/height the rectangle is constrained to (the crop preset); ``None`` is a free crop."""
 
     def pixel_rect(self, frame_width: int, frame_height: int) -> PixelRect | None:
         """Even-aligned crop rectangle, or ``None`` when disabled or covering the whole frame."""
@@ -307,6 +309,8 @@ class ColorGradeSettings:
     """0-100, 50 neutral: below pulls toward green, above toward magenta."""
     white_balance_gains: tuple[float, float, float] = NEUTRAL_GAINS
     """B, G, R multipliers, e.g. from :func:`pipeline.grade.neutral_gains` on a gray region."""
+    region: NormalizedRect = DEFAULT_WHITE_BALANCE_RECT
+    """The gray reference rectangle drawn on the preview (also the exposure lock's metering area)."""
     bands: tuple[HueBandAdjust, ...] = DEFAULT_HUE_BANDS
 
     @property
@@ -362,6 +366,20 @@ class RenderSettings:
     denoise_sample_rect: NormalizedRect = DEFAULT_DENOISE_SAMPLE_RECT
     grade: ColorGradeSettings = field(default_factory=ColorGradeSettings)
     exposure: ExposureLockSettings = field(default_factory=ExposureLockSettings)
+
+    def output_size(self, width: int, height: int) -> tuple[int, int]:
+        """Size of the exported frame for a ``width x height`` source: scale, rotation, then crop.
+
+        Stabilization's automatic crop trims the same fraction on every side, so it keeps this
+        aspect ratio; the export fits every clip into the first clip's output canvas.
+        """
+        scaled_width = max(1, round(width * self.filters.scale_factor))
+        scaled_height = max(1, round(height * self.filters.scale_factor))
+        displayed_width, displayed_height = self.geometry.output_size(scaled_width, scaled_height)
+        pixels = self.crop.pixel_rect(displayed_width, displayed_height)
+        if pixels is None:
+            return (displayed_width, displayed_height)
+        return (pixels[2], pixels[3])
 
 
 def clamp_unit(value: float) -> float:

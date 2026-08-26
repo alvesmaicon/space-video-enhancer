@@ -66,6 +66,37 @@ def ui_video(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
+UI_VIDEO_B_SIZE = (240, 180)
+UI_VIDEO_B_FRAMES = 8
+
+
+def _write_video(path: Path, size: tuple[int, int], frames: int, fps: float, *, tint: tuple[int, int, int]) -> Path:
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
+    base = cv2.resize(make_textured_frame(seed=7), size, interpolation=cv2.INTER_AREA)
+    base = cv2.addWeighted(base, 0.6, np.full_like(base, tint), 0.4, 0)
+    for index in range(frames):
+        writer.write(np.roll(base, -index * 4, axis=0))
+    writer.release()
+    return path
+
+
+@pytest.fixture(scope="session")
+def ui_video_b(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A second clip for sequences: another size (4:3), same fps, a warm tint to tell it apart."""
+    return _write_video(
+        tmp_path_factory.mktemp("ui") / "second.mp4",
+        UI_VIDEO_B_SIZE,
+        UI_VIDEO_B_FRAMES,
+        UI_VIDEO_FPS,
+        tint=(40, 90, 200),
+    )
+
+
+@pytest.fixture(scope="session")
+def ui_video_other_fps(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _write_video(tmp_path_factory.mktemp("ui") / "thirty.mp4", UI_VIDEO_SIZE, 6, 30.0, tint=(200, 90, 40))
+
+
 @pytest.fixture
 def window(app):  # type: ignore[no-untyped-def]
     window = MainWindow()

@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtGui import QImage, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.ui.widgets.timeline import (
     MAX_PIXELS_PER_FRAME,
     MIN_LABEL_SPACING_PX,
     RULER_HEIGHT,
+    ClipBlock,
     Hit,
     TimelineScale,
     TimelineWidget,
@@ -307,3 +310,55 @@ def test_empty_timeline_ignores_the_mouse(app: QApplication) -> None:
     assert seen == [] and widget.hit_test(QPointF(100, track_y(widget))) == Hit("none")
     widget.grab()  # paints the hint without a video
     widget.close()
+
+
+def test_clip_strip_names_the_clips_and_offers_split_and_remove(app: QApplication) -> None:
+    timeline = TimelineWidget()
+    timeline.resize(800, timeline.sizeHint().height())
+    timeline.show()
+    timeline.set_media(100, 24.0)
+    timeline.set_clips([ClipBlock(0, 60, "a.mp4", Path("a.mp4")), ClipBlock(60, 40, "b.mp4", Path("b.mp4"), 5)])
+    scale = timeline.scale
+    assert timeline.frame_count == 100 and timeline.clip_at(59) == 0 and timeline.clip_at(60) == 1
+    assert timeline.clip_track_rect().bottom() < timeline.video_track_rect().top()
+    assert timeline.hit_test(QPointF(scale.x_of(70.5), timeline.clip_track_rect().center().y())) == Hit("clip", 1)
+    assert timeline.hit_test(QPointF(scale.x_of(70.5), timeline.video_track_rect().center().y())) == Hit("seek")
+
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(scale.x_of(70.5), timeline.clip_track_rect().center().y()),
+        QPointF(scale.x_of(70.5), timeline.clip_track_rect().center().y()),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(timeline, press)
+    assert timeline.value() == 70, "clicking the strip seeks like the empty timeline"
+
+    splits: list[int] = []
+    removed: list[int] = []
+    timeline.clipSplitRequested.connect(lambda: splits.append(timeline.value()))
+    timeline.clipRemoveRequested.connect(removed.append)
+    menu = timeline.context_menu(QPointF(scale.x_of(80.5), timeline.video_track_rect().center().y()))
+    actions = {action.text(): action for action in menu.actions() if action.text()}
+    assert actions["Dividir clipe aqui"].isEnabled() and "Remover clipe 2 (b.mp4)" in actions
+    actions["Dividir clipe aqui"].trigger()
+    actions["Remover clipe 2 (b.mp4)"].trigger()
+    assert splits == [80] and removed == [1]
+    at_boundary = timeline.context_menu(QPointF(scale.x_of(60.5), timeline.video_track_rect().center().y()))
+    boundary_actions = {action.text(): action for action in at_boundary.actions() if action.text()}
+    assert not boundary_actions["Dividir clipe aqui"].isEnabled(), "a clip already starts here"
+
+    timeline.set_active_clip(1)
+    assert timeline.active_clip() == 1
+    image = QImage(16, 9, QImage.Format.Format_RGB888)
+    timeline.set_thumbnail(3, image)
+    timeline.zoom_in()
+    timeline.zoom_in()  # well above the fit of the shorter layout below (800 px / 60 frames)
+    zoom = scale.pixels_per_frame
+    timeline.set_clips([ClipBlock(0, 60, "a.mp4", Path("a.mp4"))])
+    assert timeline.frame_count == 60 and timeline.thumbnail_count() == 0, "the layout changed: cells are stale"
+    assert timeline.value() == 59 and timeline.active_clip() == -1
+    assert scale.pixels_per_frame == pytest.approx(zoom), "the zoom level survives a layout change"
+    timeline.grab()
+    timeline.close()

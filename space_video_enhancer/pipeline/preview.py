@@ -11,13 +11,14 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Union
 
 import cv2
 import numpy as np
 
 from space_video_enhancer.pipeline.filters import OpenCLBackend
-from space_video_enhancer.pipeline.geometry import apply_geometry
+from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import ImageFilterSelection, RenderSettings
@@ -47,6 +48,10 @@ class PreviewRequest:
     reason: str = "settings"
     """Why the UI asked: open | scrub | playback | settings | mode | idle. Drives log verbosity."""
     requested_at: float = field(default_factory=time.perf_counter)
+    source_path: Path | None = None
+    """Which open video to decode from (a sequence has several); ``None`` means the only one."""
+    canvas_aspect: float | None = None
+    """Width/height of the sequence's export canvas: the result is letterboxed to it like the export does."""
 
 
 @dataclass(frozen=True)
@@ -149,6 +154,9 @@ def render_preview(
         backend=backend,
         trace=trace,
     )
+    if request.canvas_aspect is not None:
+        with trace.stage("letterbox"):
+            after = fit_to_aspect(after, request.canvas_aspect)
     trace.finish()
     return PreviewResult(
         request.generation,

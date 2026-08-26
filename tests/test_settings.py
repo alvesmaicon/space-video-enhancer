@@ -78,3 +78,14 @@ def test_filter_presets_match_by_equality() -> None:
     assert balanced == dataclasses.replace(balanced)
     assert balanced.denoise_mode is DenoiseMode.MANUAL
     assert balanced != FilterSettings()
+
+
+def test_render_settings_output_size_follows_scale_rotation_and_crop() -> None:
+    assert RenderSettings().output_size(1920, 1080) == (1920, 1080)
+    scaled = RenderSettings(filters=FilterSettings(scale_factor=1.5))
+    assert scaled.output_size(1280, 720) == (1920, 1080)
+    rotated = RenderSettings(geometry=GeometrySettings(rotation=RotationMode.CW_90))
+    assert rotated.output_size(1920, 1080) == (1080, 1920)
+    cropped = RenderSettings(crop=CropSettings(enabled=True, rect=NormalizedRect(0.25, 0.0, 0.5, 1.0)))
+    assert cropped.output_size(1920, 1080) == (960, 1080)
+    assert RenderSettings(crop=CropSettings(enabled=False)).output_size(640, 480) == (640, 480)

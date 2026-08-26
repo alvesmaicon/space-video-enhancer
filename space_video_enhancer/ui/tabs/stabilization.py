@@ -17,6 +17,7 @@ from space_video_enhancer.ui.tabs.base import (
     enum_combo,
     form_rows,
     group_box,
+    select_combo_data,
     set_checked_silently,
 )
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
@@ -121,6 +122,28 @@ class StabilizationTab(TabPage):
             auto_crop=self.auto_crop_checkbox.isChecked(),
             zoom_out=self.zoom_out_checkbox.isChecked(),
         )
+
+    def apply(self, settings: StabilizationSettings) -> None:
+        """Show another clip's stabilization without emitting ``modeChanged``/``controlChanged``."""
+        widgets = (
+            self.mode_combo,
+            self.intensity_slider,
+            self.smoothing_slider,
+            self.auto_crop_checkbox,
+            self.zoom_out_checkbox,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            select_combo_data(self.mode_combo, settings.mode.value)
+            self.intensity_slider.slider.setValue(round(settings.intensity * 100))
+            self.smoothing_slider.slider.setValue(round(settings.temporal_smoothing * 100))
+            set_checked_silently(self.zoom_out_checkbox, settings.zoom_out)
+            set_checked_silently(self.auto_crop_checkbox, settings.auto_crop and not settings.zoom_out)
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+        self._update_hint()
 
     def update_controls_state(self, has_video: bool) -> None:
         """Enable only what the current mode uses."""

@@ -63,6 +63,8 @@ class Clip:
     settings: RenderSettings = field(default_factory=RenderSettings)
     stabilization_reference_frame: int | None = None
     """Source frame the camera-lock reference was taken from; the export decodes it."""
+    exposure_reference_frame: int | None = None
+    """Source frame the exposure-lock reference (``settings.exposure.reference``) was metered on."""
 
     def __post_init__(self) -> None:
         trimmed = as_range(self.range).clamped(self.source.full_range)
@@ -108,6 +110,13 @@ class Clip:
 
     def with_reference(self, source_frame: int | None) -> Clip:
         return replace(self, stabilization_reference_frame=source_frame)
+
+    def with_exposure_reference(self, source_frame: int | None) -> Clip:
+        return replace(self, exposure_reference_frame=source_frame)
+
+    @property
+    def name(self) -> str:
+        return self.source.path.name
 
     def split_at(self, source_frame: int) -> tuple[Clip, Clip] | None:
         """Two clips — up to ``source_frame - 1`` and from ``source_frame`` on — or ``None`` at the edges."""
@@ -298,6 +307,24 @@ class Sequence:
 
     def with_clip_settings(self, index: int, settings: RenderSettings) -> Sequence:
         return self.replace_clip(index, self.clips[index].with_settings(settings))
+
+    def without_empty_clips(self) -> Sequence:
+        """Drop clips whose cuts remove every frame (they contribute nothing to the export)."""
+        return Sequence(tuple(clip for clip in self.clips if clip.export_count > 0))
+
+    def for_export(self, start: int | None = None, end: int | None = None) -> Sequence:
+        """What leaves the app: the timeline outside ``[start, end]`` becomes cuts, empty clips are dropped."""
+        if not self.clips:
+            return self
+        last = self.last_timeline_frame
+        first = 0 if start is None else max(0, min(start, last))
+        final = last if end is None else max(first, min(end, last))
+        outside: list[FrameRange] = []
+        if first > 0:
+            outside.append(FrameRange(0, first - 1))
+        if final < last:
+            outside.append(FrameRange(final + 1, last))
+        return self.with_timeline_cuts([*self.timeline_cuts(), *outside]).without_empty_clips()
 
     def split(self, timeline_frame: int) -> Sequence | None:
         """Split the clip under ``timeline_frame`` so that frame starts the right half; ``None`` at clip edges."""

@@ -15,8 +15,10 @@ from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.pipeline import denoise as denoise_module
 from space_video_enhancer.pipeline import filters as filters_module
-from space_video_enhancer.settings import DenoiseMode
+from space_video_enhancer.pipeline.preview import PreviewRequest
+from space_video_enhancer.settings import DenoiseMode, RenderSettings
 from space_video_enhancer.ui.main_window import MainWindow
+from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from space_video_enhancer.ui.tabs.filters import FiltersTab
 from space_video_enhancer.video import VideoSource
@@ -91,3 +93,25 @@ def test_thumbnails_are_requested_in_device_pixels(app: QApplication) -> None:
     pixmap = tab.buttons["original"].icon().pixmap(QSize(152, 86), 2.0)
     assert pixmap.devicePixelRatio() == pytest.approx(2.0)
     assert pixmap.size() == QSize(304, 172)
+
+
+def test_preview_worker_decodes_from_the_requested_source(app: QApplication, ui_video: Path, ui_video_b: Path) -> None:
+    controller = PreviewController(None)
+    results: list[PreviewImages] = []
+    controller.previewReady.connect(results.append)
+    first, second = VideoSource(ui_video), VideoSource(ui_video_b)
+    try:
+        controller.set_videos((first, second))
+        for generation, path in ((1, ui_video_b), (2, ui_video)):
+            controller.submit_preview(
+                PreviewRequest(generation, None, 2, RenderSettings(), None, None, 0, source_path=path)
+            )
+            wait_until(app, lambda expected=generation: len(results) >= expected, what="preview")
+        assert results[0].source.shape[:2] == (180, 240) and results[0].source_path == ui_video_b
+        assert results[1].source.shape[:2] == (180, 320) and results[1].source_path == ui_video
+        controller.set_videos((second,))
+        wait_until(app, lambda: not first._capture.isOpened(), what="dropped decoder released on the worker")
+        assert second._capture.isOpened() and controller.videos == (second,)
+    finally:
+        controller.stop()
+    assert not second._capture.isOpened()

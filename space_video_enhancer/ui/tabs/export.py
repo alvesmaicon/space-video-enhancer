@@ -1,4 +1,4 @@
-"""Tab "Exportar": output scale, worker threads, the clip range and the cuts removed inside it."""
+"""Tab "Exportar": the sequence of clips, output scale, worker threads, the export range and the cuts."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ SCALE_OPTIONS: list[tuple[str, float]] = [
     ("2.0x", 2.0),
 ]
 CUT_LIST_MAX_HEIGHT = 110
+CLIP_LIST_MAX_HEIGHT = 96
 
 
 def default_thread_count() -> int:
@@ -48,9 +49,39 @@ class ExportTab(TabPage):
     """Double-click on a cut: jump to it."""
     cutSelectionChanged = Signal(int)
     """Selected row (``-1`` for none), so the timeline highlights the same cut."""
+    clipAddRequested = Signal()
+    clipRemoveRequested = Signal(int)
+    clipMoveRequested = Signal(int, int)
+    """``(index, new_index)``."""
+    clipSplitRequested = Signal()
+    """Split the clip under the playhead there."""
+    clipActivated = Signal(int)
+    """The user picked a clip in the list: the playhead goes to it (which makes it the active clip)."""
 
     def __init__(self) -> None:
         super().__init__()
+        self.clip_list = QListWidget()
+        self.clip_list.setObjectName("clipList")
+        self.clip_list.setMaximumHeight(CLIP_LIST_MAX_HEIGHT)
+        self.clip_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.clip_list.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.add_clip_button = QPushButton("Adicionar vídeo…")
+        self.add_clip_button.setToolTip("Acrescenta outro arquivo ao fim da sequência (mesmo fps)")
+        self.split_clip_button = QPushButton("Dividir no playhead")
+        self.split_clip_button.setToolTip("Divide o clipe no frame atual: cada metade passa a ter ajustes próprios")
+        self.remove_clip_button = QPushButton("Remover clipe")
+        self.move_clip_up_button = QPushButton("↑")
+        self.move_clip_down_button = QPushButton("↓")
+        for button in (
+            self.split_clip_button,
+            self.remove_clip_button,
+            self.move_clip_up_button,
+            self.move_clip_down_button,
+        ):
+            button.setObjectName("secondaryButton")
+        self.sequence_label = QLabel()
+        self.sequence_label.setObjectName("hintLabel")
+        self.sequence_label.setWordWrap(True)
         self.scale_combo = QComboBox()
         for label, factor in SCALE_OPTIONS:
             self.scale_combo.addItem(label, factor)
@@ -93,6 +124,13 @@ class ExportTab(TabPage):
         self.cuts_label.setObjectName("hintLabel")
         self.cuts_label.setWordWrap(True)
 
+        self.add_clip_button.clicked.connect(self.clipAddRequested.emit)
+        self.split_clip_button.clicked.connect(self.clipSplitRequested.emit)
+        self.remove_clip_button.clicked.connect(self._emit_remove_clip)
+        self.move_clip_up_button.clicked.connect(lambda: self._emit_move_clip(-1))
+        self.move_clip_down_button.clicked.connect(lambda: self._emit_move_clip(1))
+        self.clip_list.itemClicked.connect(lambda item: self.clipActivated.emit(self.clip_list.row(item)))
+        self.clip_list.itemSelectionChanged.connect(self._update_clip_buttons)
         self.scale_combo.currentIndexChanged.connect(lambda _index: self.scaleChanged.emit())
         self.mark_start_button.clicked.connect(self.markStartRequested.emit)
         self.mark_end_button.clicked.connect(self.markEndRequested.emit)
@@ -105,6 +143,17 @@ class ExportTab(TabPage):
         self.cut_list.itemDoubleClicked.connect(lambda item: self.cutActivated.emit(self.cut_list.row(item)))
         self.cut_list.itemSelectionChanged.connect(self._update_cut_buttons)
         self.cut_list.itemSelectionChanged.connect(lambda: self.cutSelectionChanged.emit(self.selected_cut()))
+
+        clip_buttons = QHBoxLayout()
+        clip_buttons.setSpacing(10)
+        clip_buttons.addWidget(self.add_clip_button)
+        clip_buttons.addWidget(self.split_clip_button)
+        clip_order = QHBoxLayout()
+        clip_order.setSpacing(10)
+        clip_order.addWidget(self.remove_clip_button)
+        clip_order.addWidget(self.move_clip_up_button)
+        clip_order.addWidget(self.move_clip_down_button)
+        clip_order.addStretch(1)
 
         range_buttons = QHBoxLayout()
         range_buttons.setSpacing(10)
@@ -124,6 +173,7 @@ class ExportTab(TabPage):
         typed_cut.addWidget(self.add_cut_button)
 
         self.add_sections(
+            group_box("Sequência de clipes", clip_buttons, self.clip_list, clip_order, self.sequence_label, spacing=10),
             group_box(
                 "Processamento",
                 form_rows(("Escala de saída", self.scale_combo), ("Threads", self.thread_combo)),
@@ -140,6 +190,65 @@ class ExportTab(TabPage):
         )
         self.set_cuts([])
         self.set_pending_cut(False)
+        self.set_clips([], -1)
+
+    # --- sequence ---------------------------------------------------------------------------
+    def set_clips(self, items: list[str], active: int) -> None:
+        """Replace the clip list; ``active`` (the clip under the playhead) is the selected row."""
+        self.clip_list.blockSignals(True)
+        try:
+            self.clip_list.clear()
+            for text in items:
+                self.clip_list.addItem(QListWidgetItem(text))
+            if 0 <= active < len(items):
+                self.clip_list.setCurrentRow(active)
+        finally:
+            self.clip_list.blockSignals(False)
+        self.sequence_label.setText(
+            "Abra um vídeo e use “Adicionar vídeo…” para juntar outros arquivos na mesma linha do tempo. "
+            "Os ajustes das outras abas valem para o clipe sob o playhead."
+            if len(items) <= 1
+            else "Os ajustes das abas valem para o clipe sob o playhead (destacado na linha do tempo). "
+            "Clique em um clipe para ir até ele; a exportação junta todos na ordem da lista."
+        )
+        self._update_clip_buttons()
+
+    def select_clip(self, index: int) -> None:
+        """Mirror the active clip without emitting ``clipActivated``."""
+        if index == self.selected_clip():
+            return
+        self.clip_list.blockSignals(True)
+        try:
+            if 0 <= index < self.clip_list.count():
+                self.clip_list.setCurrentRow(index)
+            else:
+                self.clip_list.clearSelection()
+                self.clip_list.setCurrentRow(-1)
+        finally:
+            self.clip_list.blockSignals(False)
+        self._update_clip_buttons()
+
+    def selected_clip(self) -> int:
+        return self.clip_list.currentRow() if self.clip_list.selectedItems() else -1
+
+    def _emit_remove_clip(self) -> None:
+        index = self.selected_clip()
+        if index >= 0:
+            self.clipRemoveRequested.emit(index)
+
+    def _emit_move_clip(self, step: int) -> None:
+        index = self.selected_clip()
+        if index >= 0 and 0 <= index + step < self.clip_list.count():
+            self.clipMoveRequested.emit(index, index + step)
+
+    def _update_clip_buttons(self) -> None:
+        enabled = self.add_clip_button.isEnabled()
+        count = self.clip_list.count()
+        index = self.selected_clip()
+        self.split_clip_button.setEnabled(enabled and count > 0)
+        self.remove_clip_button.setEnabled(enabled and count > 1 and index >= 0)
+        self.move_clip_up_button.setEnabled(enabled and index > 0)
+        self.move_clip_down_button.setEnabled(enabled and 0 <= index < count - 1)
 
     def scale_factor(self) -> float:
         return float(self.scale_combo.currentData() or 1.0)
@@ -221,6 +330,7 @@ class ExportTab(TabPage):
 
     def set_controls_enabled(self, enabled: bool) -> None:
         for widget in (
+            self.add_clip_button,
             self.scale_combo,
             self.thread_combo,
             self.mark_start_button,
@@ -233,3 +343,4 @@ class ExportTab(TabPage):
         ):
             widget.setEnabled(enabled)
         self._update_cut_buttons()
+        self._update_clip_buttons()
