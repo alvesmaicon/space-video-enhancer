@@ -81,6 +81,7 @@ def test_playback_jumps_over_the_cuts(app: QApplication, window: MainWindow, ui_
     wait_for_preview(app, window)
     window._toggle_playback()
     assert window.playback_timer.isActive()
+    window._playback_anchor_time -= 1 / UI_VIDEO_FPS + 0.001  # one frame of wall-clock time went by
     window._advance_playback_frame()
     assert window.transport.value() == 7  # 2..6 skipped
     window._stop_playback()

@@ -59,6 +59,8 @@ class TransportBar(QWidget):
     cutToggleRequested = Signal()
     clipSplitRequested = Signal()
     clipRemoveRequested = Signal(int)
+    soundToggled = Signal(bool)
+    """The speaker button: ``True`` = play sound with the preview."""
     thumbnailsRequested = Signal(object, int, float)
     """Filmstrip cells missing from the timeline view: ``(frames, height_device_px, device_pixel_ratio)``."""
 
@@ -83,9 +85,15 @@ class TransportBar(QWidget):
         self.zoom_in_button = QToolButton()
         self.zoom_in_button.setText("+")
         self.zoom_in_button.setToolTip("Aumentar zoom da linha do tempo (Ctrl+roda do mouse ou pinça)")
-        for zoom_button in (self.zoom_out_button, self.zoom_fit_button, self.zoom_in_button):
+        self.sound_button = QToolButton()
+        self.sound_button.setText("Som")
+        self.sound_button.setCheckable(True)
+        self.sound_button.setChecked(True)
+        self.sound_button.setToolTip("Tocar o áudio dos clipes durante a reprodução do preview")
+        for zoom_button in (self.zoom_out_button, self.zoom_fit_button, self.zoom_in_button, self.sound_button):
             zoom_button.setObjectName("previewZoomButton")
             zoom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.sound_button.toggled.connect(self.soundToggled.emit)
 
         self._play_icon = glyph_icon("play", ON_PRIMARY_COLOR)
         self._pause_icon = glyph_icon("pause", ON_PRIMARY_COLOR)
@@ -137,6 +145,8 @@ class TransportBar(QWidget):
         header_row.addWidget(self.zoom_out_button)
         header_row.addWidget(self.zoom_fit_button)
         header_row.addWidget(self.zoom_in_button)
+        header_row.addSpacing(12)
+        header_row.addWidget(self.sound_button)
         header_row.addStretch(1)
         header_row.addWidget(self.frame_label)
         button_row = QHBoxLayout()
@@ -219,6 +229,18 @@ class TransportBar(QWidget):
         self.zoom_in_button.setEnabled(loaded and not self.timeline.is_max_zoom())
         self.zoom_out_button.setEnabled(loaded and not self.timeline.is_fit())
         self.zoom_fit_button.setEnabled(loaded and not self.timeline.is_fit())
+
+    def set_sound_available(self, available: bool) -> None:
+        """Without an output device the speaker button is off and disabled (the tooltip says why)."""
+        self.sound_button.setEnabled(available)
+        if not available:
+            self.sound_button.setChecked(False)
+            self.sound_button.setToolTip("Sem dispositivo de áudio: a reprodução segue sem som")
+        else:
+            self.sound_button.setToolTip("Tocar o áudio dos clipes durante a reprodução do preview")
+
+    def sound_enabled(self) -> bool:
+        return self.sound_button.isChecked()
 
     def set_playing(self, playing: bool) -> None:
         self.play_button.setIcon(self._pause_icon if playing else self._play_icon)

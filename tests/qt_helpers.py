@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("SVE_PREVIEW_AUDIO", "0")  # never play sound from the test-suite
 
 from PySide6.QtWidgets import QApplication
 

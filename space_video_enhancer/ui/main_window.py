@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from space_video_enhancer.audio import AudioPeaks
+from space_video_enhancer.audio import PREVIEW_SAMPLE_RATE, AudioPeaks
 from space_video_enhancer.export.ffmpeg import FfmpegProbe, find_ffmpeg, resolve_encoder
 from space_video_enhancer.export.job import ExportRequest, ExportResult
 from space_video_enhancer.export.worker import ExportController
@@ -73,6 +73,12 @@ from space_video_enhancer.telemetry.diff import diff as diff_settings
 from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
 from space_video_enhancer.telemetry.stats import RollingStats
 from space_video_enhancer.timeline import FrameRange, frame_count, kept_segments, next_kept_frame
+from space_video_enhancer.ui.audio_preview import (
+    MAX_PREVIEW_AUDIO_SECONDS,
+    AudioPiece,
+    PcmController,
+    PreviewAudioPlayer,
+)
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.format import format_duration, format_timecode, parse_timecode
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
@@ -95,8 +101,10 @@ from space_video_enhancer.video import VideoOpenError, VideoSource
 LOG = get_logger("ui")
 
 DEFAULT_WINDOW_SIZE = QSize(1280, 800)
-PREVIEW_MAX_FPS = 12.0
-PREVIEW_MIN_INTERVAL_MS = 40
+PLAYBACK_TICK_MAX_HZ = 30.0
+"""Playback consults the clock at most this often; the frame shown is whatever the elapsed time calls for."""
+PLAYBACK_SPEED_OPTIONS: list[tuple[str, float]] = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25)]
+"""Playhead speed relative to real time; the sound is stretched to match (pitch kept)."""
 THUMBNAIL_REFRESH_DELAY_MS = 140
 PREVIEW_SIZE_LIMIT = {PreviewRenderMode.FAST: 960, PreviewRenderMode.BALANCED: 1280}
 INTERACTIVE_DENOISE_SIZE_LIMIT = 640
@@ -114,7 +122,6 @@ PREVIEW_RENDER_MODE_OPTIONS: list[tuple[str, PreviewRenderMode]] = [
     ("Balanceado", PreviewRenderMode.BALANCED),
     ("Rápido", PreviewRenderMode.FAST),
 ]
-PREVIEW_FRAME_SKIP_OPTIONS = [("Sem pulo", 0), ("Pular 1", 1), ("Pular 2", 2), ("Pular 3", 3)]
 VIDEO_FILE_FILTER = "Vídeos (*.mp4 *.mov *.mkv *.avi *.m4v)"
 
 
@@ -188,6 +195,18 @@ class MainWindow(QMainWindow):
         self._playback_stabilization: Counter[str] = Counter()
         self._playback_last_frame_at: float | None = None
         self._playback_video_counters = (0, 0)
+        # Playback follows the wall clock: the playhead is the kept frame the elapsed time calls for.
+        self._playback_kept: np.ndarray = np.zeros(0, dtype=np.int64)
+        """Timeline frames still to play, cuts removed, from the anchor on."""
+        self._playback_anchor_time = 0.0
+        self._playback_anchor_index = 0
+        self._playback_seeking = False
+        self._playback_audio_samples = 0
+        self._audio_player = PreviewAudioPlayer(parent=self)
+        self._pcm_loader = PcmController(self)
+        self._pcm_loader.pcmReady.connect(self._on_pcm_ready)
+        self._pcm_requested: set[tuple[Path, float]] = set()
+        self._audio_warned = False
         # Decode metrics arrive with each render result; the GUI never touches the decoder itself.
         self._decoded_frame_index = 0
         """Source frame of ``current_frame`` (in ``_decoded_source``), for reference captures."""
@@ -270,10 +289,12 @@ class MainWindow(QMainWindow):
             button.setObjectName("previewZoomButton")
         self.preview_render_mode_combo = enum_combo(PREVIEW_RENDER_MODE_OPTIONS)
         self.preview_render_mode_combo.setToolTip("Troca qualidade por velocidade apenas no preview")
-        self.preview_frame_skip_combo = QComboBox()
-        for label, skip_count in PREVIEW_FRAME_SKIP_OPTIONS:
-            self.preview_frame_skip_combo.addItem(label, skip_count)
-        self.preview_frame_skip_combo.setToolTip("Pula frames apenas na reprodução do preview para ficar mais leve")
+        self.preview_speed_combo = QComboBox()
+        for label, speed in PLAYBACK_SPEED_OPTIONS:
+            self.preview_speed_combo.addItem(label, speed)
+        self.preview_speed_combo.setToolTip(
+            "Velocidade da reprodução do preview; o som acompanha (a câmera lenta mantém o tom)"
+        )
 
     def _create_actions(self) -> None:
         style = self.style()
@@ -421,8 +442,8 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Qualidade"))
         toolbar.addWidget(self.preview_render_mode_combo)
-        toolbar.addWidget(QLabel("Reprodução"))
-        toolbar.addWidget(self.preview_frame_skip_combo)
+        toolbar.addWidget(QLabel("Velocidade"))
+        toolbar.addWidget(self.preview_speed_combo)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -485,7 +506,8 @@ class MainWindow(QMainWindow):
         self.preview_zoom_in_button.clicked.connect(lambda: self._step_preview_zoom(1))
         self.preview_zoom_combo.currentIndexChanged.connect(self._handle_preview_zoom_changed)
         self.preview_render_mode_combo.currentIndexChanged.connect(self._handle_preview_render_mode_changed)
-        self.preview_frame_skip_combo.currentIndexChanged.connect(self._handle_preview_frame_skip_changed)
+        self.preview_speed_combo.currentIndexChanged.connect(self._handle_playback_speed_changed)
+        self.transport.soundToggled.connect(self._set_sound_enabled)
         self.status.cancelExportRequested.connect(self._request_export_cancel)
         self.status.revealExportRequested.connect(self._reveal_export)
 
@@ -721,6 +743,9 @@ class MainWindow(QMainWindow):
         self.sequence = ClipSequence.single(source, settings=self._fresh_clip_settings(source))
         self._reference_frames.clear()
         self._waveforms_requested.clear()
+        self._pcm_requested.clear()
+        self._audio_player.keep_only(())
+        self.transport.set_sound_available(self._audio_player.available)
         self.current_frame = None
         self._decoded_frame_index = 0
         self._decoded_source = None
@@ -859,6 +884,9 @@ class MainWindow(QMainWindow):
         self.transport.set_clips(self._clip_blocks())
         self._filmstrip.set_videos(self.sequence.source_paths)
         self._load_waveforms()
+        self._audio_player.keep_only(self.sequence.source_paths)
+        self._pcm_requested = {key for key in self._pcm_requested if key[0] in self.sequence.source_paths}
+        self._load_preview_audio()
         self._sync_active_clip(force=True)
         self.export_tab.set_clips(self._clip_items(), self.active_clip_index)
         self._update_timeline_markers()
@@ -1006,6 +1034,8 @@ class MainWindow(QMainWindow):
         self.current_frame_index = frame_index
         self.transport.set_position(frame_index)
         self._sync_active_clip()
+        if playing and not self._playback_seeking:
+            self._start_playback_clock(frame_index)  # the user seeked while playing: video and sound restart here
         self._schedule_preview_refresh(immediate=True, reason="playback" if playing else "scrub")
 
     def _go_to_first_frame(self) -> None:
@@ -1061,20 +1091,52 @@ class MainWindow(QMainWindow):
         self._playback_stabilization = Counter()
         self._playback_last_frame_at = None
         self._playback_video_counters = self._video_read_counters
+        self._start_playback_clock(current_frame)
         log_event(
             LOG,
             "playback.start",
             frame=current_frame,
             end_frame=self.playback_end_frame,
             interval_ms=self._playback_interval_ms(),
-            frame_skip=int(self.preview_frame_skip_combo.currentData() or 0),
+            speed=self._playback_speed(),
+            audio=self._audio_player.playing,
         )
         self.playback_timer.start(self._playback_interval_ms())
+
+    def _playback_speed(self) -> float:
+        return float(self.preview_speed_combo.currentData() or 1.0)
+
+    def _start_playback_clock(self, frame: int) -> None:
+        """Anchor the wall clock at ``frame``: from now on the playhead is a function of the elapsed time.
+
+        The kept frames up to the end of the range are laid out once, so cuts and clip boundaries
+        are crossed without a lookup per tick, and the sound is started over the same runs.
+        """
+        runs = self.sequence.playback_runs(frame, self.playback_end_frame)
+        spans = [np.arange(run.span.start, run.span.end + 1, dtype=np.int64) for run in runs]
+        self._playback_kept = np.concatenate(spans) if spans else np.zeros(0, dtype=np.int64)
+        self._playback_anchor_time = time.monotonic()
+        self._playback_anchor_index = 0
+        speed = self._playback_speed()
+        pieces = [AudioPiece(run.clip.source.path, *run.seconds) for run in runs]
+        started = self._audio_player.start(pieces, speed)
+        if not started and not self._audio_player.available and not self._audio_warned:
+            self._audio_warned = True
+            self.status.show_message("Sem dispositivo de áudio: a reprodução segue sem som.")
+
+    def _set_playback_frame(self, frame: int) -> None:
+        self._playback_seeking = True
+        try:
+            self.transport.set_value(frame)
+        finally:
+            self._playback_seeking = False
 
     def _stop_playback(self) -> None:
         was_active = self.playback_timer.isActive()
         if was_active:
             self.playback_timer.stop()
+        self._playback_audio_samples = self._audio_player.samples_written
+        self._audio_player.stop()
         self.transport.set_playing(False)
         if was_active:
             self._log_playback_stop()
@@ -1093,6 +1155,8 @@ class MainWindow(QMainWindow):
             "seeks": seeks_now - seeks_before,
             "sequential_reads": sequential_now - sequential_before,
             "decode_ms": self._decode_stats.summary(),
+            "speed": self._playback_speed(),
+            "audio_seconds": round(self._playback_audio_samples / PREVIEW_SAMPLE_RATE, 2),
         }
         if self._playback_stabilization:
             fields["stabilization"] = dict(self._playback_stabilization)
@@ -1101,20 +1165,61 @@ class MainWindow(QMainWindow):
         self._playback_started_at = None
 
     def _advance_playback_frame(self) -> None:
-        if self.transport.value() >= self.playback_end_frame:
+        """Show the kept frame the elapsed time calls for (frames the render cannot keep up with are skipped)."""
+        elapsed = time.monotonic() - self._playback_anchor_time
+        index = self._playback_anchor_index + int(elapsed * self.fps * self._playback_speed())
+        if index >= len(self._playback_kept):
+            if len(self._playback_kept) and self.transport.value() != int(self._playback_kept[-1]):
+                self._set_playback_frame(int(self._playback_kept[-1]))
             self._stop_playback()
             return
-        frame_step = 1 + int(self.preview_frame_skip_combo.currentData() or 0)
-        next_frame = min(self.playback_end_frame, self.transport.value() + frame_step)
-        kept = next_kept_frame(next_frame, self.cuts, self.playback_end_frame)  # jump over removed ranges
-        if kept is None:
-            self._stop_playback()
-            return
-        self.transport.set_value(kept)
+        frame = int(self._playback_kept[index])
+        if frame != self.transport.value():
+            self._set_playback_frame(frame)
 
     def _playback_interval_ms(self) -> int:
-        preview_fps = min(max(self.fps, 1.0), PREVIEW_MAX_FPS)
-        return max(PREVIEW_MIN_INTERVAL_MS, int(1000 / preview_fps))
+        rate = max(1.0, self.fps * self._playback_speed())
+        return max(int(1000 / PLAYBACK_TICK_MAX_HZ), int(1000 / rate))
+
+    # --- sound -----------------------------------------------------------------------------
+    def _load_preview_audio(self) -> None:
+        """Decode (once per file and speed) the PCM the player needs for the current speed."""
+        if self.sequence.is_empty or not self._audio_player.available:
+            return
+        ffmpeg_path = find_ffmpeg()
+        if ffmpeg_path is None:
+            return
+        speed = self._playback_speed()
+        for clip in self.sequence.clips:
+            key = (clip.source.path, speed)
+            if key in self._pcm_requested:
+                continue
+            self._pcm_requested.add(key)
+            seconds = clip.source.frame_count / self.fps
+            if seconds > MAX_PREVIEW_AUDIO_SECONDS:
+                self._audio_player.set_pcm(clip.source.path, speed, None)
+                log_event(LOG, "audio.preview_skipped", name=clip.name, seconds=round(seconds, 1))
+                self.status.show_message(f"{clip.name} é longo demais para o som do preview; a reprodução segue muda.")
+                continue
+            self._pcm_loader.load(clip.source.path, ffmpeg_path, speed)
+
+    @Slot(object, float, object)
+    def _on_pcm_ready(self, path: Path, tempo: float, samples: np.ndarray | None) -> None:
+        if path in self.sequence.source_paths:  # the feeder reads the shared PCM table: a running playback picks it up
+            self._audio_player.set_pcm(path, tempo, samples)
+
+    def _handle_playback_speed_changed(self, _index: int) -> None:
+        log_event(LOG, "ui.playback_speed", speed=self._playback_speed())
+        self._load_preview_audio()
+        if self.playback_timer.isActive():
+            self._start_playback_clock(self.current_frame_index)
+            self.playback_timer.start(self._playback_interval_ms())
+
+    def _set_sound_enabled(self, enabled: bool) -> None:
+        self._audio_player.set_muted(not enabled)
+        log_event(LOG, "ui.sound", enabled=enabled)
+        if enabled and self.playback_timer.isActive():
+            self._start_playback_clock(self.current_frame_index)
 
     # --- clip range ------------------------------------------------------------------------
     def _mark_clip_start(self) -> None:
@@ -1358,10 +1463,6 @@ class MainWindow(QMainWindow):
         self._stabilization_epoch += 1
         log_event(LOG, "ui.render_mode", mode=self._preview_render_mode().value)
         self._schedule_preview_refresh(immediate=True, reason="mode")
-
-    def _handle_preview_frame_skip_changed(self, _index: int) -> None:
-        if self.playback_timer.isActive():
-            self.playback_timer.start(self._playback_interval_ms())
 
     def _preview_output_scale_factor(self, scale_factor: float) -> float:
         mode = self._preview_render_mode()
@@ -2174,6 +2275,8 @@ class MainWindow(QMainWindow):
             self._export_controller = None
         self._filmstrip.stop()
         self._waveform.stop()
+        self._audio_player.stop()
+        self._pcm_loader.stop()
         self._preview_controller.stop()  # also releases the decoders it owns
         self._sources.clear()
         super().closeEvent(event)

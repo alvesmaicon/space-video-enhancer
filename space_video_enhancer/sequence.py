@@ -151,6 +151,26 @@ class ExportSegment:
 
 
 @dataclass(frozen=True)
+class PlaybackRun:
+    """Kept frames between two timeline positions: where the run sits on the timeline and what it shows."""
+
+    clip_index: int
+    clip: Clip
+    span: FrameRange
+    """Timeline frames."""
+    frames: FrameRange
+    """Source frames of ``clip`` shown over ``span``."""
+
+    @property
+    def seconds(self) -> tuple[float, float]:
+        """Source time ``(start, end)``; ``end`` is exclusive."""
+        fps = self.clip.fps
+        if fps <= 0:
+            return (0.0, 0.0)
+        return (self.frames.start / fps, (self.frames.end + 1) / fps)
+
+
+@dataclass(frozen=True)
 class Sequence:
     clips: tuple[Clip, ...] = ()
 
@@ -264,6 +284,19 @@ class Sequence:
         return tuple(
             ExportSegment(index, clip, segment) for index, clip in enumerate(self.clips) for segment in clip.segments
         )
+
+    def playback_runs(self, start: int, end: int) -> tuple[PlaybackRun, ...]:
+        """The kept runs within timeline frames ``[start, end]``, in playback order (video and sound follow them)."""
+        window = FrameRange(min(start, end), max(start, end))
+        offsets = self.clip_offsets()
+        runs = []
+        for segment in self.export_segments():
+            offset = offsets[segment.clip_index] - segment.clip.range.start
+            span = FrameRange(segment.frames.start + offset, segment.frames.end + offset).clamped(window)
+            if span is not None:
+                frames = FrameRange(span.start - offset, span.end - offset)
+                runs.append(PlaybackRun(segment.clip_index, segment.clip, span, frames))
+        return tuple(runs)
 
     # --- editing ----------------------------------------------------------------------------
     def with_timeline_cuts(self, cuts: Iterable[RangeLike]) -> Sequence:
