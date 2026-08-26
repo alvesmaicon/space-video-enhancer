@@ -23,6 +23,7 @@ from PySide6.QtGui import QImage
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.preview import (
     FrameUnavailableError,
+    MotionOverlay,
     PreviewRequest,
     RenderMailbox,
     ThumbnailRequest,
@@ -56,6 +57,8 @@ class PreviewImages:
     video_sequential_reads: int
     source_path: Path | None = None
     """File ``frame_index`` belongs to (a sequence shows frames of several files)."""
+    motion: MotionOverlay | None = None
+    """Tracked motion vectors / lock points for the diagnostic overlay."""
 
 
 @dataclass(frozen=True)
@@ -202,6 +205,7 @@ class PreviewWorker(QObject):
                 result.video_seeks,
                 result.video_sequential_reads,
                 job.source_path if job.source_path is not None else (video.path if video is not None else None),
+                result.motion,
             )
         )
 

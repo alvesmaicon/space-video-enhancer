@@ -24,6 +24,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
 
+from space_video_enhancer.pipeline.preview import MotionOverlay
+
 HANDLE_SIZE = 10.0
 MIN_SELECTION_SIZE = 0.08
 IMAGE_MARGIN = 18
@@ -43,6 +45,12 @@ PILL_PADDING_X = 7
 PILL_PADDING_Y = 2
 DIM_COLOR = QColor(17, 24, 39, 120)
 HUD_BACKGROUND = QColor(17, 24, 39, 178)
+MOTION_INLIER_COLOR = QColor(45, 212, 191)
+MOTION_OUTLIER_COLOR = QColor(251, 146, 60)
+MOTION_LOCK_COLOR = QColor(74, 222, 128)
+MOTION_VECTOR_GAIN = 3.0
+"""Inter-frame vectors are a few pixels long; drawn this many times longer so the direction reads."""
+MOTION_POINT_RADIUS = 2.5
 HUD_TEXT_COLOR = QColor("#e5e7eb")
 HUD_PADDING = 8
 HUD_LINE_HEIGHT = 15
@@ -326,6 +334,7 @@ class ComparePreview(QWidget):
         self._smooth_transform_enabled = True
         self._hud_visible = False
         self._hud_lines: list[str] = []
+        self._motion: MotionOverlay | None = None
 
         self.crop = SelectionOverlay(CROP_STYLE, QRectF(0.1, 0.1, 0.8, 0.8), self.cropChanged.emit)
         self.sample = SelectionOverlay(SAMPLE_STYLE, QRectF(0.33, 0.33, 0.34, 0.34), self.sampleChanged.emit)
@@ -414,6 +423,14 @@ class ComparePreview(QWidget):
         self._hud_visible = visible
         self.update()
 
+    def set_motion_overlay(self, motion: MotionOverlay | None) -> None:
+        """Tracked motion vectors (or lock points) drawn over the "Antes" side; ``None`` hides them."""
+        self._motion = motion
+        self.update()
+
+    def motion_overlay(self) -> MotionOverlay | None:
+        return self._motion
+
     def set_hud_lines(self, lines: list[str]) -> None:
         self._hud_lines = list(lines)
         if self._hud_visible:
@@ -474,6 +491,8 @@ class ComparePreview(QWidget):
             )
         )
         painter.drawImage(self._image_rect, self._before)
+        if self._motion is not None:
+            self._draw_motion(painter, self._image_rect)
         painter.restore()
 
         painter.setPen(QPen(SPLIT_LINE_COLOR, 3))
@@ -569,6 +588,44 @@ class ComparePreview(QWidget):
         ratio = (mouse_x - self._image_rect.left()) / self._image_rect.width()
         self._split_ratio = min(1.0, max(0.0, ratio))
         self.update()
+
+    def _draw_motion(self, painter: QPainter, image_rect: QRectF) -> None:
+        """Vectors from where a point was to where it went (camera inliers teal, others orange); lock points green."""
+        motion = self._motion
+        if motion is None or motion.count == 0:
+            return
+        left, top = image_rect.left(), image_rect.top()
+        width, height = image_rect.width(), image_rect.height()
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if motion.kind == "lock":
+            painter.setPen(QPen(MOTION_LOCK_COLOR, 1.5))
+            painter.setBrush(MOTION_LOCK_COLOR)
+            for x, y in motion.current:
+                painter.drawEllipse(
+                    QPointF(left + x * width, top + y * height), MOTION_POINT_RADIUS, MOTION_POINT_RADIUS
+                )
+        else:
+            for start, end, inlier in zip(motion.previous, motion.current, motion.inliers):
+                color = MOTION_INLIER_COLOR if inlier else MOTION_OUTLIER_COLOR
+                tail = QPointF(left + start[0] * width, top + start[1] * height)
+                head = QPointF(
+                    left + (start[0] + (end[0] - start[0]) * MOTION_VECTOR_GAIN) * width,
+                    top + (start[1] + (end[1] - start[1]) * MOTION_VECTOR_GAIN) * height,
+                )
+                painter.setPen(QPen(color, 1.5))
+                painter.drawLine(tail, head)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(color)
+                painter.drawEllipse(head, MOTION_POINT_RADIUS, MOTION_POINT_RADIUS)
+        painter.restore()
+        label = (
+            f"lock: {motion.count} pontos"
+            if motion.kind == "lock"
+            else f"vetores: {motion.inlier_count} câmera · {motion.count - motion.inlier_count} outros"
+        )
+        below_caption = image_rect.top() + 10 + pill_size(painter, "Antes").height() + 6  # the HUD owns the bottom
+        draw_pill(painter, QPointF(left + 10, below_caption), label, HUD_BACKGROUND)
 
     def _draw_hud(self, painter: QPainter) -> None:
         """Metrics box (render/decode timings, queue, backend) in the bottom-left corner of the image."""

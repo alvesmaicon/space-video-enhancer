@@ -18,10 +18,10 @@ import cv2
 import numpy as np
 
 from space_video_enhancer.pipeline.filters import OpenCLBackend
-from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect
+from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect, normalized_through_geometry
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
-from space_video_enhancer.settings import ImageFilterSelection, RenderSettings
+from space_video_enhancer.settings import GeometrySettings, ImageFilterSelection, RenderSettings, StabilizationSettings
 from space_video_enhancer.telemetry.trace import RenderTrace
 from space_video_enhancer.video import VideoSource
 
@@ -55,6 +55,50 @@ class PreviewRequest:
 
 
 @dataclass(frozen=True)
+class MotionOverlay:
+    """What the stabilizer tracked on this frame, in normalized coordinates of the displayed ("Antes") frame.
+
+    ``kind`` is ``"flow"`` for inter-frame vectors (previous -> current; ``inliers`` marks the ones the
+    camera hypothesis kept) or ``"lock"`` for the camera lock's tracked points (``previous == current``).
+    """
+
+    previous: np.ndarray
+    current: np.ndarray
+    inliers: np.ndarray
+    kind: str
+
+    @property
+    def count(self) -> int:
+        return len(self.current)
+
+    @property
+    def inlier_count(self) -> int:
+        return int(np.count_nonzero(self.inliers))
+
+
+def motion_overlay(
+    state: StabilizationState | None, settings: StabilizationSettings, geometry: GeometrySettings
+) -> MotionOverlay | None:
+    """Overlay of the last estimate held by ``state``; ``None`` when nothing was tracked or stabilization is off."""
+    if state is None or not settings.enabled:
+        return None
+    vectors = state.last_vectors
+    if vectors is not None and settings.mode.uses_auto_motion:
+        width, height = vectors.size
+        scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
+        previous = normalized_through_geometry(vectors.previous * scale, geometry)
+        current = normalized_through_geometry(vectors.current * scale, geometry)
+        return MotionOverlay(previous, current, vectors.inliers.astype(bool), "flow")
+    track = state.lock
+    if track is not None and settings.mode.uses_focal_point:
+        height, width = track.prev_gray.shape[:2]
+        scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
+        current = normalized_through_geometry(track.current_points * scale, geometry)
+        return MotionOverlay(current, current, np.ones(len(current), dtype=bool), "lock")
+    return None
+
+
+@dataclass(frozen=True)
 class PreviewResult:
     generation: int
     frame_index: int
@@ -72,6 +116,8 @@ class PreviewResult:
     video_seeks: int = 0
     video_sequential_reads: int = 0
     """Decoder counters after this read, so the UI can report them without touching the decoder."""
+    motion: MotionOverlay | None = None
+    """What the stabilizer tracked on this frame (for the diagnostic overlay)."""
 
 
 @dataclass(frozen=True)
@@ -171,6 +217,7 @@ def render_preview(
         decode_sequential,
         seeks,
         sequential_reads,
+        motion_overlay(state, request.settings.stabilization, request.settings.geometry),
     )
 
 

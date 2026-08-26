@@ -31,6 +31,24 @@ def apply_geometry(frame: np.ndarray, geometry: GeometrySettings) -> np.ndarray:
     return transformed
 
 
+def normalized_through_geometry(points: np.ndarray, geometry: GeometrySettings) -> np.ndarray:
+    """Normalized ``(N, 2)`` source coordinates -> where they land in the displayed (rotated/flipped) frame."""
+    result = np.asarray(points, dtype=np.float64).reshape(-1, 2).copy()
+    x, y = result[:, 0].copy(), result[:, 1].copy()
+    if geometry.rotation is RotationMode.CW_90:
+        x, y = 1.0 - y, x
+    elif geometry.rotation is RotationMode.ROTATE_180:
+        x, y = 1.0 - x, 1.0 - y
+    elif geometry.rotation is RotationMode.CW_270:
+        x, y = y, 1.0 - x
+    if geometry.flip_horizontal:
+        x = 1.0 - x
+    if geometry.flip_vertical:
+        y = 1.0 - y
+    result[:, 0], result[:, 1] = x, y
+    return result
+
+
 def apply_crop(frame: np.ndarray, crop: CropSettings) -> np.ndarray:
     height, width = frame.shape[:2]
     pixels = crop.pixel_rect(width, height)

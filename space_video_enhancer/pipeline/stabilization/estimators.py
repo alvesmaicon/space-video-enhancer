@@ -162,9 +162,9 @@ def translation_from_gray(
 ) -> tuple[float, float] | None:
     """Global translation (full-res pixels) that moves ``current_gray`` back onto ``previous_gray``."""
     motion = estimate_global_motion(previous_gray, current_gray, StabilizationMode.AUTO, _memory_of(state))
+    if state is not None:
+        state.last_vectors = None if motion is None else motion.vectors
     if motion is not None:
-        if state is not None:
-            state.last_vectors = motion.vectors
         note("stabilization.estimator", "lk_translation")
         return (float(motion.transform[0, 2]) / scale, float(motion.transform[1, 2]) / scale)
 
@@ -271,11 +271,11 @@ def geometric_transform_from_gray(
 ) -> np.ndarray | None:
     """Similarity (or homography in perspective mode) aligning ``current_gray`` onto ``previous_gray``, full-res."""
     motion = estimate_global_motion(previous_gray, current_gray, mode, _memory_of(state))
+    if state is not None:
+        state.last_vectors = None if motion is None else motion.vectors
     if motion is None:
         note("stabilization.estimator", "none")
         return None
-    if state is not None:
-        state.last_vectors = motion.vectors
     note("stabilization.estimator", "lk_perspective" if mode is StabilizationMode.PERSPECTIVE else "lk_similarity")
     if transforms.is_affine(motion.transform):
         scaled = transforms.rescale_affine(motion.transform, scale)

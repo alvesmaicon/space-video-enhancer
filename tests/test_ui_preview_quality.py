@@ -10,7 +10,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from space_video_enhancer.settings import DenoiseMode
+from space_video_enhancer.settings import DenoiseMode, StabilizationMode
 from space_video_enhancer.ui.main_window import INTERACTIVE_DENOISE_SIZE_LIMIT, MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from tests.qt_helpers import wait_for_preview, wait_until
@@ -51,3 +51,19 @@ def test_scrubbing_without_denoise_keeps_the_full_size(app: QApplication, window
     wait_for_preview(app, window)
     assert window._last_preview is not None and window._last_preview.trace["preview.size_limit"] is None
     assert not window._idle_refresh_timer.isActive()
+
+
+def test_motion_vectors_overlay_follows_the_toggle(app: QApplication, window: MainWindow, ui_video: Path) -> None:
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.AUTO.value)
+    wait_for_preview(app, window)
+    window.transport.set_value(window.transport.value() + 1)  # a second consecutive frame: motion is estimated
+    wait_for_preview(app, window)
+    assert window._last_preview is not None and window._last_preview.motion is not None
+    assert window.preview.motion_overlay() is None, "hidden until asked for"
+    window.vectors_action.setChecked(True)
+    assert window.preview.motion_overlay() is not None and window.preview.motion_overlay().kind == "flow"
+    window.preview.grab()  # paints the vectors and their legend
+    window.vectors_action.setChecked(False)
+    assert window.preview.motion_overlay() is None

@@ -23,6 +23,8 @@ from space_video_enhancer.settings import (
     ImageFilterSelection,
     RenderSettings,
     RotationMode,
+    StabilizationMode,
+    StabilizationSettings,
 )
 from space_video_enhancer.video import VideoSource
 
@@ -122,3 +124,19 @@ def test_render_preview_letterboxes_to_the_canvas_aspect(textured_frame: np.ndar
     assert "letterbox" in result.trace.as_dict()["stages"]
     same = render_preview(_preview_request(frame, 2, canvas_aspect=4 / 3), None, None)
     assert same.after.shape[:2] == (270, 360)
+
+
+def test_render_preview_carries_the_stabilizer_motion_overlay(textured_frame: np.ndarray) -> None:
+    settings = RenderSettings(
+        stabilization=StabilizationSettings(mode=StabilizationMode.AUTO, temporal_smoothing=0.0, auto_crop=False)
+    )
+    state = StabilizationState()
+    previous = np.roll(textured_frame, (4, -6), axis=(0, 1))
+    first = render_preview(_preview_request(previous, 1, frame_index=1, settings=settings), state, None)
+    assert first.motion is None, "the first frame only primes the estimator"
+    second = render_preview(_preview_request(textured_frame, 2, frame_index=2, settings=settings), state, None)
+    assert second.motion is not None and second.motion.kind == "flow"
+    assert second.motion.inlier_count >= 6 and second.motion.inlier_count <= second.motion.count
+    assert np.all((second.motion.current >= -0.05) & (second.motion.current <= 1.05)), "normalized coordinates"
+    off = render_preview(_preview_request(textured_frame, 3, frame_index=3), state, None)
+    assert off.motion is None, "no overlay without stabilization"

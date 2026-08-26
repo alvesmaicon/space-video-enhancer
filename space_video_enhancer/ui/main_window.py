@@ -216,6 +216,7 @@ class MainWindow(QMainWindow):
         self._last_decode_sequential: bool | None = None
         self._video_read_counters = (0, 0)  # (seeks, sequential reads) after the latest decode
         self._hud_visible = False
+        self._vectors_visible = False
         self._ffmpeg_probe: FfmpegProbe | None = None
         self._export_controller: ExportController | None = None
         self._export_backend_label = ""
@@ -352,6 +353,14 @@ class MainWindow(QMainWindow):
         self.hud_action.setShortcut("Ctrl+M")
         self.hud_action.setToolTip("Mostrar métricas de render, fila e decode sobre o preview (Ctrl+M)")
         self.hud_action.toggled.connect(self._toggle_hud)
+        self.vectors_action = QAction("Vetores de movimento", self)
+        self.vectors_action.setCheckable(True)
+        self.vectors_action.setShortcut("Ctrl+Shift+M")
+        self.vectors_action.setToolTip(
+            "Mostrar sobre o lado “Antes” os pontos que a estabilização rastreou: em verde-azulado os que "
+            "definiram o movimento da câmera, em laranja os descartados (objeto em movimento) (Ctrl+Shift+M)"
+        )
+        self.vectors_action.toggled.connect(self._toggle_vectors)
         self.diagnostics_action = self._make_action("Diagnóstico do sistema…", self._show_diagnostics)
         self.open_logs_action = self._make_action("Abrir pasta de logs", self._open_log_folder)
         self.about_action = self._make_action("Sobre", self._show_about_dialog)
@@ -488,6 +497,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.zoom_out_action)
         view_menu.addSeparator()
         view_menu.addAction(self.hud_action)
+        view_menu.addAction(self.vectors_action)
 
         help_menu = menu_bar.addMenu("Ajuda")
         help_menu.addAction(self.diagnostics_action)
@@ -1594,6 +1604,7 @@ class MainWindow(QMainWindow):
             if "stabilization.result" in images.trace:
                 self._playback_stabilization[str(images.trace["stabilization.result"])] += 1
         self.preview.set_images(images.before, images.after)
+        self.preview.set_motion_overlay(images.motion if self._vectors_visible else None)
         if images.generation >= self._preview_generation:
             self.status.set_render_busy(False)
         self._update_denoise_info()
@@ -2291,6 +2302,12 @@ class MainWindow(QMainWindow):
         log_event(LOG, "ui.hud", visible=checked)
         self._update_hud()
 
+    def _toggle_vectors(self, checked: bool) -> None:
+        self._vectors_visible = checked
+        log_event(LOG, "ui.motion_vectors", visible=checked)
+        motion = self._last_preview.motion if self._last_preview is not None and checked else None
+        self.preview.set_motion_overlay(motion)
+
     def _playback_fps(self) -> float | None:
         if len(self._playback_intervals) < 2 or self._playback_intervals.mean <= 0:
             return None
@@ -2313,6 +2330,14 @@ class MainWindow(QMainWindow):
             lines.append(queue)
             if "stabilization.result" in trace:
                 detail = f"  inliers {trace['stabilization.inliers']}" if "stabilization.inliers" in trace else ""
+                hypotheses = trace.get("stabilization.hypotheses")
+                if isinstance(hypotheses, list) and hypotheses:
+                    chosen = trace.get("stabilization.chosen", 0)
+                    described = " ".join(
+                        f"{'[' if index == chosen else ''}{count}pts/{extent}cel{']' if index == chosen else ''}"
+                        for index, (count, extent) in enumerate(hypotheses)
+                    )
+                    detail += f"  hipóteses {described}"
                 lines.append(
                     f"estab {trace.get('stabilization.mode')} -> {trace.get('stabilization.estimator')} "
                     f"-> {trace['stabilization.result']}{detail}"

@@ -11,6 +11,7 @@ from space_video_enhancer.pipeline.geometry import (
     ensure_even_size,
     fit_to_aspect,
     fit_to_canvas,
+    normalized_through_geometry,
 )
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.settings import (
@@ -99,3 +100,23 @@ def test_fit_to_aspect_pads_without_scaling() -> None:
     assert tall.shape == (240, 240, 3) and tall[:30].max() == 0 and tall[30:210].min() == 200
     assert fit_to_aspect(frame, 4 / 3) is frame and fit_to_aspect(frame, None) is frame
     assert fit_to_aspect(frame, 4 / 3 * 1.005) is frame, "within the tolerance nothing is padded"
+
+
+def test_normalized_points_follow_the_geometry() -> None:
+    point = np.array([[0.25, 0.1]])  # top-left quadrant, near the top
+    identity = normalized_through_geometry(point, GeometrySettings())
+    assert identity.tolist() == [[0.25, 0.1]]
+    cw = normalized_through_geometry(point, GeometrySettings(rotation=RotationMode.CW_90))
+    assert cw[0].tolist() == pytest.approx([0.9, 0.25]), "a quarter turn clockwise sends the top edge to the right edge"
+    half = normalized_through_geometry(point, GeometrySettings(rotation=RotationMode.ROTATE_180))
+    assert half[0].tolist() == pytest.approx([0.75, 0.9])
+    ccw = normalized_through_geometry(point, GeometrySettings(rotation=RotationMode.CW_270))
+    assert ccw[0].tolist() == pytest.approx([0.1, 0.75])
+    mirrored = normalized_through_geometry(point, GeometrySettings(flip_horizontal=True, flip_vertical=True))
+    assert mirrored[0].tolist() == pytest.approx([0.75, 0.9])
+    # Consistency with the pixel operation: a bright pixel moves where the point says it does.
+    frame = np.zeros((100, 200, 3), np.uint8)
+    frame[10, 50] = 255  # (x=0.25, y=0.1) of a 200x100 frame
+    rotated = apply_geometry(frame, GeometrySettings(rotation=RotationMode.CW_90))
+    ys, xs = np.nonzero(rotated[..., 0])
+    assert (xs[0] / rotated.shape[1], ys[0] / rotated.shape[0]) == pytest.approx((0.89, 0.25), abs=0.01)
