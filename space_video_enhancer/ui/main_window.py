@@ -1664,18 +1664,23 @@ class MainWindow(QMainWindow):
         self._backend.reset()
 
         start_frame, end_frame = self._selected_frame_range()
-        request = ExportRequest(
-            source_path=self.video_path,
-            output_path=Path(output_path),
-            settings=self._current_render_settings(),
-            start_frame=start_frame,
-            end_frame=end_frame,
-            fps=self.fps,
-            worker_count=self.export_tab.worker_count(),
-            ffmpeg_path=ffmpeg_path,
-            encoder=encoder,
-            stabilization_reference=self.stabilization_reference_frame,
+        request = ExportRequest.single(
+            self.video_path,
+            Path(output_path),
+            self._current_render_settings(),
+            start_frame,
+            end_frame,
+            self.fps,
+            self.export_tab.worker_count(),
+            ffmpeg_path,
+            encoder,
             cuts=tuple(self.cuts),
+            stabilization_reference_frame=(
+                self.stabilization_reference_frame_index if self.stabilization_reference_frame is not None else None
+            ),
+            frame_count=self.frame_count,
+            width=self.source_size[0],
+            height=self.source_size[1],
         )
         self._export_backend_label = f"{self._backend.label} + {encoder.label}"
         self._export_output_path = Path(output_path)

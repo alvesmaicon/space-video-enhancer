@@ -16,6 +16,7 @@ from space_video_enhancer.export.ffmpeg import (
     LIBX264,
     NVENC,
     VAAPI,
+    AudioSegment,
     FfmpegProbe,
     audio_concat_filter,
     build_export_command,
@@ -23,6 +24,7 @@ from space_video_enhancer.export.ffmpeg import (
     source_has_audio,
 )
 from space_video_enhancer.export.job import ExportRequest, run_export
+from space_video_enhancer.sequence import Clip, ClipSource, Sequence
 from space_video_enhancer.settings import (
     CropSettings,
     FilterSettings,
@@ -31,6 +33,7 @@ from space_video_enhancer.settings import (
     RenderSettings,
     RotationMode,
 )
+from space_video_enhancer.timeline import FrameRange
 from tests.conftest import make_textured_frame
 
 FFMPEG = shutil.which("ffmpeg")
@@ -44,9 +47,8 @@ def _command(encoder, width: int = 64, height: int = 64) -> list[str]:  # type: 
         width=width,
         height=height,
         fps=30.0,
-        source_path=Path("in.mp4"),
-        start_seconds=0.0,
-        duration_seconds=1.0,
+        sources=[Path("in.mp4")],
+        audio=[AudioSegment(0, 0.0, 1.0)],
         encoder=encoder,
         output_path=Path("out.mp4"),
     )
@@ -115,74 +117,70 @@ def _request(
     cuts: tuple[tuple[int, int], ...] = (),
 ) -> ExportRequest:
     assert FFMPEG is not None
-    return ExportRequest(
-        source_path=source,
-        output_path=output,
-        settings=settings,
-        start_frame=0,
-        end_frame=11,
+    return ExportRequest.single(source, output, settings, 0, 11, 24.0, workers, FFMPEG, LIBX264, cuts=cuts)
+
+
+def _multi_command(audio: list[AudioSegment], sources: list[Path] | None = None) -> list[str]:
+    return build_export_command(
+        "ffmpeg",
+        width=64,
+        height=64,
         fps=24.0,
-        worker_count=workers,
-        ffmpeg_path=FFMPEG,
+        sources=sources or [Path("in.mp4")],
+        audio=audio,
         encoder=LIBX264,
-        cuts=cuts,
+        output_path=Path("out.mp4"),
     )
 
 
 def test_multi_segment_command_trims_and_concatenates_the_audio() -> None:
-    segments = ((0.0, 1.0), (2.0, 3.5))
-    command = build_export_command(
-        "ffmpeg",
-        width=64,
-        height=64,
-        fps=24.0,
-        source_path=Path("in.mp4"),
-        start_seconds=0.0,
-        duration_seconds=2.5,
-        encoder=LIBX264,
-        output_path=Path("out.mp4"),
-        segments_seconds=segments,
-        has_audio=True,
-    )
+    segments = [AudioSegment(0, 0.0, 1.0), AudioSegment(0, 2.0, 3.5)]
+    command = _multi_command(segments)
     assert "-ss" not in command and "-filter_complex" in command
     graph = command[command.index("-filter_complex") + 1]
     assert graph == audio_concat_filter(segments)
-    assert graph.count("atrim=") == 2 and "concat=n=2:v=0:a=1[aout]" in graph and "asetpts=PTS-STARTPTS" in graph
+    assert graph.count("atrim=") == 2 and "concat=n=2:v=0:a=1,apad[aout]" in graph and "asetpts=PTS-STARTPTS" in graph
+    assert graph.startswith("[1:a]atrim=start=0.000000:end=1.000000") and "aresample=48000" in graph
     assert command[command.index("-map") + 1] == "0:v:0" and "[aout]" in command
-    silent = build_export_command(
-        "ffmpeg",
-        width=64,
-        height=64,
-        fps=24.0,
-        source_path=Path("in.mp4"),
-        start_seconds=0.0,
-        duration_seconds=2.5,
-        encoder=LIBX264,
-        output_path=Path("out.mp4"),
-        segments_seconds=segments,
-        has_audio=False,
-    )
+    silent = _multi_command([AudioSegment(0, 0.0, 1.0, False), AudioSegment(0, 2.0, 3.5, False)])
     assert "-an" in silent and "-filter_complex" not in silent and "aac" not in silent
     single = _command(LIBX264)
     assert "-ss" in single and "1:a?" in single  # one segment keeps the original, proven command
+    with pytest.raises(ValueError, match="audio segment"):
+        _multi_command([])
+
+
+def test_sequence_command_uses_one_input_per_source_and_silence_where_there_is_no_audio() -> None:
+    sources = [Path("a.mp4"), Path("b.mp4")]
+    audio = [AudioSegment(0, 0.0, 0.5), AudioSegment(1, 1.0, 1.25, has_audio=False), AudioSegment(0, 2.0, 2.5)]
+    command = _multi_command(audio, sources)
+    inputs = [command[index + 1] for index, token in enumerate(command) if token == "-i"]
+    assert inputs == ["pipe:0", "a.mp4", "b.mp4"]
+    graph = command[command.index("-filter_complex") + 1]
+    parts = graph.split(";")
+    assert parts[0].startswith("[1:a]atrim=start=0.000000:end=0.500000")
+    assert parts[1].startswith("anullsrc=r=48000:cl=stereo,atrim=0:0.250000") and "[a1]" in parts[1]
+    assert parts[2].startswith("[1:a]atrim=start=2.000000")
+    assert parts[-1] == "[a0][a1][a2]concat=n=3:v=0:a=1,apad[aout]"
 
 
 def test_request_segments_follow_the_cuts(tmp_path: Path) -> None:
-    request = ExportRequest(
-        source_path=tmp_path / "in.mp4",
-        output_path=tmp_path / "out.mp4",
-        settings=RenderSettings(),
-        start_frame=0,
-        end_frame=11,
-        fps=24.0,
-        worker_count=1,
-        ffmpeg_path="ffmpeg",
-        encoder=LIBX264,
+    request = ExportRequest.single(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderSettings(),
+        0,
+        11,
+        24.0,
+        1,
+        "ffmpeg",
+        LIBX264,
         cuts=((3, 4), (8, 9)),
     )
-    assert [(segment.start, segment.end) for segment in request.segments] == [(0, 2), (5, 7), (10, 11)]
+    assert [(s.frames.start, s.frames.end) for s in request.segments] == [(0, 2), (5, 7), (10, 11)]
     assert request.expected_frames == 8 and request.duration_seconds == 8 / 24.0
-    assert request.segments_seconds[1] == (5 / 24.0, 8 / 24.0)
+    assert request.segments[1].seconds == (5 / 24.0, 8 / 24.0)
+    assert request.source_path == tmp_path / "in.mp4" and request.fps == 24.0
 
 
 @requires_ffmpeg
@@ -267,16 +265,145 @@ def test_cancelled_export_leaves_no_file(tmp_path: Path) -> None:
 
 
 def test_missing_source_fails_gracefully(tmp_path: Path) -> None:
-    request = ExportRequest(
-        source_path=tmp_path / "missing.mp4",
-        output_path=tmp_path / "out.mp4",
-        settings=RenderSettings(),
-        start_frame=0,
-        end_frame=0,
-        fps=24.0,
-        worker_count=1,
-        ffmpeg_path="ffmpeg",
-        encoder=LIBX264,
+    request = ExportRequest.single(
+        tmp_path / "missing.mp4", tmp_path / "out.mp4", RenderSettings(), 0, 0, 24.0, 1, "ffmpeg", LIBX264
     )
     result = run_export(request, progress=lambda *_: None, cancel=threading.Event())
     assert not result.success and "reabrir" in result.message
+
+
+def _write_source_with_audio(path: Path, frames: int = 12, size: tuple[int, int] = (64, 64)) -> None:
+    """A tiny clip with a 440 Hz tone (VideoWriter output never has audio)."""
+    subprocess.run(
+        [
+            FFMPEG or "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=size={size[0]}x{size[1]}:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-frames:v",
+            str(frames),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ],
+        check=True,
+    )
+
+
+def _probe_audio_duration(path: Path) -> float | None:
+    assert FFPROBE is not None
+    output = subprocess.run(
+        [
+            FFPROBE,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    streams = json.loads(output)["streams"]
+    return float(streams[0]["duration"]) if streams else None
+
+
+def _source(path: Path, frames: int, size: tuple[int, int]) -> ClipSource:
+    return ClipSource(path, frames, 24.0, size[0], size[1])
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("workers", [1, 3])
+def test_sequence_export_joins_two_sources_with_their_own_cuts_and_settings(tmp_path: Path, workers: int) -> None:
+    first_path, second_path, output = tmp_path / "a.mp4", tmp_path / "b.mp4", tmp_path / "out.mp4"
+    _write_source_video(first_path, size=(64, 64))
+    _write_source_video(second_path, size=(96, 48))  # different shape: letterboxed into 64x64
+    bright = RenderSettings(filters=FilterSettings(brightness=100, sharpen=0))
+    sequence = Sequence(
+        (
+            Clip(
+                _source(first_path, 12, (64, 64)),
+                FrameRange(0, 11),
+                settings=RenderSettings(filters=FilterSettings(sharpen=0)),
+            ),
+            Clip(_source(second_path, 12, (96, 48)), FrameRange(0, 11), cuts=(FrameRange(2, 3),), settings=bright),
+        )
+    )
+    assert sequence.export_count == 22
+    request = ExportRequest(sequence, output, workers, FFMPEG or "ffmpeg", LIBX264)
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event())
+    assert result.success, result.message
+    assert result.processed_frames == 22 and result.expected_frames == 22
+    stream = _probe_video(output)
+    assert (stream["width"], stream["height"]) == (64, 64) and int(stream["nb_read_frames"]) == 22
+    capture = cv2.VideoCapture(str(output))
+    decoded = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        decoded.append(frame)
+    capture.release()
+    assert len(decoded) == 22
+    first_half = np.mean([frame.mean() for frame in decoded[:12]])
+    second_half = np.mean([frame[16:48].mean() for frame in decoded[12:]])  # the picture area of the letterbox
+    assert second_half > first_half + 15, "the second clip carries its own (brighter: beta +24) settings"
+    assert np.mean([frame[:12].mean() for frame in decoded[14:]]) < 16, "letterbox bars above the 96x48 picture"
+
+
+@requires_ffmpeg
+def test_sequence_export_concatenates_audio_and_fills_silence_for_sources_without_it(tmp_path: Path) -> None:
+    with_audio, silent, output = tmp_path / "tone.mp4", tmp_path / "silent.mp4", tmp_path / "out.mp4"
+    _write_source_with_audio(with_audio)
+    _write_source_video(silent, size=(64, 64))
+    assert source_has_audio(FFMPEG or "ffmpeg", with_audio) and not source_has_audio(FFMPEG or "ffmpeg", silent)
+    sequence = Sequence(
+        (
+            Clip(_source(with_audio, 12, (64, 64)), FrameRange(0, 11), cuts=(FrameRange(4, 7),)),
+            Clip(_source(silent, 12, (64, 64)), FrameRange(0, 11)),
+            Clip(_source(with_audio, 12, (64, 64)), FrameRange(6, 11)),
+        )
+    )
+    assert sequence.export_count == 8 + 12 + 6 and sequence.source_paths == (with_audio, silent)
+    result = run_export(
+        ExportRequest(sequence, output, 2, FFMPEG or "ffmpeg", LIBX264),
+        progress=lambda *_: None,
+        cancel=threading.Event(),
+    )
+    assert result.success, result.message
+    assert int(_probe_video(output)["nb_read_frames"]) == 26
+    duration = _probe_audio_duration(output)
+    assert duration is not None and duration == pytest.approx(26 / 24.0, abs=0.15)
+
+
+def test_sequences_with_different_fps_are_refused_before_ffmpeg_starts(tmp_path: Path) -> None:
+    sequence = Sequence(
+        (
+            Clip(ClipSource(tmp_path / "a.mp4", 10, 24.0), FrameRange(0, 9)),
+            Clip(ClipSource(tmp_path / "b.mp4", 10, 29.97), FrameRange(0, 9)),
+        )
+    )
+    result = run_export(
+        ExportRequest(sequence, tmp_path / "out.mp4", 1, "ffmpeg", LIBX264),
+        progress=lambda *_: None,
+        cancel=threading.Event(),
+    )
+    assert not result.success and "mesmo fps" in result.message

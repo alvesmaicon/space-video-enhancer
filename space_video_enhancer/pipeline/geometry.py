@@ -51,6 +51,26 @@ def region(frame: np.ndarray, rect: NormalizedRect) -> np.ndarray | None:
     return sliced if sliced.size > 0 else None
 
 
+def fit_to_canvas(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Scale ``frame`` to fit ``width x height`` keeping its aspect ratio and pad the rest with black.
+
+    Identity when the size already matches — the common case, so it costs nothing there.
+    """
+    frame_height, frame_width = frame.shape[:2]
+    if (frame_width, frame_height) == (width, height):
+        return frame
+    scale = min(width / frame_width, height / frame_height)
+    new_width = max(1, min(width, round(frame_width * scale)))
+    new_height = max(1, min(height, round(frame_height * scale)))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    scaled = cv2.resize(frame, (new_width, new_height), interpolation=interpolation)
+    canvas = np.zeros((height, width, frame.shape[2]) if frame.ndim == 3 else (height, width), dtype=frame.dtype)
+    top = (height - new_height) // 2
+    left = (width - new_width) // 2
+    canvas[top : top + new_height, left : left + new_width] = scaled
+    return canvas
+
+
 def ensure_even_size(frame: np.ndarray) -> np.ndarray:
     """Trim at most one row/column so both dimensions are even (required by yuv420p encoders)."""
     height, width = frame.shape[:2]

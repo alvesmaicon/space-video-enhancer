@@ -1,8 +1,12 @@
 """Qt-free export core: decode -> render_frame -> raw frames into FFmpeg.
 
-Runs on a worker thread. Reports progress through a callback, cooperates with a
-cancel event, never leaves FFmpeg running or a half-written file behind, and logs
-``export.start`` / ``export.progress`` / ``export.finish`` (or ``.cancelled`` /
+Exports a :class:`Sequence`: clips of one or more source files, each with its own cuts and
+settings, played back to back. Frames are decoded per source (one capture each, seeking only
+where a cut or a clip boundary breaks the run), rendered with the clip's settings and fitted
+to the output size of the first frame (letterbox), and the audio of every kept run is trimmed
+and concatenated by ffmpeg. Runs on a worker thread, reports progress through a callback,
+cooperates with a cancel event, never leaves FFmpeg running or a half-written file behind,
+and logs ``export.start`` / ``export.progress`` / ``export.finish`` (or ``.cancelled`` /
 ``.failed``) with per-stage timing statistics and stabilization estimator histograms.
 """
 
@@ -23,16 +27,17 @@ from typing import Any
 import cv2
 import numpy as np
 
-from space_video_enhancer.export.ffmpeg import EncoderChoice, build_export_command, source_has_audio
-from space_video_enhancer.pipeline.filters import OpenCLBackend
-from space_video_enhancer.pipeline.geometry import ensure_even_size
+from space_video_enhancer.export.ffmpeg import AudioSegment, EncoderChoice, build_export_command, source_has_audio
+from space_video_enhancer.pipeline.filters import OpenCLBackend, ProcessingContext
+from space_video_enhancer.pipeline.geometry import ensure_even_size, fit_to_canvas
 from space_video_enhancer.pipeline.render import build_context, render_frame
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.sequence import Clip, ClipSource, ExportSegment, Sequence
 from space_video_enhancer.settings import RenderSettings
 from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.telemetry.stats import Histogram, StageStats
 from space_video_enhancer.telemetry.trace import RenderTrace
-from space_video_enhancer.timeline import FrameRange, frame_count, kept_segments, segments_seconds
+from space_video_enhancer.timeline import FrameRange
 
 LOG = get_logger("export")
 ProgressCallback = Callable[[int, int], None]
@@ -46,48 +51,68 @@ FFMPEG_TERMINATE_TIMEOUT = 1.0
 
 @dataclass(frozen=True)
 class ExportRequest:
-    source_path: Path
+    sequence: Sequence
     output_path: Path
-    settings: RenderSettings
-    start_frame: int
-    end_frame: int
-    fps: float
     worker_count: int
     ffmpeg_path: str
     encoder: EncoderChoice
-    stabilization_reference: np.ndarray | None = None
-    cuts: tuple[tuple[int, int], ...] = ()
-    """Frame ranges (inclusive, absolute) removed from inside the clip; see :mod:`timeline`."""
+
+    @classmethod
+    def single(
+        cls,
+        source_path: Path,
+        output_path: Path,
+        settings: RenderSettings,
+        start_frame: int,
+        end_frame: int,
+        fps: float,
+        worker_count: int,
+        ffmpeg_path: str,
+        encoder: EncoderChoice,
+        *,
+        cuts: tuple[tuple[int, int], ...] = (),
+        stabilization_reference_frame: int | None = None,
+        frame_count: int | None = None,
+        width: int = 0,
+        height: int = 0,
+    ) -> ExportRequest:
+        """The one-video case: a clip of ``source_path`` from ``start_frame`` to ``end_frame`` minus ``cuts``."""
+        source = ClipSource(source_path, frame_count if frame_count is not None else end_frame + 1, fps, width, height)
+        sequence = Sequence.single(
+            source,
+            FrameRange(start_frame, end_frame),
+            cuts=cuts,
+            settings=settings,
+            stabilization_reference_frame=stabilization_reference_frame,
+        )
+        return cls(sequence, output_path, worker_count, ffmpeg_path, encoder)
 
     @property
-    def clip(self) -> FrameRange:
-        return FrameRange(self.start_frame, self.end_frame)
+    def fps(self) -> float:
+        return self.sequence.fps
 
     @property
-    def segments(self) -> tuple[FrameRange, ...]:
-        """What actually gets exported: the clip minus the cuts, in order."""
-        return kept_segments(self.clip, self.cuts)
-
-    @property
-    def segments_seconds(self) -> tuple[tuple[float, float], ...]:
-        return segments_seconds(self.segments, self.fps)
+    def segments(self) -> tuple[ExportSegment, ...]:
+        """What actually gets exported: every clip minus its cuts, in order."""
+        return self.sequence.export_segments()
 
     @property
     def expected_frames(self) -> int:
-        return max(1, frame_count(self.segments))
-
-    @property
-    def start_seconds(self) -> float:
-        return self.start_frame / self.fps if self.fps > 0 else 0.0
+        return max(1, self.sequence.export_count)
 
     @property
     def duration_seconds(self) -> float:
-        return self.expected_frames / self.fps if self.fps > 0 else 0.0
+        return self.sequence.duration_seconds
+
+    @property
+    def source_path(self) -> Path:
+        """First source (for messages); a sequence may use several."""
+        return self.sequence.clips[0].source.path if self.sequence.clips else Path()
 
     @property
     def effective_worker_count(self) -> int:
-        """Inter-frame stabilization / smoothing needs frames in order: one worker."""
-        if self.settings.stabilization.requires_sequential_processing:
+        """Inter-frame stabilization / smoothing in any clip needs frames in order: one worker."""
+        if any(clip.settings.stabilization.requires_sequential_processing for clip in self.sequence.clips):
             return 1
         return max(1, self.worker_count)
 
@@ -209,21 +234,91 @@ class _Throttle:
             self._callback(processed, self._total)
 
 
+def _clip_summary(clip: Clip) -> dict[str, Any]:
+    return {
+        "source": clip.source.path.name,
+        "range": [clip.range.start, clip.range.end],
+        "cuts": [[cut.start, cut.end] for cut in clip.cuts],
+        "segments": [[segment.start, segment.end] for segment in clip.segments],
+        "frames": clip.export_count,
+        "reference_frame": clip.stabilization_reference_frame,
+        "settings": asdict(clip.settings),
+    }
+
+
 def _request_summary(request: ExportRequest) -> dict[str, Any]:
     return {
-        "source": request.source_path.name,
+        "sources": [path.name for path in request.sequence.source_paths],
         "output": request.output_path.name,
         "frames": request.expected_frames,
-        "start_frame": request.start_frame,
-        "end_frame": request.end_frame,
-        "cuts": [[cut[0], cut[1]] for cut in request.cuts],
-        "segments": [[segment.start, segment.end] for segment in request.segments],
+        "clips": [_clip_summary(clip) for clip in request.sequence.clips],
         "fps": round(request.fps, 3),
         "workers": request.effective_worker_count,
         "requested_workers": request.worker_count,
         "encoder": request.encoder.label,
-        "settings": asdict(request.settings),
     }
+
+
+class _SourceReaders:
+    """One ``VideoCapture`` per source file, opened on first use, with the decoder position tracked."""
+
+    def __init__(self) -> None:
+        self._captures: dict[Path, cv2.VideoCapture] = {}
+        self._positions: dict[Path, int | None] = {}
+
+    def open(self, path: Path) -> cv2.VideoCapture | None:
+        capture = self._captures.get(path)
+        if capture is None:
+            capture = cv2.VideoCapture(str(path))
+            if not capture.isOpened():
+                capture.release()
+                return None
+            self._captures[path] = capture
+            self._positions[path] = 0
+        return capture
+
+    def read(self, path: Path, frame_index: int) -> np.ndarray | None:
+        capture = self.open(path)
+        if capture is None:
+            return None
+        if self._positions.get(path) != frame_index:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = capture.read()
+        if not ok:
+            self._positions[path] = None
+            return None
+        self._positions[path] = frame_index + 1
+        return frame
+
+    def release_all(self) -> None:
+        for capture in self._captures.values():
+            capture.release()
+        self._captures.clear()
+        self._positions.clear()
+
+
+class _ClipRenderer:
+    """Per-clip processing state: settings, the denoise context (resolved once) and the stabilization path."""
+
+    def __init__(self, clip: Clip, first_frame: np.ndarray, reference: np.ndarray | None) -> None:
+        self.settings = clip.settings
+        # Denoise strength is resolved once, from the clip's first frame, so it stays constant across the clip.
+        self.context: ProcessingContext = build_context(clip.settings, first_frame)
+        self.state = StabilizationState()
+        self.reference = reference
+
+
+def _validation_problem(request: ExportRequest) -> str | None:
+    """Why the request cannot be exported at all (checked before any file is opened)."""
+    sequence = request.sequence
+    if sequence.is_empty:
+        return "Nenhum clipe na sequencia."
+    mismatch = sequence.fps_mismatch()
+    if mismatch is not None:
+        return mismatch
+    if not request.segments:
+        return "Os cortes removem o video inteiro: nada a exportar."
+    return None
 
 
 def run_export(
@@ -235,20 +330,25 @@ def run_export(
 ) -> ExportResult:
     """Blocking export. Safe to call from any thread; touches no Qt objects."""
     log_event(LOG, "export.start", **_request_summary(request))
-    capture = cv2.VideoCapture(str(request.source_path))
-    if not capture.isOpened():
+    problem = _validation_problem(request)
+    if problem is not None:
+        log_event(LOG, "export.failed", level=logging.ERROR, message=problem, output=request.output_path.name)
+        return ExportResult(False, problem, 0, request.expected_frames)
+    readers = _SourceReaders()
+    if readers.open(request.segments[0].clip.source.path) is None:
         message = "Nao foi possivel reabrir o video para exportacao."
         log_event(LOG, "export.failed", level=logging.ERROR, message=message, output=request.output_path.name)
+        readers.release_all()
         return ExportResult(False, message, 0, request.expected_frames)
 
     try:
-        return _run_export(capture, request, progress, cancel, backend)
+        return _run_export(readers, request, progress, cancel, backend)
     finally:
-        capture.release()
+        readers.release_all()
 
 
 def _run_export(
-    capture: cv2.VideoCapture,
+    readers: _SourceReaders,
     request: ExportRequest,
     progress: ProgressCallback,
     cancel: threading.Event,
@@ -256,7 +356,7 @@ def _run_export(
 ) -> ExportResult:
     total = request.expected_frames
     report = _Throttle(progress, total)
-    settings = request.settings
+    sequence = request.sequence
     metrics = _ExportMetrics(request, backend)
 
     def finish(result: ExportResult, event: str, level: int = logging.INFO, **extra: Any) -> ExportResult:
@@ -266,29 +366,39 @@ def _run_export(
             result.success, result.message, result.processed_frames, result.expected_frames, result.cancelled, summary
         )
 
-    if not request.segments:
-        message = "Os cortes removem o video inteiro: nada a exportar."
-        return finish(ExportResult(False, message, 0, total), "export.failed", logging.ERROR)
-    frames = _iter_frames(capture, request)
+    # Camera-lock references are decoded up front: the captures are not shared with render workers.
+    references = {
+        index: readers.read(clip.source.path, clip.stabilization_reference_frame)
+        for index, clip in enumerate(sequence.clips)
+        if clip.stabilization_reference_frame is not None
+    }
+    frames = _iter_frames(readers, request)
     first = next(frames, None)
     if first is None:
         message = "Nao foi possivel ler o frame inicial do corte selecionado."
         return finish(ExportResult(False, message, 0, total), "export.failed", logging.ERROR)
-    first_index, first_frame = first
+    first_clip, first_index, first_frame = first
 
-    # Denoise strength is resolved once, from the first frame, so it stays constant across the clip.
-    context = build_context(settings, first_frame)
-    state = StabilizationState()
+    renderers: dict[int, _ClipRenderer] = {}
 
-    def process(frame: np.ndarray, frame_index: int, frame_state: StabilizationState | None) -> np.ndarray:
+    def renderer_for(clip_index: int, frame: np.ndarray) -> _ClipRenderer:
+        """Created on the clip's first frame, on the export thread, before any worker sees it."""
+        renderer = renderers.get(clip_index)
+        if renderer is None:
+            renderer = _ClipRenderer(sequence.clips[clip_index], frame, references.get(clip_index))
+            renderers[clip_index] = renderer
+        return renderer
+
+    def process(frame: np.ndarray, clip_index: int, frame_index: int, sequential: bool) -> np.ndarray:
+        renderer = renderers[clip_index]
         trace = RenderTrace()
         rendered = render_frame(
             frame,
-            settings,
+            renderer.settings,
             frame_index=frame_index,
-            stabilization_state=frame_state,
-            stabilization_reference=request.stabilization_reference,
-            processing_context=context,
+            stabilization_state=renderer.state if sequential else None,
+            stabilization_reference=renderer.reference,
+            processing_context=renderer.context,
             crop=True,
             backend=backend,
             trace=trace,
@@ -296,22 +406,28 @@ def _run_export(
         metrics.record(trace.finish())
         return np.ascontiguousarray(ensure_even_size(rendered))
 
-    first_processed = process(first_frame, first_index, state)
+    renderer_for(first_clip, first_frame)
+    first_processed = process(first_frame, first_clip, first_index, True)
     height, width = first_processed.shape[:2]
-    segments = request.segments_seconds
-    has_audio = source_has_audio(request.ffmpeg_path, request.source_path) if len(segments) > 1 else True
+    sources = sequence.source_paths
+    has_audio = (
+        {path: source_has_audio(request.ffmpeg_path, path) for path in sources}
+        if len(request.segments) > 1
+        else {path: True for path in sources}
+    )
+    audio = [
+        AudioSegment(sources.index(segment.clip.source.path), *segment.seconds, has_audio[segment.clip.source.path])
+        for segment in request.segments
+    ]
     command = build_export_command(
         request.ffmpeg_path,
         width=width,
         height=height,
         fps=request.fps,
-        source_path=request.source_path,
-        start_seconds=request.start_seconds,
-        duration_seconds=request.duration_seconds,
+        sources=sources,
+        audio=audio,
         encoder=request.encoder,
         output_path=request.output_path,
-        segments_seconds=segments,
-        has_audio=has_audio,
     )
 
     worker_count = request.effective_worker_count
@@ -330,7 +446,7 @@ def _run_export(
         nonlocal processed_frames, next_log_percent
         if cancel.is_set():
             raise _ExportCancelledError()
-        stdin.write(frame.tobytes())
+        stdin.write(np.ascontiguousarray(fit_to_canvas(frame, width, height)).tobytes())
         processed_frames += 1
         report(processed_frames)
         percent = processed_frames * 100 // total
@@ -355,10 +471,11 @@ def _run_export(
         write(first_processed)
 
         if worker_count == 1:
-            for frame_index, frame in frames:
-                write(process(frame, frame_index, state))
+            for clip_index, frame_index, frame in frames:
+                renderer_for(clip_index, frame)
+                write(process(frame, clip_index, frame_index, True))
         else:
-            _run_parallel(frames, process, write, worker_count)
+            _run_parallel(frames, renderer_for, process, write, worker_count)
         read_failed = processed_frames < total
 
         report(processed_frames, force=True)
@@ -403,27 +520,25 @@ def _run_export(
     return finish(ExportResult(True, "", processed_frames, total), "export.finish")
 
 
-def _iter_frames(capture: cv2.VideoCapture, request: ExportRequest) -> Iterator[tuple[int, np.ndarray]]:
-    """Decoded frames of every kept segment in order, seeking only where a cut was removed."""
-    position: int | None = None
+def _iter_frames(readers: _SourceReaders, request: ExportRequest) -> Iterator[tuple[int, int, np.ndarray]]:
+    """``(clip index, source frame index, frame)`` for every kept run in order; a short stream skips to the next run."""
     for segment in request.segments:
-        if position != segment.start:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, segment.start)
-        for frame_index in range(segment.start, segment.end + 1):
-            ok, frame = capture.read()
-            if not ok:
-                return
-            position = frame_index + 1
-            yield frame_index, frame
+        path = segment.clip.source.path
+        for frame_index in range(segment.frames.start, segment.frames.end + 1):
+            frame = readers.read(path, frame_index)
+            if frame is None:
+                break
+            yield segment.clip_index, frame_index, frame
 
 
 def _run_parallel(
-    frames: Iterator[tuple[int, np.ndarray]],
-    process: Callable[[np.ndarray, int, StabilizationState | None], np.ndarray],
+    frames: Iterator[tuple[int, int, np.ndarray]],
+    prepare: Callable[[int, np.ndarray], object],
+    process: Callable[[np.ndarray, int, int, bool], np.ndarray],
     write: Callable[[np.ndarray], None],
     worker_count: int,
 ) -> None:
-    """Frames are rendered concurrently but written strictly in order."""
+    """Frames are rendered concurrently but written strictly in order; ``prepare`` runs here, before dispatch."""
     max_pending = max(1, worker_count * 2)
     pending: deque[Future[np.ndarray]] = deque()
     exhausted = False
@@ -434,8 +549,9 @@ def _run_parallel(
                 if item is None:
                     exhausted = True
                     break
-                frame_index, frame = item
-                pending.append(executor.submit(process, frame, frame_index, None))
+                clip_index, frame_index, frame = item
+                prepare(clip_index, frame)
+                pending.append(executor.submit(process, frame, clip_index, frame_index, False))
             if not pending:
                 break
             write(pending.popleft().result())

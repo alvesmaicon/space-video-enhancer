@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from space_video_enhancer.pipeline.geometry import apply_crop, apply_geometry, ensure_even_size
+from space_video_enhancer.pipeline.geometry import apply_crop, apply_geometry, ensure_even_size, fit_to_canvas
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.settings import (
     CropSettings,
@@ -70,3 +70,15 @@ def test_ensure_even_size_trims_at_most_one_pixel() -> None:
     assert ensure_even_size(odd).shape[:2] == (64, 32)
     even = np.zeros((64, 32, 3), np.uint8)
     assert ensure_even_size(even) is even
+
+
+def test_fit_to_canvas_letterboxes_and_is_identity_when_sizes_match() -> None:
+    frame = np.full((48, 96, 3), 200, dtype=np.uint8)
+    assert fit_to_canvas(frame, 96, 48) is frame
+    fitted = fit_to_canvas(frame, 64, 64)
+    assert fitted.shape == (64, 64, 3)
+    assert fitted[:16].max() == 0 and fitted[48:].max() == 0 and fitted[16:48].min() == 200
+    tall = fit_to_canvas(np.full((100, 20, 3), 90, dtype=np.uint8), 64, 64)
+    assert tall.shape == (64, 64, 3) and tall[:, :25].max() == 0 and tall[:, 26:38].min() == 90
+    gray = fit_to_canvas(np.full((10, 10), 7, dtype=np.uint8), 20, 12)
+    assert gray.shape == (12, 20) and gray[:, 4:16].min() == 7

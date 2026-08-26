@@ -13,6 +13,9 @@ PROBE_TIMEOUT_SECONDS = 8
 ENCODER_LIST_TIMEOUT_SECONDS = 5
 AUDIO_BITRATE = "192k"
 AUDIO_PROBE_TIMEOUT_SECONDS = 8
+AUDIO_SAMPLE_RATE = 48000
+AUDIO_NORMALIZE = f"aresample={AUDIO_SAMPLE_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo"
+"""Every concatenated piece gets the same rate and layout, so clips from different files still join."""
 
 # Encoders pick yuv444p for a bgr24 source unless told otherwise, and yuv444p H.264 does not
 # play on QuickTime/iOS/most hardware decoders. Always force yuv420p (which needs even dims).
@@ -173,14 +176,43 @@ def source_has_audio(ffmpeg_path: str, source_path: Path) -> bool:
         return False
 
 
-def audio_concat_filter(segments_seconds: Sequence[tuple[float, float]]) -> str:
-    """``atrim`` each kept segment of the source audio and ``concat`` them in order (sample accurate)."""
-    parts = [
-        f"[1:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[a{index}]"
-        for index, (start, end) in enumerate(segments_seconds)
-    ]
-    inputs = "".join(f"[a{index}]" for index in range(len(segments_seconds)))
-    parts.append(f"{inputs}concat=n={len(segments_seconds)}:v=0:a=1[aout]")
+@dataclass(frozen=True)
+class AudioSegment:
+    """The audio to play under one run of exported frames: a slice of one source, or silence."""
+
+    source_index: int
+    """Index into the ``sources`` given to :func:`build_export_command`."""
+    start_seconds: float
+    end_seconds: float
+    """Exclusive."""
+    has_audio: bool = True
+
+    @property
+    def duration_seconds(self) -> float:
+        return max(0.0, self.end_seconds - self.start_seconds)
+
+
+def audio_concat_filter(segments: Sequence[AudioSegment]) -> str:
+    """``atrim`` each segment from its source (or generate silence) and ``concat`` them in order.
+
+    Every piece is resampled to the same rate and layout so sources that disagree still concat.
+    The result is padded with silence (``apad``): a source whose audio ends a few ms before its
+    video would otherwise make ``-shortest`` drop the last video frame.
+    """
+    parts = []
+    for index, segment in enumerate(segments):
+        if segment.has_audio:
+            parts.append(
+                f"[{segment.source_index + 1}:a]atrim=start={segment.start_seconds:.6f}:end={segment.end_seconds:.6f},"
+                f"asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}[a{index}]"
+            )
+        else:
+            parts.append(
+                f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:{segment.duration_seconds:.6f},"
+                f"asetpts=PTS-STARTPTS[a{index}]"
+            )
+    inputs = "".join(f"[a{index}]" for index in range(len(segments)))
+    parts.append(f"{inputs}concat=n={len(segments)}:v=0:a=1,apad[aout]")
     return ";".join(parts)
 
 
@@ -190,24 +222,25 @@ def build_export_command(
     width: int,
     height: int,
     fps: float,
-    source_path: Path,
-    start_seconds: float,
-    duration_seconds: float,
+    sources: Sequence[Path],
+    audio: Sequence[AudioSegment],
     encoder: EncoderChoice,
     output_path: Path,
-    segments_seconds: Sequence[tuple[float, float]] | None = None,
-    has_audio: bool = True,
 ) -> list[str]:
-    """Raw bgr24 frames on stdin + original audio -> H.264 MP4 that plays everywhere.
+    """Raw bgr24 frames on stdin + the sources' audio -> H.264 MP4 that plays everywhere.
 
-    With a single segment the audio is trimmed with ``-ss``/``-t``. With several (cuts inside
-    the clip) the kept pieces are trimmed and concatenated so the audio follows the video;
-    that needs to know whether the source has audio at all (``has_audio``).
+    With a single audio segment the source is trimmed with ``-ss``/``-t`` (the original, proven
+    command). With several (cuts, or more than one clip) every source becomes an input and the
+    pieces are trimmed, normalized and concatenated so the audio follows the video; segments of
+    sources without audio become silence of the same length. No audio anywhere -> ``-an``.
     """
     if width % 2 or height % 2:
         raise ValueError(f"Frame size must be even for {OUTPUT_PIXEL_FORMAT}, got {width}x{height}")
+    if not audio:
+        raise ValueError("at least one audio segment is needed (it defines the timing)")
 
-    multi_segment = segments_seconds is not None and len(segments_seconds) > 1
+    multi_segment = len(audio) > 1
+    has_audio = any(segment.has_audio for segment in audio)
     command = [
         ffmpeg_path,
         "-y",
@@ -226,27 +259,20 @@ def build_export_command(
         "pipe:0",
     ]
     if multi_segment and has_audio:
-        assert segments_seconds is not None
-        command += [
-            "-i",
-            str(source_path),
-            "-filter_complex",
-            audio_concat_filter(segments_seconds),
-            "-map",
-            "0:v:0",
-            "-map",
-            "[aout]",
-        ]
+        for source in sources:
+            command += ["-i", str(source)]
+        command += ["-filter_complex", audio_concat_filter(audio), "-map", "0:v:0", "-map", "[aout]"]
     elif multi_segment:
         command += ["-map", "0:v:0", "-an"]
     else:
+        segment = audio[0]
         command += [
             "-ss",
-            f"{start_seconds:.6f}",
+            f"{segment.start_seconds:.6f}",
             "-t",
-            f"{duration_seconds:.6f}",
+            f"{segment.duration_seconds:.6f}",
             "-i",
-            str(source_path),
+            str(sources[segment.source_index]),
             "-map",
             "0:v:0",
             "-map",
