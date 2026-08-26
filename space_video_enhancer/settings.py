@@ -322,6 +322,34 @@ class ColorGradeSettings:
         return not self.has_white_balance and not self.has_hue_bands
 
 
+EXPOSURE_MAX_EV_LIMIT = 2.0
+EXPOSURE_DEFAULT_MAX_EV = 1.0
+
+
+@dataclass(frozen=True)
+class ExposureLockSettings:
+    """Per-frame gains that hold a reference region's brightness (and colour) constant across the clip.
+
+    See :mod:`pipeline.exposure`. ``reference`` holds the region's B, G, R medians in the frame
+    the user picked; ``None`` means nothing was captured yet, so the lock does nothing.
+    """
+
+    enabled: bool = False
+    region: NormalizedRect | None = DEFAULT_WHITE_BALANCE_RECT
+    """Static part of the scene to meter; ``None`` meters the whole frame (content-sensitive)."""
+    reference: tuple[float, float, float] | None = None
+    strength: int = 100
+    """0-100: how much of the measured correction to apply."""
+    max_ev: float = EXPOSURE_DEFAULT_MAX_EV
+    """Gains are clamped to ``2 ** ±max_ev``."""
+    color: bool = True
+    """Per-channel gains (brightness and white balance) instead of one gain for all channels."""
+
+    @property
+    def is_active(self) -> bool:
+        return self.enabled and self.reference is not None and self.strength > 0
+
+
 @dataclass(frozen=True)
 class RenderSettings:
     """Complete, immutable snapshot of what the user configured."""
@@ -333,6 +361,7 @@ class RenderSettings:
     stabilization: StabilizationSettings = field(default_factory=StabilizationSettings)
     denoise_sample_rect: NormalizedRect = DEFAULT_DENOISE_SAMPLE_RECT
     grade: ColorGradeSettings = field(default_factory=ColorGradeSettings)
+    exposure: ExposureLockSettings = field(default_factory=ExposureLockSettings)
 
 
 def clamp_unit(value: float) -> float:

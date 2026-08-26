@@ -1,6 +1,7 @@
 """The single frame pipeline shared by preview, thumbnails and export.
 
-Order: stabilize -> basic filters (white balance, tonal, hue bands, scale) -> image preset -> geometry -> crop.
+Order: exposure lock metering (on the source frame) -> stabilize -> basic filters (exposure gains,
+white balance, tonal, hue bands, scale) -> image preset -> geometry -> crop.
 Crop is last so the rectangle drawn on the (rotated/flipped) preview means the same
 thing on export.
 
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from space_video_enhancer.pipeline.exposure import exposure_lock_table
 from space_video_enhancer.pipeline.filters import (
     OpenCLBackend,
     ProcessingContext,
@@ -56,6 +58,10 @@ def render_frame(
     with tracing.active(trace):
         tracing.note("input_shape", list(frame.shape[:2]))
 
+        with tracing.stage("exposure"):
+            # Metered on the source frame so the region matches the rectangle on the "before" preview.
+            exposure_table = exposure_lock_table(frame, settings.exposure)
+
         with tracing.stage("stabilize"):
             stabilized = apply_stabilization(
                 frame,
@@ -69,7 +75,7 @@ def render_frame(
             context = processing_context if processing_context is not None else build_context(settings, stabilized)
 
         with tracing.stage("filters"):
-            processed = apply_basic_filters(stabilized, context, backend)
+            processed = apply_basic_filters(stabilized, context, backend, exposure_table)
 
         selection = image_filter if image_filter is not None else settings.image_filter
         with tracing.stage("preset"):

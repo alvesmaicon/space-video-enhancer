@@ -225,8 +225,12 @@ def apply_temperature(image: object, table: np.ndarray | None) -> object:
     return cv2.LUT(image, table)
 
 
-def apply_chain(image: object, context: ProcessingContext) -> object:
-    """The whole basic chain on one image type (``np.ndarray`` or ``cv2.UMat``)."""
+def apply_chain(image: object, context: ProcessingContext, exposure_table: np.ndarray | None = None) -> object:
+    """The whole basic chain on one image type (``np.ndarray`` or ``cv2.UMat``).
+
+    ``exposure_table`` is the per-frame exposure-lock LUT (see :mod:`pipeline.exposure`); it is
+    applied after the denoise, whose strength was estimated on the un-gained frame.
+    """
     result = image
     if context.denoise_strength is not None:
         with tracing.stage("filters.denoise"):
@@ -238,6 +242,8 @@ def apply_chain(image: object, context: ProcessingContext) -> object:
                 context.denoise_template_window,
                 context.denoise_search_window,
             )
+    if exposure_table is not None:
+        result = cv2.LUT(result, exposure_table)
     result = apply_white_balance(result, context.grade)  # gains belong before the tonal curve
     result = cv2.convertScaleAbs(result, alpha=context.contrast_alpha, beta=context.brightness_beta)
     if context.gamma_lookup_table is not None:
@@ -259,15 +265,19 @@ def apply_chain(image: object, context: ProcessingContext) -> object:
     return result
 
 
-def apply_basic_filters_cpu(frame: np.ndarray, context: ProcessingContext) -> np.ndarray:
-    result = apply_chain(frame, context)
+def apply_basic_filters_cpu(
+    frame: np.ndarray, context: ProcessingContext, exposure_table: np.ndarray | None = None
+) -> np.ndarray:
+    result = apply_chain(frame, context, exposure_table)
     assert isinstance(result, np.ndarray)
     return result
 
 
-def apply_basic_filters_opencl(frame: np.ndarray, context: ProcessingContext) -> np.ndarray:
+def apply_basic_filters_opencl(
+    frame: np.ndarray, context: ProcessingContext, exposure_table: np.ndarray | None = None
+) -> np.ndarray:
     """One upload, the whole chain on the device, one download."""
-    result = apply_chain(cv2.UMat(frame), context)
+    result = apply_chain(cv2.UMat(frame), context, exposure_table)
     assert isinstance(result, cv2.UMat)
     return result.get()
 
@@ -276,14 +286,15 @@ def apply_basic_filters(
     frame: np.ndarray,
     context: ProcessingContext,
     backend: OpenCLBackend | None = None,
+    exposure_table: np.ndarray | None = None,
 ) -> np.ndarray:
     if backend is not None and backend.is_available():
         if context.denoise_strength is None:
             # Without NLMeans the upload/download costs more than the whole chain on the CPU.
             tracing.note("filters.backend", "cpu_no_denoise")
-            return apply_basic_filters_cpu(frame, context)
+            return apply_basic_filters_cpu(frame, context, exposure_table)
         try:
-            result = apply_basic_filters_opencl(frame, context)
+            result = apply_basic_filters_opencl(frame, context, exposure_table)
         except cv2.error as error:
             backend.mark_failed()
             tracing.note("filters.opencl_error", str(error).splitlines()[0][:200])
@@ -291,4 +302,4 @@ def apply_basic_filters(
             tracing.note("filters.backend", "opencl")
             return result
     tracing.note("filters.backend", "cpu")
-    return apply_basic_filters_cpu(frame, context)
+    return apply_basic_filters_cpu(frame, context, exposure_table)
