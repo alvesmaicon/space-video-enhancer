@@ -28,6 +28,10 @@ from space_video_enhancer.telemetry.log import get_logger, log_event
 LOG = get_logger("audio")
 SAMPLE_RATE = PREVIEW_SAMPLE_RATE
 BYTES_PER_SAMPLE = 2
+CHANNELS = 2
+"""The PCM is mono, but the sink gets it duplicated into both channels: a 1-channel stream is routed
+to the left speaker only by some backends (Qt's ffmpeg backend over PulseAudio/ALSA does that)."""
+BYTES_PER_FRAME = BYTES_PER_SAMPLE * CHANNELS
 BUFFER_SECONDS = 0.3
 """How far ahead of the speaker the feeder keeps the sink filled."""
 FEED_INTERVAL_MS = 40
@@ -132,7 +136,7 @@ class AudioSinkLike(Protocol):
 def preview_audio_format(sample_rate: int = SAMPLE_RATE) -> QAudioFormat:
     audio_format = QAudioFormat()
     audio_format.setSampleRate(sample_rate)
-    audio_format.setChannelCount(1)
+    audio_format.setChannelCount(CHANNELS)
     audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
     return audio_format
 
@@ -182,7 +186,7 @@ class PreviewAudioPlayer(QObject):
             self._probed = True
             self._sink = self._factory()
             if self._sink is not None:
-                self._sink.setBufferSize(int(SAMPLE_RATE * BYTES_PER_SAMPLE * BUFFER_SECONDS))
+                self._sink.setBufferSize(int(SAMPLE_RATE * BYTES_PER_FRAME * BUFFER_SECONDS))
         return self._sink is not None
 
     @property
@@ -243,12 +247,12 @@ class PreviewAudioPlayer(QObject):
 
     @Slot()
     def _feed(self) -> None:
-        """Keep the sink's buffer full; each write is a run of samples that never crosses a piece boundary."""
+        """Keep the sink's buffer full; each write is a run of frames that never crosses a piece boundary."""
         feeder, sink, device = self._feeder, self._sink, self._device
         if feeder is None or sink is None or device is None:
             return
         while True:
-            free_samples = sink.bytesFree() // BYTES_PER_SAMPLE
+            free_samples = sink.bytesFree() // BYTES_PER_FRAME
             if free_samples < MIN_WRITE_SAMPLES:
                 return
             chunk = feeder.next_chunk(free_samples)
@@ -257,7 +261,7 @@ class PreviewAudioPlayer(QObject):
                 return
             if chunk.size == 0:
                 continue
-            written = device.write(chunk.tobytes())
+            written = device.write(np.repeat(chunk, CHANNELS).tobytes())  # same signal on every channel
             if written <= 0:
                 return
 

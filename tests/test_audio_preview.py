@@ -17,6 +17,8 @@ from space_video_enhancer.sequence import Clip, ClipSource, Sequence
 from space_video_enhancer.timeline import FrameRange
 from space_video_enhancer.ui.audio_preview import (
     BUFFER_SECONDS,
+    BYTES_PER_FRAME,
+    CHANNELS,
     AudioFeeder,
     AudioPiece,
     PcmController,
@@ -105,15 +107,18 @@ class _FakeSink:
 def test_player_fills_the_sink_ahead_and_stops_when_the_pieces_run_out(app: QApplication) -> None:
     sink = _FakeSink()
     player = PreviewAudioPlayer(sink_factory=lambda: sink)
-    assert player.available and sink.capacity == int(PREVIEW_SAMPLE_RATE * 2 * BUFFER_SECONDS)
+    assert player.available and sink.capacity == int(PREVIEW_SAMPLE_RATE * BYTES_PER_FRAME * BUFFER_SECONDS)
     samples = np.arange(1, PREVIEW_SAMPLE_RATE + 1, dtype=np.int16)  # 1 s
     player.set_pcm(A, 1.0, samples)
     assert player.start([AudioPiece(A, 0.0, 1.0)], 1.0) and player.playing
     assert len(sink.buffer) == sink.capacity, "the buffer is filled at once, up to the sink's capacity"
-    assert np.frombuffer(bytes(sink.buffer[:20]), dtype="<i2").tolist() == list(range(1, 11))
-    sink.drain(2000)
+    assert CHANNELS == 2
+    assert np.frombuffer(bytes(sink.buffer[:24]), dtype="<i2").tolist() == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6], (
+        "the mono signal is duplicated into both channels (mono streams come out of one speaker on some backends)"
+    )
+    sink.drain(4000)  # 1000 frames free: above MIN_WRITE_SAMPLES, so the next feed tops the buffer up
     player._feed()
-    assert len(sink.buffer) == sink.capacity and player.samples_written == (sink.capacity + 2000) // 2
+    assert len(sink.buffer) == sink.capacity and player.samples_written == (sink.capacity + 4000) // BYTES_PER_FRAME
     sink.drain(len(sink.buffer))
     for _ in range(20):
         player._feed()
