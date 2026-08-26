@@ -1,10 +1,15 @@
-"""Motion estimators: inter-frame (auto modes) and reference-locked (camera lock)."""
+"""Motion estimators: inter-frame (auto modes) and reference-locked (camera lock).
+
+The inter-frame estimate comes from :mod:`global_motion` (grid features, rigid-motion hypotheses
+chosen by spread, cell memory), the lock from :mod:`lock` (tracks carried by Lucas-Kanade and
+re-anchored with ORB). This module keeps the analysis helpers, the reference-feature cache and
+the public entry points the stabilizer and the tests use.
+"""
 
 from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +17,7 @@ import cv2
 import numpy as np
 
 from space_video_enhancer.pipeline.stabilization import transforms
+from space_video_enhancer.pipeline.stabilization.global_motion import estimate_global_motion, new_cell_memory
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import NormalizedRect, PixelRect, StabilizationMode
 from space_video_enhancer.telemetry.trace import note
@@ -20,19 +26,7 @@ from space_video_enhancer.telemetry.trace import note
 ANALYSIS_MAX_DIMENSION = 480.0
 ANALYSIS_BLUR_KERNEL = (5, 5)
 
-TRANSLATION_GFTT = {"maxCorners": 160, "qualityLevel": 0.01, "minDistance": 18, "blockSize": 5}
-TRANSLATION_MIN_FEATURES = 8
-TRANSLATION_MIN_TRACKED = 6
 PHASE_CORRELATE_MIN_RESPONSE = 0.05
-
-GEOMETRIC_GFTT = {"maxCorners": 220, "qualityLevel": 0.01, "minDistance": 14, "blockSize": 5}
-GEOMETRIC_MIN_FEATURES = 10
-GEOMETRIC_MIN_TRACKED = 8
-LK_PARAMS = {
-    "winSize": (21, 21),
-    "maxLevel": 3,
-    "criteria": (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
-}
 
 SIMILARITY_MIN_POINTS = 6
 SIMILARITY_RANSAC = {
@@ -151,43 +145,28 @@ def expanded_search_rect(rect: PixelRect, width: int, height: int, multiplier: f
     return (left, top, max(2, right - left), max(2, bottom - top))
 
 
-def _track_features(
-    previous_gray: np.ndarray,
-    current_gray: np.ndarray,
-    gftt: Mapping[str, Any],
-    min_features: int,
-    min_tracked: int,
-    lk_params: Mapping[str, Any] | None = None,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    """GFTT + Lucas-Kanade; returns (previous_points, current_points) or ``None``."""
-    features = cv2.goodFeaturesToTrack(previous_gray, **gftt)
-    if features is None or len(features) < min_features:
+def _memory_of(state: StabilizationState | None) -> np.ndarray | None:
+    """The state's cell memory (created on first use), or ``None`` for a stateless estimate."""
+    if state is None:
         return None
-    next_points, status, _errors = cv2.calcOpticalFlowPyrLK(
-        previous_gray, current_gray, features, None, **(lk_params or {})
-    )
-    if next_points is None or status is None:
-        return None
-    valid_mask = status.reshape(-1) == 1
-    if np.count_nonzero(valid_mask) < min_tracked:
-        return None
-    return features.reshape(-1, 2)[valid_mask], next_points.reshape(-1, 2)[valid_mask]
+    if state.cell_memory is None:
+        state.cell_memory = new_cell_memory()
+    return state.cell_memory
 
 
 def translation_from_gray(
     previous_gray: np.ndarray,
     current_gray: np.ndarray,
     scale: float,
+    state: StabilizationState | None = None,
 ) -> tuple[float, float] | None:
     """Global translation (full-res pixels) that moves ``current_gray`` back onto ``previous_gray``."""
-    tracked = _track_features(
-        previous_gray, current_gray, TRANSLATION_GFTT, TRANSLATION_MIN_FEATURES, TRANSLATION_MIN_TRACKED
-    )
-    if tracked is not None:
-        deltas = tracked[1] - tracked[0]
+    motion = estimate_global_motion(previous_gray, current_gray, StabilizationMode.AUTO, _memory_of(state))
+    if motion is not None:
+        if state is not None:
+            state.last_vectors = motion.vectors
         note("stabilization.estimator", "lk_translation")
-        note("stabilization.tracked_points", len(tracked[0]))
-        return (-float(np.median(deltas[:, 0])) / scale, -float(np.median(deltas[:, 1])) / scale)
+        return (float(motion.transform[0, 2]) / scale, float(motion.transform[1, 2]) / scale)
 
     phase_shift, response = cv2.phaseCorrelate(previous_gray.astype(np.float32), current_gray.astype(np.float32))
     note("stabilization.phase_response", round(float(response), 3))
@@ -214,11 +193,12 @@ def estimate_translation_shift(
 
     if state.prev_gray is None or state.breaks_sequence(frame_index):
         note("stabilization.estimator", "primed" if state.prev_gray is None else "sequence_break")
+        state.cell_memory = None  # a new take: what was background may not be any more
         state.remember_gray(current_gray, frame_index)
         state.remember_shift(None, frame_index)
         return None
 
-    shift = translation_from_gray(state.prev_gray, current_gray, scale)
+    shift = translation_from_gray(state.prev_gray, current_gray, scale, state)
     state.remember_gray(current_gray, frame_index)
     state.remember_shift(shift, frame_index)
     return shift
@@ -252,18 +232,19 @@ def estimate_inter_frame_transform(
 
     if state.prev_gray is None or state.breaks_sequence(frame_index):
         note("stabilization.estimator", "primed" if state.prev_gray is None else "sequence_break")
+        state.cell_memory = None  # a new take: what was background may not be any more
         state.remember_gray(current_gray, frame_index)
         state.remember_transform(None, frame_index)
         return None
 
     transform: np.ndarray | None
     if mode is StabilizationMode.AUTO:
-        shift = translation_from_gray(state.prev_gray, current_gray, scale)
+        shift = translation_from_gray(state.prev_gray, current_gray, scale, state)
         transform = None if shift is None else transforms.translation_to_affine(shift[0], shift[1])
     else:
-        transform = geometric_transform_from_gray(state.prev_gray, current_gray, scale, frame.shape, mode)
+        transform = geometric_transform_from_gray(state.prev_gray, current_gray, scale, frame.shape, mode, state)
         if transform is None and translation_fallback:
-            shift = translation_from_gray(state.prev_gray, current_gray, scale)
+            shift = translation_from_gray(state.prev_gray, current_gray, scale, state)
             transform = None if shift is None else transforms.translation_to_affine(shift[0], shift[1])
     state.remember_gray(current_gray, frame_index)
     state.remember_transform(transform, frame_index)
@@ -286,22 +267,27 @@ def geometric_transform_from_gray(
     scale: float,
     frame_shape: tuple[int, ...],
     mode: StabilizationMode,
+    state: StabilizationState | None = None,
 ) -> np.ndarray | None:
-    tracked = _track_features(
-        previous_gray, current_gray, GEOMETRIC_GFTT, GEOMETRIC_MIN_FEATURES, GEOMETRIC_MIN_TRACKED, LK_PARAMS
-    )
-    if tracked is None:
+    """Similarity (or homography in perspective mode) aligning ``current_gray`` onto ``previous_gray``, full-res."""
+    motion = estimate_global_motion(previous_gray, current_gray, mode, _memory_of(state))
+    if motion is None:
         note("stabilization.estimator", "none")
         return None
-    previous_points, current_points = tracked
-    note("stabilization.tracked_points", len(previous_points))
+    if state is not None:
+        state.last_vectors = motion.vectors
     note("stabilization.estimator", "lk_perspective" if mode is StabilizationMode.PERSPECTIVE else "lk_similarity")
-
-    if mode is StabilizationMode.PERSPECTIVE:
-        perspective = estimate_perspective_transform(current_points, previous_points, scale, frame_shape)
-        if perspective is not None:
-            return perspective
-    return estimate_similarity_transform(current_points, previous_points, scale, frame_shape)
+    if transforms.is_affine(motion.transform):
+        scaled = transforms.rescale_affine(motion.transform, scale)
+        if not transforms.is_reasonable(scaled, frame_shape):
+            note("stabilization.rejected", "unreasonable_similarity")
+            return None
+        return scaled
+    homography = transforms.rescale_homography(motion.transform, scale)
+    if not transforms.is_reasonable(homography, frame_shape, allow_perspective=True):
+        note("stabilization.rejected", "unreasonable_perspective")
+        return None
+    return homography
 
 
 def estimate_similarity_transform(
@@ -350,8 +336,21 @@ def estimate_camera_lock_transform(
     frame: np.ndarray,
     reference_frame: np.ndarray,
     focus_rect: NormalizedRect,
+    state: StabilizationState | None = None,
+    frame_index: int | None = None,
 ) -> np.ndarray | None:
-    """Transform that maps ``frame`` back onto ``reference_frame`` around the focus region."""
+    """Transform that maps ``frame`` back onto ``reference_frame`` around the focus region (see :mod:`lock`)."""
+    from space_video_enhancer.pipeline.stabilization import lock  # noqa: PLC0415  (lock builds on this module)
+
+    return lock.lock_transform(frame, reference_frame, focus_rect, state, frame_index)
+
+
+def orb_lock_transform(
+    frame: np.ndarray,
+    reference_frame: np.ndarray,
+    focus_rect: NormalizedRect,
+) -> np.ndarray | None:
+    """The stateless lock: ORB matches around the region, then template matching. Kept for comparison."""
     reference_height, reference_width = reference_frame.shape[:2]
     current_height, current_width = frame.shape[:2]
     reference_pixels = focus_rect.to_pixels(reference_width, reference_height)
@@ -384,13 +383,10 @@ def estimate_camera_lock_transform(
     return transforms.translation_to_affine(shift[0], shift[1])
 
 
-def camera_lock_feature_transform(
-    reference: ReferenceFeatures,
-    current_gray: np.ndarray,
-    current_mask: np.ndarray | None,
-    scale: float,
-    frame_shape: tuple[int, ...],
-) -> np.ndarray | None:
+def orb_matches(
+    reference: ReferenceFeatures, current_gray: np.ndarray, current_mask: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """``(reference points, current points)`` of the ratio-tested ORB matches, best first; ``None`` when too few."""
     if reference.descriptors is None or len(reference.points) < ORB_MIN_KEYPOINTS:
         return None
     current_keypoints, current_descriptors = cv2.ORB_create(**ORB_PARAMS).detectAndCompute(current_gray, current_mask)
@@ -411,6 +407,20 @@ def camera_lock_feature_transform(
     good_matches = good_matches[:ORB_MAX_MATCHES]
     reference_points = reference.points[[match.queryIdx for match in good_matches]]
     current_points = np.array([current_keypoints[match.trainIdx].pt for match in good_matches], dtype=np.float32)
+    return reference_points, current_points
+
+
+def camera_lock_feature_transform(
+    reference: ReferenceFeatures,
+    current_gray: np.ndarray,
+    current_mask: np.ndarray | None,
+    scale: float,
+    frame_shape: tuple[int, ...],
+) -> np.ndarray | None:
+    matches = orb_matches(reference, current_gray, current_mask)
+    if matches is None:
+        return None
+    reference_points, current_points = matches
     return estimate_similarity_transform(current_points, reference_points, scale, frame_shape)
 
 

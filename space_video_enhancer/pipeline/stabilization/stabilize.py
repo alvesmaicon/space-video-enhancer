@@ -172,7 +172,9 @@ def camera_lock(
 ) -> np.ndarray | None:
     lock = None
     if reference_frame is not None:
-        lock = estimators.estimate_camera_lock_transform(frame, reference_frame, settings.focus_rect)
+        lock = estimators.estimate_camera_lock_transform(
+            frame, reference_frame, settings.focus_rect, state, frame_index
+        )
     previous = state.previous_correction(frame_index, frame.shape[1]) if state is not None else None
     if lock is None:
         if previous is None:
@@ -198,7 +200,9 @@ def hybrid(
 
     lock = None
     if reference_frame is not None:
-        lock = estimators.estimate_camera_lock_transform(frame, reference_frame, settings.focus_rect)
+        lock = estimators.estimate_camera_lock_transform(
+            frame, reference_frame, settings.focus_rect, state, frame_index
+        )
     delta = estimators.estimate_inter_frame_transform(
         frame, frame_index, state, StabilizationMode.SIMILARITY, translation_fallback=True
     )

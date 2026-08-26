@@ -7,6 +7,7 @@ export job has its own). Never share an instance across threads.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -34,6 +35,12 @@ class StabilizationState:
     different sizes (interactive 640 px, full-size idle render), so corrections are rescaled on reuse."""
     lock_lost_frames: int = 0
     """Hybrid: recent frames without a camera-lock match (capped); eases the re-acquisition."""
+    lock: Any = None
+    """:class:`lock.LockTrack`: reference correspondences carried across frames by the camera lock."""
+    cell_memory: np.ndarray | None = None
+    """Which grid cells have been moving with the camera (see ``global_motion``); reset with the sequence."""
+    last_vectors: Any = None
+    """:class:`global_motion.MotionVectors` of the last inter-frame estimate, for the diagnostic overlay."""
 
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
