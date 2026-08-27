@@ -1,8 +1,9 @@
 # Space Video Enhancer
 
-Editor de vídeo offline para desktop: abre arquivos locais, mostra **antes e depois** lado a lado enquanto você ajusta estabilização, ruído, cor e geometria, monta uma sequência de clipes com cortes, e exporta no seu computador. Nada sai da máquina.
+Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windows): abre arquivos locais, mostra **antes e depois** lado a lado enquanto você ajusta estabilização, ruído, cor e geometria, monta uma sequência de clipes com cortes, e exporta no seu computador. Nada sai da máquina.
 
 [![CI](https://github.com/OWNER/space-video-enhancer/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/space-video-enhancer/actions/workflows/ci.yml)
+![Plataformas](https://img.shields.io/badge/plataformas-macOS%20%7C%20Linux%20%7C%20Windows-555)
 ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
 ![PySide6](https://img.shields.io/badge/UI-PySide6-41cd52)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
@@ -35,7 +36,13 @@ Editor de vídeo offline para desktop: abre arquivos locais, mostra **antes e de
 
 ## Instalação
 
-Requisitos: **Python 3.9+** e **FFmpeg** no `PATH`.
+Requisitos: **Python 3.9+** e **FFmpeg** no `PATH`. O mesmo código roda nos três sistemas — Qt, OpenCV e FFmpeg cuidam das diferenças — e o app só consulta o sistema para detalhes de integração (ícone na taskbar, dicas do diagnóstico, dispositivo VAAPI):
+
+| Sistema | Estado | Observações |
+|---|---|---|
+| macOS (Apple Silicon e Intel) | Desenvolvido e usado aqui | OpenCL no denoise; o nome na barra de menus fica "Python" fora de um `.app` |
+| Linux (Ubuntu 22.04/24.04) | Testado regularmente | OpenCL, NVENC e VAAPI quando disponíveis ([docs/GPU.md](docs/GPU.md)); `scripts/install-desktop-entry.sh` para nome e ícone no dock |
+| Windows 10/11 | Deve funcionar, não validado com frequência | NVENC via FFmpeg com `nvenc`; abra uma issue se algo falhar |
 
 ```bash
 # macOS
