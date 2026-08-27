@@ -36,7 +36,7 @@ Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windo
 
 ## Instalação
 
-Requisitos: **Python 3.9+** e **FFmpeg** no `PATH`. O mesmo código roda nos três sistemas — Qt, OpenCV e FFmpeg cuidam das diferenças — e o app só consulta o sistema para detalhes de integração (ícone na taskbar, dicas do diagnóstico, dispositivo VAAPI):
+Requisitos: **Python 3.9 a 3.13** (3.11 ou 3.12 recomendado; em 3.9 o pip instala o PySide6 6.10, o último com suporte a ele) e **FFmpeg** no `PATH`. O mesmo código roda nos três sistemas — Qt, OpenCV e FFmpeg cuidam das diferenças — e o app só consulta o sistema para detalhes de integração (ícone na taskbar, dicas do diagnóstico, dispositivo VAAPI):
 
 | Sistema | Estado | Observações |
 |---|---|---|
