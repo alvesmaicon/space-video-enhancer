@@ -1,10 +1,11 @@
 """Timecode, the zoomable timeline with clip markers and cuts, the timeline tools and the transport buttons.
 
 Below the timeline, from left to right: the tools that act on the playhead and the clip under it
-(mark in/out, remove a range, split, delete, move back/forward), the transport buttons centred
-under the timeline, and the playback speed and sound controls. The two labels above the
-timeline have fixed widths sized for the widest text they can show for the open video, so
-changing digits never moves anything.
+(mark in/out, remove a range, split, delete, move back/forward), then the transport buttons, and
+at the right edge the playback speed and sound controls. One left-aligned strip keeps the row's
+minimum width honest (no forced symmetry), so the window still fits a 1280 px screen. The two
+labels above the timeline have fixed widths sized for the widest text they can show for the
+open video, so changing digits never moves anything.
 """
 
 from __future__ import annotations
@@ -26,12 +27,12 @@ from space_video_enhancer.ui.widgets.timeline import ClipBlock, TimelineWidget
 PRIMARY_COLOR = QColor("#0f766e")
 ON_PRIMARY_COLOR = QColor("#ffffff")
 TOOL_COLOR = QColor("#374151")
-BUTTON_SIZE = QSize(42, 38)
-PLAY_BUTTON_SIZE = QSize(54, 40)
-TOOL_BUTTON_SIZE = QSize(34, 30)
+BUTTON_SIZE = QSize(38, 34)
+PLAY_BUTTON_SIZE = QSize(46, 36)
+TOOL_BUTTON_SIZE = QSize(28, 26)
 ICON_SIZE = QSize(18, 18)
 PLAY_ICON_SIZE = QSize(22, 22)
-TOOL_ICON_SIZE = QSize(17, 17)
+TOOL_ICON_SIZE = QSize(16, 16)
 LABEL_SLACK_PX = 4
 SECONDS_PER_HOUR = 3600
 PLAYBACK_SPEED_OPTIONS: list[tuple[str, float]] = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25)]
@@ -207,28 +208,23 @@ class TransportBar(QWidget):
         self.tools.setObjectName("timelineTools")
         tools_row = QHBoxLayout(self.tools)
         tools_row.setContentsMargins(0, 0, 0, 0)
-        tools_row.setSpacing(4)
+        tools_row.setSpacing(3)
         for tool in (self.mark_in_button, self.mark_out_button, self.remove_range_button):
             tools_row.addWidget(tool)
-        tools_row.addSpacing(8)
+        tools_row.addSpacing(6)
         for tool in (self.split_button, self.delete_clip_button, self.move_left_button, self.move_right_button):
             tools_row.addWidget(tool)
         self.playback_controls = QWidget()
         playback_row = QHBoxLayout(self.playback_controls)
         playback_row.setContentsMargins(0, 0, 0, 0)
-        playback_row.setSpacing(8)
+        playback_row.setSpacing(6)
         playback_row.addWidget(self.speed_combo)
         playback_row.addWidget(self.sound_button)
-        # Equal side widths keep the transport buttons centred under the timeline.
-        side_width = max(self.tools.sizeHint().width(), self.playback_controls.sizeHint().width())
-        self.tools.setMinimumWidth(side_width)
-        self.playback_controls.setMinimumWidth(side_width)
-        playback_row.insertStretch(0, 1)
 
         button_row = QHBoxLayout()
-        button_row.setSpacing(8)
+        button_row.setSpacing(6)
         button_row.addWidget(self.tools)
-        button_row.addStretch(1)
+        button_row.addSpacing(10)
         for transport_button in (
             self.go_first_button,
             self.prev_frame_button,

@@ -36,10 +36,15 @@ def test_every_tab_fits_at_the_default_window_size(app: QApplication, window: Ma
     assert_tabs_unclipped(app, window)
 
 
+SMALL_WINDOW_WIDTH = 1200
+"""A 1280 px laptop screen minus the OS chrome: the window must be able to shrink to this (fonts vary per OS)."""
+
+
 def test_tabs_still_fit_in_a_small_window(app: QApplication, window: MainWindow) -> None:
-    window.resize(1000, 640)
+    assert window.minimumSizeHint().width() <= SMALL_WINDOW_WIDTH, "the layout's minimum width grew"
+    window.resize(SMALL_WINDOW_WIDTH, 640)
     pump(app, 0.1)
-    assert window.width() == 1000, "the window refuses to shrink to 1000 px"
+    assert window.width() == SMALL_WINDOW_WIDTH, f"the window refuses to shrink to {SMALL_WINDOW_WIDTH} px"
     assert_tabs_unclipped(app, window)
 
 

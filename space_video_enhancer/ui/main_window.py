@@ -1,4 +1,4 @@
-"""Main window: wires preview, transport, tabs, toolbar and status bar; snapshots widgets into ``RenderSettings``.
+"""Main window: wires preview, transport, tabs, menus and status bar; snapshots widgets into ``RenderSettings``.
 
 No image processing lives here. Everything the pipeline needs is read from widgets
 exactly once per render into an immutable snapshot (see :mod:`space_video_enhancer.settings`).
@@ -28,15 +28,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
-    QLabel,
     QMainWindow,
     QMessageBox,
     QScrollArea,
-    QSizePolicy,
     QSplitter,
     QStyle,
     QTabWidget,
-    QToolBar,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -277,7 +274,6 @@ class MainWindow(QMainWindow):
         self._create_widgets()
         self._create_actions()
         self._build_ui()
-        self._build_toolbar()
         self._build_menu_bar()
         self._bind_events()
         self._apply_settings_to_controls(DEFAULT_FILTER_SETTINGS)
@@ -318,7 +314,9 @@ class MainWindow(QMainWindow):
         self.preview_zoom_combo.addItem("Ajustar", None)
         for percent in PREVIEW_ZOOM_STEPS:
             self.preview_zoom_combo.addItem(f"{percent}%", percent)
-        self.preview_zoom_combo.setToolTip("Ajustar à janela ou zoom fixo (100% = 1 pixel do vídeo por pixel da tela)")
+        self.preview_zoom_combo.setToolTip(
+            "Zoom do preview: ajustar à janela ou um nível fixo (100% = 1 pixel do vídeo por pixel da tela)"
+        )
         self.preview_zoom_out_button = QToolButton()
         self.preview_zoom_out_button.setText("−")
         self.preview_zoom_out_button.setToolTip("Diminuir zoom do preview")
@@ -329,7 +327,9 @@ class MainWindow(QMainWindow):
             button.setObjectName("previewZoomButton")
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.preview_render_mode_combo = enum_combo(PREVIEW_RENDER_MODE_OPTIONS)
-        self.preview_render_mode_combo.setToolTip("Troca qualidade por velocidade apenas no preview")
+        self.preview_render_mode_combo.setToolTip(
+            "Qualidade do preview: troca fidelidade por velocidade só na tela; a exportação é sempre completa"
+        )
         self.preview_speed_combo = self.transport.speed_combo  # lives next to the play buttons
 
     def _create_actions(self) -> None:
@@ -363,8 +363,6 @@ class MainWindow(QMainWindow):
             if QKeySequence(extra) not in redo_keys:
                 redo_keys.append(QKeySequence(extra))
         self.redo_action.setShortcuts(redo_keys)
-        self.undo_action.setIconText("Desfazer")  # the toolbar keeps a fixed label; the menu says what is undone
-        self.redo_action.setIconText("Refazer")
         self.undo_action.setEnabled(False)
         self.redo_action.setEnabled(False)
         self.restore_preset_action = self._make_action(
@@ -471,12 +469,10 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
-        row.addWidget(QLabel("Zoom"))
         row.addWidget(self.preview_zoom_out_button)
         row.addWidget(self.preview_zoom_combo)
         row.addWidget(self.preview_zoom_in_button)
         row.addSpacing(12)
-        row.addWidget(QLabel("Qualidade"))
         row.addWidget(self.preview_render_mode_combo)
         row.addStretch(1)
         self.hud_button = QToolButton()
@@ -503,29 +499,6 @@ class MainWindow(QMainWindow):
             needed = max(needed, tab.content_min_width())
         self.settings_tabs.setMinimumWidth(needed)
         self.splitter.setSizes([10_000, needed])  # relative weights: the panel gets its minimum, preview the rest
-
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Principal", self)
-        toolbar.setObjectName("mainToolbar")
-        toolbar.setMovable(False)
-        toolbar.setFloatable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.setIconSize(QSize(16, 16))
-        toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
-        toolbar.addAction(self.open_action)
-        toolbar.addAction(self.add_video_action)
-        open_button = toolbar.widgetForAction(self.open_action)
-        if open_button is not None:
-            open_button.setObjectName("toolbarPrimary")
-        toolbar.addSeparator()
-        toolbar.addAction(self.undo_action)
-        toolbar.addAction(self.redo_action)
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
-        self.toolbar = toolbar
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()

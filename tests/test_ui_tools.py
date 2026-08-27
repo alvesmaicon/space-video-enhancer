@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu, QToolBar
 
 from space_video_enhancer.settings import DEFAULT_FILTER_SETTINGS, DenoiseMode
 from space_video_enhancer.ui import main_window as main_window_module
@@ -97,7 +97,7 @@ def test_timeline_tools_act_on_the_playhead_and_the_clip_under_it(
     assert window.undo_action.text() == "Desfazer remover clipe"
 
 
-def test_preview_controls_sit_above_the_preview_and_the_toolbar_keeps_files_and_history(window: MainWindow) -> None:
+def test_preview_controls_sit_above_the_preview_and_there_is_no_toolbar(window: MainWindow) -> None:
     bar = window.preview_bar
     assert window.preview_zoom_combo.parentWidget() is bar and window.preview_render_mode_combo.parentWidget() is bar
     assert window.hud_button.parentWidget() is bar and window.hud_button.defaultAction() is window.hud_action
@@ -105,9 +105,10 @@ def test_preview_controls_sit_above_the_preview_and_the_toolbar_keeps_files_and_
     assert window.preview_speed_combo is window.transport.speed_combo, "speed lives next to the play buttons"
     assert window.transport.sound_button.parentWidget() is window.transport.playback_controls
 
-    toolbar_actions = [action for action in window.toolbar.actions() if action.text()]
-    assert toolbar_actions == [window.open_action, window.add_video_action, window.undo_action, window.redo_action]
-    assert window.undo_action.iconText() == "Desfazer", "the toolbar label stays put while the menu names the step"
+    assert window.findChildren(QToolBar) == [], "files and history live in the menus and shortcuts only"
+    menus = {menu.title(): menu for menu in window.menuBar().findChildren(QMenu)}
+    assert window.open_action in menus["Arquivo"].actions() and window.add_video_action in menus["Arquivo"].actions()
+    assert window.undo_action in menus["Editar"].actions() and window.redo_action in menus["Editar"].actions()
 
     window.hud_button.click()
     assert window.hud_action.isChecked() and window._hud_visible
