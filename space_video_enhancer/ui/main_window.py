@@ -578,16 +578,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(10)
         layout.addStretch(1)
-        title = QLabel("O preview está na janela separada")
+        title = QLabel("Preview rodando em pop-up")
         title.setObjectName("previewPausedTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        explanation = QLabel(
-            "Esta janela parou de desenhar o frame para não gastar processamento à toa.\n"
-            "As abas Geometria, Ruído, Estabilizar e HSL mostram o preview aqui de novo,\n"
-            "porque nelas as regiões são arrastadas sobre a imagem."
-        )
+        explanation = QLabel("Esta janela parou de desenhar o frame.")
         explanation.setObjectName("previewPausedHint")
         explanation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        explanation.setToolTip(
+            "As abas Geometria, Ruído, Estabilizar e HSL mostram o preview aqui mesmo assim: nelas a região é "
+            "arrastada sobre a imagem."
+        )
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         buttons.addStretch(1)
