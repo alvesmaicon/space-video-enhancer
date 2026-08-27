@@ -1,11 +1,11 @@
 """Timecode, the zoomable timeline with clip markers and cuts, the timeline tools and the transport buttons.
 
-Below the timeline, from left to right: the tools that act on the playhead and the clip under it
-(mark in/out, remove a range, split, delete, move back/forward), then the transport buttons, and
-at the right edge the playback speed and sound controls. One left-aligned strip keeps the row's
-minimum width honest (no forced symmetry), so the window still fits a 1280 px screen. The two
-labels above the timeline have fixed widths sized for the widest text they can show for the
-open video, so changing digits never moves anything.
+Above the timeline: the timecode, the transport buttons and the frame counter. Below it, from
+left to right: the tools that act on the playhead and the clip under it (mark in/out, remove a
+range, split, delete, move back/forward), the timeline zoom and, at the right edge, the playback
+speed and sound. Nothing forces symmetry, so every row's minimum width is just its contents and
+the window keeps fitting a 1280 px screen. The two labels have fixed widths sized for the widest
+text they can show for the open video, so changing digits never moves anything.
 """
 
 from __future__ import annotations
@@ -194,13 +194,21 @@ class TransportBar(QWidget):
         self.next_frame_button.clicked.connect(self.nextRequested.emit)
         self.go_last_button.clicked.connect(self.lastRequested.emit)
 
+        transport_row = QHBoxLayout()
+        transport_row.setSpacing(6)
+        for transport_button in (
+            self.go_first_button,
+            self.prev_frame_button,
+            self.play_button,
+            self.next_frame_button,
+            self.go_last_button,
+        ):
+            transport_row.addWidget(transport_button)
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
         header_row.addWidget(self.timecode_label)
         header_row.addStretch(1)
-        header_row.addWidget(self.zoom_out_button)
-        header_row.addWidget(self.zoom_fit_button)
-        header_row.addWidget(self.zoom_in_button)
+        header_row.addLayout(transport_row)
         header_row.addStretch(1)
         header_row.addWidget(self.frame_label)
 
@@ -224,16 +232,11 @@ class TransportBar(QWidget):
         button_row = QHBoxLayout()
         button_row.setSpacing(6)
         button_row.addWidget(self.tools)
-        button_row.addSpacing(10)
-        for transport_button in (
-            self.go_first_button,
-            self.prev_frame_button,
-            self.play_button,
-            self.next_frame_button,
-            self.go_last_button,
-        ):
-            button_row.addWidget(transport_button)
         button_row.addStretch(1)
+        button_row.addWidget(self.zoom_out_button)
+        button_row.addWidget(self.zoom_fit_button)
+        button_row.addWidget(self.zoom_in_button)
+        button_row.addSpacing(12)
         button_row.addWidget(self.playback_controls)
 
         layout = QVBoxLayout(self)
