@@ -10,11 +10,10 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from space_video_enhancer.project import load_project
 from space_video_enhancer.settings import StabilizationMode
-from space_video_enhancer.ui import main_window as main_window_module
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from tests.conftest import UI_VIDEO_B_FRAMES, UI_VIDEO_FRAMES
@@ -62,9 +61,7 @@ def test_save_and_reopen_a_project_restores_the_document(
     select_combo_data(window.export_tab.thread_combo, 2)
 
     project_path = tmp_path / "meu-projeto.svep"
-    monkeypatch.setattr(
-        main_window_module.QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(project_path), "")
-    )
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(project_path), ""))
     assert window._save_project(), "no file yet: Salvar goes through Salvar como…"
     assert project_path.is_file() and window.project_path == project_path
     assert window.windowTitle() == "meu-projeto — Space Video Enhancer" and not window.has_unsaved_changes
@@ -73,9 +70,7 @@ def test_save_and_reopen_a_project_restores_the_document(
     window.color_tab.brightness_slider.setValue(40)
     wait_for_preview(app, window)
     assert window.windowTitle() == "meu-projeto * — Space Video Enhancer"
-    monkeypatch.setattr(
-        main_window_module.QFileDialog, "getSaveFileName", lambda *args, **kwargs: pytest.fail("no dialog")
-    )
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: pytest.fail("no dialog"))
     assert window._save_project(), "with a file, Ctrl+S saves in place"
     assert not window.has_unsaved_changes
 
@@ -137,7 +132,7 @@ def test_a_project_whose_media_moved_opens_with_the_clip_marked(
     assert window._decoded_source == ui_video, "the clip that is present still renders"
 
     warnings: list[str] = []
-    monkeypatch.setattr(main_window_module.QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
     window._export_video()
     assert warnings and "gone.mp4" in warnings[0]
 
@@ -166,15 +161,13 @@ def test_unsaved_changes_are_confirmed_before_closing_or_replacing(
     assert window._confirm_discard_changes()
 
     project_path = tmp_path / "s.svep"
-    monkeypatch.setattr(
-        main_window_module.QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(project_path), "")
-    )
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(project_path), ""))
     answers.append("save")
     assert window._confirm_discard_changes() and project_path.is_file() and not window.has_unsaved_changes
 
     window.color_tab.brightness_slider.setValue(20)
     wait_for_preview(app, window)
-    monkeypatch.setattr(main_window_module.QFileDialog, "getOpenFileName", lambda *args, **kwargs: (str(ui_video), ""))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args, **kwargs: (str(ui_video), ""))
     answers.append("cancel")
     window._select_video()
     assert window.color_tab.brightness_slider.value() == 20 and window.project_path == project_path, "cancelled"
@@ -192,7 +185,7 @@ def test_recent_projects_menu_drops_a_project_that_no_longer_exists(
 
     project_path.unlink()
     errors: list[str] = []
-    monkeypatch.setattr(main_window_module.QMessageBox, "critical", lambda *args: errors.append(args[2]))
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: errors.append(args[2]))
     assert not window._open_project(project_path)
     assert errors and "r.svep" in errors[0] and project_path not in window._recent_projects.paths
     assert window.project_path == project_path, "the failed open leaves the document alone"

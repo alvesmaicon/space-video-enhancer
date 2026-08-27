@@ -112,7 +112,7 @@ space_video_enhancer/
   video.py, audio.py                                    # decodificação de frames e de PCM
   pipeline/                                             # render_frame e cada etapa (filtros, denoise, grade, geometry, stabilization/)
   export/                                               # ffmpeg, job puro e adaptador QThread
-  ui/                                                   # janela, abas, widgets, workers, monitor
+  ui/                                                   # janela (main_window + sections/ por assunto), abas, widgets, workers, monitor
   telemetry/                                            # log estruturado em JSON
 tests/                                                  # pytest, roda sem display
 benchmarks/                                             # medições que justificaram os algoritmos

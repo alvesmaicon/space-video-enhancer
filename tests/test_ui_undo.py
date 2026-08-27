@@ -12,7 +12,8 @@ from PySide6.QtCore import QRectF
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.settings import StabilizationMode
-from space_video_enhancer.ui.main_window import MainWindow, settings_edit_label
+from space_video_enhancer.ui.main_window import MainWindow
+from space_video_enhancer.ui.sections.editing import settings_edit_label
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from tests.conftest import UI_VIDEO_B_FRAMES, UI_VIDEO_FRAMES
 from tests.qt_helpers import wait_for_preview, wait_until

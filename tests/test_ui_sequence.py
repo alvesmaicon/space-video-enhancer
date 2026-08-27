@@ -10,13 +10,13 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from space_video_enhancer.export.ffmpeg import LIBX264
 from space_video_enhancer.settings import StabilizationMode
 from space_video_enhancer.timeline import FrameRange
-from space_video_enhancer.ui import main_window as main_window_module
 from space_video_enhancer.ui.main_window import MainWindow
+from space_video_enhancer.ui.sections import exporting as exporting_module
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from tests.conftest import UI_VIDEO_B_FRAMES, UI_VIDEO_FRAMES
 from tests.qt_helpers import wait_for_preview, wait_until
@@ -142,7 +142,7 @@ def test_a_video_with_another_fps_is_refused(
     app: QApplication, window: MainWindow, ui_video: Path, ui_video_other_fps: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     warnings: list[str] = []
-    monkeypatch.setattr(main_window_module.QMessageBox, "warning", lambda *args: warnings.append(str(args[2])))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(str(args[2])))
     window._open_video(ui_video)
     wait_for_preview(app, window)
     window._add_video(ui_video_other_fps)
@@ -190,12 +190,10 @@ def test_cuts_span_clips_and_the_export_joins_the_sequence(
     window._mark_clip_end()
     assert "Saída: 12 frames" in window.export_tab.summary_label.text()
 
-    monkeypatch.setattr(main_window_module, "ExportController", _FakeExportController)
-    monkeypatch.setattr(main_window_module, "find_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(main_window_module, "resolve_encoder", lambda probe, **kwargs: LIBX264)
-    monkeypatch.setattr(
-        main_window_module.QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(tmp_path / "out.mp4"), "")
-    )
+    monkeypatch.setattr(exporting_module, "ExportController", _FakeExportController)
+    monkeypatch.setattr(exporting_module, "find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(exporting_module, "resolve_encoder", lambda probe, **kwargs: LIBX264)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(tmp_path / "out.mp4"), ""))
     window._export_video()
     assert len(_FakeExportController.created) == 1
     request = _FakeExportController.created[-1].request

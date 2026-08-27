@@ -9,10 +9,9 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QMenu, QToolBar
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QToolBar
 
 from space_video_enhancer.settings import DEFAULT_FILTER_SETTINGS, DenoiseMode
-from space_video_enhancer.ui import main_window as main_window_module
 from space_video_enhancer.ui.icons import FILLED_GLYPHS, STROKED_GLYPHS, glyph_icon
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
@@ -134,9 +133,7 @@ def test_export_tab_keeps_processing_and_the_export_button(
     assert window.sequence.clips[0].settings.filters.scale_factor == 0.5
 
     asked: list[bool] = []
-    monkeypatch.setattr(
-        main_window_module.QFileDialog, "getSaveFileName", lambda *args, **kwargs: (asked.append(True), ("", ""))[1]
-    )
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (asked.append(True), ("", ""))[1])
     tab.export_button.click()
     pump(app, 0.05)
     assert asked == [True], "the button goes through the export action"

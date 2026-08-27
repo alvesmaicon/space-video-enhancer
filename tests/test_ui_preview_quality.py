@@ -11,7 +11,8 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.settings import DenoiseMode, StabilizationMode
-from space_video_enhancer.ui.main_window import INTERACTIVE_DENOISE_SIZE_LIMIT, MainWindow
+from space_video_enhancer.ui.main_window import MainWindow
+from space_video_enhancer.ui.sections.preview import INTERACTIVE_DENOISE_SIZE_LIMIT
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from tests.qt_helpers import wait_for_preview, wait_until
 
