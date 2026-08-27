@@ -1,13 +1,15 @@
 """Tab "Estabilizar": mode, strength, smoothing, focal region and border handling.
 
 The focal region itself is edited directly on the preview whenever this tab is active
-and the mode uses a focal point; there is no separate "edit" toggle.
+and the mode uses a focal point; there is no separate "edit" toggle. The reference frame
+the lock holds on to is the one on screen when the mode is chosen or the region moves;
+"Usar este frame como referência" re-takes it on the current frame without moving the region.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton
 
 from space_video_enhancer.settings import NormalizedRect, StabilizationMode, StabilizationSettings, clamp_unit
 from space_video_enhancer.ui.format import format_percent
@@ -42,11 +44,12 @@ MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
         "Como o automático, com uma homografia global para parallax leve e pequenas mudanças de perspectiva."
     ),
     StabilizationMode.CAMERA_LOCK: (
-        "Usa features da região verde para manter esse enquadramento preso ao frame de referência; "
+        "Mantém a região verde (arraste-a no preview) presa a onde ela estava no frame de referência; "
         "segura a última posição se perder o alvo."
     ),
     StabilizationMode.HYBRID: (
-        "Prende a região verde com camera lock; se perder o alvo, segue o movimento global até reencontrá-lo."
+        "Prende a região verde (arraste-a no preview) com camera lock; se perder o alvo, segue o movimento "
+        "global até reencontrá-lo."
     ),
 }
 DEFAULT_INTENSITY = 100
@@ -58,6 +61,9 @@ class StabilizationTab(TabPage):
     controlChanged = Signal()
     """Intensity, smoothing, auto crop or zoom out changed (inter-frame memory must restart)."""
     resetRequested = Signal()
+    """Put the focal region back at the centre (and take the reference on the current frame)."""
+    referenceRequested = Signal()
+    """Make the frame on screen the camera-lock reference; the focal region stays where it is."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -76,8 +82,16 @@ class StabilizationTab(TabPage):
             "baixo remove só o tremor rápido, alto quase trava o enquadramento."
         )
         self.intensity_slider.setToolTip("Fração da correção aplicada: 100% segue a trajetória suavizada por completo.")
+        self.reference_button = QPushButton("Usar este frame como referência")
+        self.reference_button.setToolTip(
+            "Prende o camera lock ao frame que está no preview, mantendo a região verde onde está. "
+            "Escolha um frame nítido, com a região bem enquadrada."
+        )
         self.reset_button = QPushButton("Redefinir ponto focal")
         self.reset_button.setObjectName("secondaryButton")
+        self.reset_button.setToolTip(
+            "Volta a região verde para o centro do quadro e usa o frame atual como referência."
+        )
         self.auto_crop_checkbox = QCheckBox("Crop automático para esconder bordas")
         self.auto_crop_checkbox.setChecked(True)
         self.auto_crop_checkbox.setToolTip(
@@ -94,6 +108,10 @@ class StabilizationTab(TabPage):
         self.auto_crop_checkbox.toggled.connect(lambda _checked: self.controlChanged.emit())
         self.zoom_out_checkbox.toggled.connect(self._handle_zoom_out_toggled)
         self.reset_button.clicked.connect(self.resetRequested.emit)
+        self.reference_button.clicked.connect(self.referenceRequested.emit)
+        reference_buttons = QHBoxLayout()
+        reference_buttons.addWidget(self.reference_button)
+        reference_buttons.addWidget(self.reset_button)
 
         self.add_sections(
             group_box(
@@ -104,7 +122,7 @@ class StabilizationTab(TabPage):
                 self.smoothing_slider,
                 self.auto_crop_checkbox,
                 self.zoom_out_checkbox,
-                self.reset_button,
+                reference_buttons,
                 self.info_label,
             )
         )
@@ -156,6 +174,7 @@ class StabilizationTab(TabPage):
         self.auto_crop_checkbox.setEnabled(stabilization_enabled and not zoom_out_enabled)
         self.zoom_out_checkbox.setEnabled(stabilization_enabled)
         self.reset_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
+        self.reference_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
 
     def set_info(self, text: str) -> None:
         self.info_label.setText(text)
@@ -166,6 +185,7 @@ class StabilizationTab(TabPage):
             self.intensity_slider,
             self.smoothing_slider,
             self.reset_button,
+            self.reference_button,
             self.auto_crop_checkbox,
             self.zoom_out_checkbox,
         ):

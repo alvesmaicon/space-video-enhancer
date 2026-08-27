@@ -15,8 +15,8 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Hashable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,7 @@ from space_video_enhancer.ui.audio_preview import (
 )
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.format import format_duration, format_timecode, parse_timecode
+from space_video_enhancer.ui.history import EditHistory
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo, select_combo_data
 from space_video_enhancer.ui.tabs.color import ColorTab
@@ -133,6 +134,38 @@ def norm_to_qrect(rect: NormalizedRect) -> QRectF:
     return QRectF(rect.x, rect.y, rect.width, rect.height)
 
 
+@dataclass(frozen=True)
+class EditState:
+    """Everything undo/redo restores: the clips (settings, cuts, references included) and the export range."""
+
+    sequence: ClipSequence
+    clip_start_frame: int
+    clip_end_frame: int
+
+
+SETTINGS_SECTION_NAMES = {
+    "filters": "ajustes de imagem",
+    "image_filter": "filtro",
+    "geometry": "geometria",
+    "crop": "crop",
+    "stabilization": "estabilização",
+    "denoise_sample_rect": "amostra de ruído",
+    "grade": "HSL",
+    "exposure": "exposição",
+}
+"""Undo labels for a change confined to one section of ``RenderSettings`` (keys of ``diff_settings``)."""
+
+
+def settings_edit_label(changes: dict[str, Any]) -> str:
+    """Undo label: "ajuste de estabilização" for a change inside one section, "ajustes" when several changed."""
+    sections = {key.split(".", 1)[0] for key in changes}
+    if len(sections) == 1:
+        name = SETTINGS_SECTION_NAMES.get(next(iter(sections)))
+        if name is not None:
+            return name if name.startswith("ajuste") else f"ajuste de {name}"
+    return "ajustes"
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -157,6 +190,8 @@ class MainWindow(QMainWindow):
         self.playback_end_frame = 0
         self._pending_cut_start: int | None = None
         self.current_frame: np.ndarray | None = None
+        self._history: EditHistory[EditState] = EditHistory(self._edit_state())
+        """Undo/redo over (sequence, export range) snapshots (see ui/history.py); reset when a video is opened."""
 
         # --- editing state -----------------------------------------------------------------
         self.active_preset_settings: FilterSettings = DEFAULT_FILTER_SETTINGS
@@ -321,6 +356,15 @@ class MainWindow(QMainWindow):
         self.split_clip_action = self._make_action("Dividir clipe no playhead", self._split_clip_at_playhead, "Ctrl+K")
         self.remove_clip_action = self._make_action("Remover clipe ativo", self._remove_active_clip)
         self.quit_action = self._make_action("Sair", self.close, QKeySequence.StandardKey.Quit)
+        self.undo_action = self._make_action("Desfazer", self._undo_edit, QKeySequence.StandardKey.Undo)
+        self.redo_action = self._make_action("Refazer", self._redo_edit, QKeySequence.StandardKey.Redo)
+        redo_keys = list(QKeySequence.keyBindings(QKeySequence.StandardKey.Redo))
+        for extra in ("Ctrl+Shift+Z", "Ctrl+Y"):  # both conventions, whatever the platform binds by default
+            if QKeySequence(extra) not in redo_keys:
+                redo_keys.append(QKeySequence(extra))
+        self.redo_action.setShortcuts(redo_keys)
+        self.undo_action.setEnabled(False)
+        self.redo_action.setEnabled(False)
         self.restore_preset_action = self._make_action(
             "Restaurar preset ativo", self._restore_active_preset_settings, "Ctrl+R"
         )
@@ -471,6 +515,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.quit_action)
 
         edit_menu = menu_bar.addMenu("Editar")
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addAction(self.redo_action)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.restore_preset_action)
         edit_menu.addAction(self.reset_crop_action)
         edit_menu.addAction(self.reset_range_action)
@@ -559,6 +606,7 @@ class MainWindow(QMainWindow):
         self.stabilization_tab.modeChanged.connect(self._handle_stabilization_mode_changed)
         self.stabilization_tab.controlChanged.connect(self._handle_stabilization_control_change)
         self.stabilization_tab.resetRequested.connect(self._reset_stabilization_rect)
+        self.stabilization_tab.referenceRequested.connect(self._set_stabilization_reference_here)
         self.geometry_tab.geometryChanged.connect(self._handle_geometry_change)
         self.geometry_tab.cropModeChanged.connect(self._handle_crop_mode_changed)
         self.geometry_tab.cropResetRequested.connect(self._reset_crop_rect)
@@ -585,6 +633,7 @@ class MainWindow(QMainWindow):
         self.export_action.setEnabled(enabled and not self.sequence.is_empty)
         self.split_clip_action.setEnabled(enabled and not self.sequence.is_empty)
         self.remove_clip_action.setEnabled(enabled and len(self.sequence) > 1)
+        self._update_history_actions()
         self.filters_tab.set_video_loaded(self.frame_count > 0)
         self._update_denoise_controls_state()
         self._update_stabilization_controls_state()
@@ -772,6 +821,8 @@ class MainWindow(QMainWindow):
         self.clip_start_frame = 0
         self.clip_end_frame = self.frame_count - 1
         self._pending_cut_start = None
+        self._history.reset(self._edit_state())  # a new document: nothing to undo
+        self._update_history_actions()
         self._stabilization_epoch += 1
         self.transport.set_frame_count(self.frame_count, self.fps, source.aspect_ratio)
         self._sequence_changed()
@@ -812,6 +863,7 @@ class MainWindow(QMainWindow):
         self._preview_controller.set_videos(tuple(self._sources.values()))
         log_event(LOG, "sequence.add", name=path.name, clips=len(self.sequence), frames=self.frame_count)
         self._sequence_changed()
+        self._commit_edit("adicionar vídeo")
         self.status.show_message(
             f"{path.name} adicionado à sequência: {len(self.sequence)} clipes, "
             f"{format_duration(self.frame_count / self.fps)}."
@@ -835,6 +887,7 @@ class MainWindow(QMainWindow):
         self.sequence = split
         log_event(LOG, "sequence.split", frame=self.current_frame_index, clips=len(self.sequence))
         self._sequence_changed()
+        self._commit_edit("dividir clipe")
         self.status.show_message(
             f"Clipe dividido em {format_timecode(self.current_frame_index, self.fps)}: "
             "cada parte agora tem ajustes próprios."
@@ -857,6 +910,7 @@ class MainWindow(QMainWindow):
         self._preview_controller.set_videos(tuple(self._sources.values()))  # the worker releases the dropped ones
         log_event(LOG, "sequence.remove", name=removed.name, clips=len(self.sequence))
         self._sequence_changed()
+        self._commit_edit("remover clipe")
         self.transport.set_value_silently(self.current_frame_index)
         self._load_frame(self.current_frame_index)
 
@@ -875,6 +929,7 @@ class MainWindow(QMainWindow):
         self.clip_start_frame, self.clip_end_frame = 0, self.frame_count - 1
         log_event(LOG, "sequence.move", index=index, new_index=moved)
         self._sequence_changed()
+        self._commit_edit("mover clipe")
         self.transport.set_value_silently(self.current_frame_index)
         self._load_frame(self.current_frame_index)
 
@@ -986,18 +1041,29 @@ class MainWindow(QMainWindow):
         log_event(LOG, "ui.clip_active", clip=index, name=self.sequence.clips[index].name)
 
     def _store_active_clip_settings(self) -> None:
-        """Snapshot the widgets into the active clip (called on every render and before switching clips)."""
+        """Snapshot the widgets into the active clip (called on every render and before switching clips).
+
+        Each store is an undo step labelled by the section that changed; the stores of a slider drag
+        (one per render, same fields) coalesce into one.
+        """
         clip = self.active_clip
         if clip is None:
             return
         settings = self._current_render_settings()
         if settings != clip.settings:
+            changes = diff_settings(clip.settings, settings)
             self.sequence = self.sequence.with_clip_settings(self.active_clip_index, settings)
+            key = ("settings", self.active_clip_index, tuple(sorted(changes)))
+            self._commit_edit(settings_edit_label(changes), key)
 
-    def _update_active_clip(self, update: Callable[[Clip], Clip]) -> None:
+    def _update_active_clip(self, update: Callable[[Clip], Clip], label: str, key: Hashable | None = None) -> None:
+        """Change the active clip (a reference capture): the widgets are stored first so it is one undo step."""
         clip = self.active_clip
-        if clip is not None:
-            self.sequence = self.sequence.replace_clip(self.active_clip_index, update(clip))
+        if clip is None:
+            return
+        updated = update(clip.with_settings(self._current_render_settings()))
+        self.sequence = self.sequence.replace_clip(self.active_clip_index, updated)
+        self._commit_edit(label, key)
 
     def _load_clip_into_controls(self, clip: Clip) -> None:
         """Show ``clip.settings`` in every tab and overlay without triggering the change handlers."""
@@ -1029,13 +1095,91 @@ class MainWindow(QMainWindow):
         self.preview.set_display_reference_size(*self._displayed_size())
 
     def _prune_reference_frames(self) -> None:
+        """Drop reference frames no clip uses — in the sequence shown or in any state undo/redo can return to."""
+        sequences = [self.sequence, *(state.sequence for state in self._history.states())]
         wanted = {
             (clip.source.path, clip.stabilization_reference_frame)
-            for clip in self.sequence.clips
+            for sequence in sequences
+            for clip in sequence.clips
             if clip.stabilization_reference_frame is not None
         }
         for key in [key for key in self._reference_frames if key not in wanted]:
             del self._reference_frames[key]
+
+    # =====================================================================================
+    # Undo / redo
+    # =====================================================================================
+    def _edit_state(self) -> EditState:
+        return EditState(self.sequence, self.clip_start_frame, self.clip_end_frame)
+
+    def _commit_edit(self, label: str, key: Hashable | None = None) -> None:
+        """Record the state after the edit ``label``; consecutive edits with the same ``key`` form one step."""
+        if self._history.commit(self._edit_state(), label, key):
+            log_event(LOG, "ui.edit", level=logging.DEBUG, label=label, steps=len(self._history))
+        self._update_history_actions()
+
+    def _update_history_actions(self) -> None:
+        editable = self._export_controller is None
+        undo_label, redo_label = self._history.undo_label, self._history.redo_label
+        self.undo_action.setEnabled(editable and undo_label is not None)
+        self.undo_action.setText("Desfazer" if undo_label is None else f"Desfazer {undo_label}")
+        self.redo_action.setEnabled(editable and redo_label is not None)
+        self.redo_action.setText("Refazer" if redo_label is None else f"Refazer {redo_label}")
+
+    def _undo_edit(self) -> None:
+        if self._export_controller is not None:
+            return
+        self._store_active_clip_settings()  # widgets not yet rendered still count as the last edit
+        step = self._history.undo()
+        if step is None:
+            return
+        state, label = step
+        if not self._restore_edit_state(state):
+            self._history.redo()  # a file of that state is gone: leave things as they were
+            self._update_history_actions()
+            return
+        log_event(LOG, "ui.undo", label=label, steps=len(self._history))
+        self.status.show_message(f"Desfeito: {label}.")
+        self._update_history_actions()
+
+    def _redo_edit(self) -> None:
+        if self._export_controller is not None:
+            return
+        step = self._history.redo()
+        if step is None:
+            return
+        state, label = step
+        if not self._restore_edit_state(state):
+            self._history.undo()
+            self._update_history_actions()
+            return
+        log_event(LOG, "ui.redo", label=label, steps=len(self._history))
+        self.status.show_message(f"Refeito: {label}.")
+        self._update_history_actions()
+
+    def _restore_edit_state(self, state: EditState) -> bool:
+        """Show ``state`` on the timeline and in the tabs; ``False`` when one of its files cannot be opened.
+
+        The playhead stays where it is (clamped to the restored length). Decoders of files no
+        reachable state uses are released; a file that left the sequence and comes back is reopened.
+        """
+        self._stop_playback()
+        for path in state.sequence.source_paths:
+            if path not in self._sources and self._open_source(path) is None:
+                return False
+        self.active_clip_index = -1  # the tabs reload from the restored clip under the playhead
+        self.sequence = state.sequence
+        self.clip_start_frame, self.clip_end_frame = state.clip_start_frame, state.clip_end_frame
+        self._pending_cut_start = None
+        referenced = {path for snapshot in self._history.states() for path in snapshot.sequence.source_paths}
+        self._sources = {path: video for path, video in self._sources.items() if path in referenced}
+        self._preview_controller.set_videos(tuple(self._sources.values()))  # the worker releases the dropped ones
+        self._prune_reference_frames()
+        self._stabilization_epoch += 1
+        self._sequence_changed()
+        self.transport.set_value_silently(self.current_frame_index)
+        self._load_frame(self.current_frame_index)
+        return True
 
     def _load_frame(self, frame_index: int) -> None:
         """Ask the render thread for timeline frame ``frame_index``; decoding happens there, never on the GUI."""
@@ -1239,6 +1383,7 @@ class MainWindow(QMainWindow):
         self.clip_start_frame = self.current_frame_index
         self.clip_end_frame = max(self.clip_end_frame, self.clip_start_frame)
         log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="start")
+        self._commit_edit("marcar início")
         self._update_timeline_markers()
         self._update_range_label()
 
@@ -1248,6 +1393,7 @@ class MainWindow(QMainWindow):
         self.clip_end_frame = self.current_frame_index
         self.clip_start_frame = min(self.clip_start_frame, self.clip_end_frame)
         log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="end")
+        self._commit_edit("marcar fim")
         self._update_timeline_markers()
         self._update_range_label()
 
@@ -1256,15 +1402,16 @@ class MainWindow(QMainWindow):
             return
         self.clip_start_frame = 0
         self.clip_end_frame = self.frame_count - 1
-        self._set_timeline_cuts([])
+        self._set_timeline_cuts([], label="redefinir corte temporal")
         self._pending_cut_start = None
         self._update_timeline_markers()
         self._update_range_label()
 
     # --- cuts inside the clip -----------------------------------------------------------------
-    def _set_timeline_cuts(self, cuts: Sequence[tuple[int, int]]) -> None:
-        """Replace every clip's cuts from ranges in timeline frames (normalized by the model)."""
+    def _set_timeline_cuts(self, cuts: Sequence[tuple[int, int]], *, label: str, key: Hashable | None = None) -> None:
+        """Replace every clip's cuts from ranges in timeline frames (normalized by the model); one undo step."""
         self.sequence = self.sequence.with_timeline_cuts(cuts)
+        self._commit_edit(label, key)
 
     def _toggle_cut_mark(self) -> None:
         """First press marks where a removed range starts, second press where it ends."""
@@ -1283,7 +1430,7 @@ class MainWindow(QMainWindow):
         self._update_range_label()
 
     def _add_cut(self, start: int, end: int) -> None:
-        self._set_timeline_cuts([*self.cuts, (start, end)])
+        self._set_timeline_cuts([*self.cuts, (start, end)], label="adicionar corte")
         log_event(LOG, "ui.cuts", action="add", start=min(start, end), end=max(start, end), cuts=self.cuts)
         self._update_timeline_markers()
         self._update_range_label()
@@ -1310,7 +1457,7 @@ class MainWindow(QMainWindow):
         cuts = self.cuts
         if 0 <= index < len(cuts):
             removed = cuts.pop(index)
-            self._set_timeline_cuts(cuts)
+            self._set_timeline_cuts(cuts, label="remover corte")
             log_event(LOG, "ui.cuts", action="remove", start=removed[0], end=removed[1], cuts=self.cuts)
             self._update_timeline_markers()
             self._update_range_label()
@@ -1347,8 +1494,9 @@ class MainWindow(QMainWindow):
         """A cut edge or body dragged on the timeline; logged once, when the drag ends."""
         if self.frame_count <= 0:
             return
-        self._set_timeline_cuts(cuts)
+        self._set_timeline_cuts(cuts, label="ajustar corte", key="cut_drag")  # the whole drag is one undo step
         if finished:
+            self._history.seal()
             log_event(LOG, "ui.cuts", action="drag", cuts=self.cuts)
         self._update_timeline_markers()
         self._update_range_label()
@@ -1357,7 +1505,9 @@ class MainWindow(QMainWindow):
         if self.frame_count <= 0:
             return
         self.clip_start_frame, self.clip_end_frame = start, end
+        self._commit_edit("mover marcador", "range_drag")
         if finished:
+            self._history.seal()
             log_event(LOG, "ui.clip_range", start=start, end=end, edge="drag")
         self._update_timeline_markers()
         self._update_range_label()
@@ -1365,7 +1515,7 @@ class MainWindow(QMainWindow):
     def _clear_cuts(self) -> None:
         if not self.cuts and self._pending_cut_start is None:
             return
-        self._set_timeline_cuts([])
+        self._set_timeline_cuts([], label="limpar cortes")
         self._pending_cut_start = None
         log_event(LOG, "ui.cuts", action="clear", cuts=[])
         self._update_timeline_markers()
@@ -1823,8 +1973,8 @@ class MainWindow(QMainWindow):
             return
         reference = region_medians(self.current_frame, self._exposure_region())
         frame_index = self._decoded_frame_index
-        self._update_active_clip(lambda clip: clip.with_exposure_reference(frame_index))
         self.grade_tab.set_exposure_reference(reference, frame_index=frame_index)
+        self._update_active_clip(lambda clip: clip.with_exposure_reference(frame_index), "referência de exposição")
         log_event(
             LOG,
             "ui.exposure",
@@ -1840,7 +1990,7 @@ class MainWindow(QMainWindow):
         if self.grade_tab.exposure_reference() is None:
             return
         self.grade_tab.set_exposure_reference(None)
-        self._update_active_clip(lambda clip: clip.with_exposure_reference(None))
+        self._update_active_clip(lambda clip: clip.with_exposure_reference(None), "limpar referência de exposição")
         log_event(LOG, "ui.exposure", action="clear", reason=reason or "user")
         if reason:
             self.status.show_message(reason)
@@ -1920,7 +2070,7 @@ class MainWindow(QMainWindow):
     def _handle_stabilization_mode_changed(self) -> None:
         self._stabilization_epoch += 1
         if self.stabilization_tab.mode().uses_focal_point:
-            self._capture_stabilization_reference_from_current_frame()
+            self._capture_stabilization_reference_from_current_frame(label="ajuste de estabilização")
         self._update_stabilization_controls_state()
         self._schedule_preview_refresh()
 
@@ -1931,7 +2081,9 @@ class MainWindow(QMainWindow):
 
     def _handle_preview_stabilization_changed(self, rect: QRectF) -> None:
         self.stabilization_rect_norm = QRectF(rect)
-        self._capture_stabilization_reference_from_current_frame()
+        self._capture_stabilization_reference_from_current_frame(
+            label="mover ponto focal", key=("focal_rect", self.active_clip_index)
+        )
         self._stabilization_epoch += 1
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
@@ -1939,20 +2091,35 @@ class MainWindow(QMainWindow):
 
     def _reset_stabilization_rect(self) -> None:
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
-        self._capture_stabilization_reference_from_current_frame()
+        self._capture_stabilization_reference_from_current_frame(label="redefinir ponto focal")
         self._stabilization_epoch += 1
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
         self._schedule_preview_refresh()
 
-    def _capture_stabilization_reference_from_current_frame(self) -> None:
+    def _set_stabilization_reference_here(self) -> None:
+        """The frame on screen becomes the camera-lock reference; the focal region stays where it is."""
+        if self.current_frame is None or self._decoded_source is None:
+            self.status.show_message("Abra um vídeo e aguarde o primeiro render para definir a referência.")
+            return
+        self._capture_stabilization_reference_from_current_frame(label="referência da estabilização")
+        self._stabilization_epoch += 1
+        self._update_stabilization_info_label()
+        self._schedule_preview_refresh()
+        log_event(LOG, "ui.stabilization_reference", frame=self._decoded_frame_index, source=self._decoded_source.name)
+        self.status.show_message(
+            f"Referência da estabilização: frame {self._decoded_frame_index + 1} (a região focal não mudou)."
+        )
+
+    def _capture_stabilization_reference_from_current_frame(self, *, label: str, key: Hashable | None = None) -> None:
+        """The decoded frame (and its focal region as the widgets show it) becomes the lock reference: one undo step."""
         if self.current_frame is None or self._decoded_source is None:
             return
         self.stabilization_reference_frame = self.current_frame.copy()
         self.stabilization_reference_frame_index = self._decoded_frame_index
         frame_index = self._decoded_frame_index
         self._reference_frames[(self._decoded_source, frame_index)] = self.stabilization_reference_frame
-        self._update_active_clip(lambda clip: clip.with_reference(frame_index))
+        self._update_active_clip(lambda clip: clip.with_reference(frame_index), label, key)
         self._prune_reference_frames()
 
     def _update_stabilization_controls_state(self) -> None:
