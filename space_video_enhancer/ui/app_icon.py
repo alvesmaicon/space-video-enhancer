@@ -1,9 +1,9 @@
 """The application icon, drawn with QPainter so it is crisp at every size and needs no binary asset.
 
-A dark rounded tile with the app's signature: a frame split down the middle — the muted "before"
-half and the teal "after" half — with the round drag handle on the divider. :func:`app_icon` gives
-a :class:`QIcon` with every common size (window, Alt-Tab, dock/taskbar); :func:`write_png` exports one
-size to disk for the Linux desktop entry.
+A dark rounded tile with two overlapping frames: the muted "before" frame behind, the teal "after"
+frame in front carrying a play triangle — the app in one glance: compare, then play. :func:`app_icon`
+gives a :class:`QIcon` with every common size (window, Alt-Tab, dock/taskbar); :func:`write_png`
+exports one size to disk for the Linux desktop entry.
 """
 
 from __future__ import annotations
@@ -11,13 +11,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
 TILE_COLOR = QColor("#0b0f19")
-BEFORE_COLOR = QColor("#8a6a4f")
-AFTER_COLOR = QColor("#14b8a6")
-DIVIDER_COLOR = QColor("#f9fafb")
+BACK_COLOR = QColor("#64748b")
+FRONT_COLOR = QColor("#14b8a6")
+PLAY_COLOR = QColor("#f9fafb")
 
 
 def paint_app_icon(painter: QPainter, size: float) -> None:
@@ -25,30 +25,30 @@ def paint_app_icon(painter: QPainter, size: float) -> None:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setPen(Qt.PenStyle.NoPen)
     radius = size * 0.22
-    tile = QRectF(0, 0, size, size)
     painter.setBrush(TILE_COLOR)
-    painter.drawRoundedRect(tile, radius, radius)
+    painter.drawRoundedRect(QRectF(0, 0, size, size), radius, radius)
 
-    margin = size * 0.17
-    frame = QRectF(margin, margin * 1.25, size - 2 * margin, size - 2.5 * margin)
-    clip = QPainterPath()
-    clip.addRoundedRect(frame, size * 0.07, size * 0.07)
-    painter.save()
-    painter.setClipPath(clip)
-    split_x = frame.left() + frame.width() * 0.5
-    painter.setBrush(BEFORE_COLOR)
-    painter.drawRect(QRectF(frame.left(), frame.top(), split_x - frame.left(), frame.height()))
-    painter.setBrush(AFTER_COLOR)
-    painter.drawRect(QRectF(split_x, frame.top(), frame.right() - split_x, frame.height()))
-    painter.restore()
+    width, height = size * 0.52, size * 0.36
+    corner = size * 0.05
+    back = QRectF(size * 0.16, size * 0.20, width, height)
+    front = QRectF(size * 0.32, size * 0.42, width, height)
+    painter.setBrush(BACK_COLOR)
+    painter.drawRoundedRect(back, corner, corner)
+    painter.setPen(QPen(TILE_COLOR, max(1.0, size * 0.035)))  # a gap in the tile colour separates the frames
+    painter.setBrush(FRONT_COLOR)
+    painter.drawRoundedRect(front, corner, corner)
 
-    line_width = max(1.0, size * 0.045)
-    painter.setPen(QPen(DIVIDER_COLOR, line_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-    painter.drawLine(QPointF(split_x, frame.top()), QPointF(split_x, frame.bottom()))
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(DIVIDER_COLOR)
-    handle = size * 0.075
-    painter.drawEllipse(QPointF(split_x, frame.center().y()), handle, handle)
+    painter.setBrush(PLAY_COLOR)
+    centre = front.center()
+    play = QPolygonF(
+        [
+            QPointF(centre.x() - size * 0.05, centre.y() - size * 0.08),
+            QPointF(centre.x() - size * 0.05, centre.y() + size * 0.08),
+            QPointF(centre.x() + size * 0.09, centre.y()),
+        ]
+    )
+    painter.drawPolygon(play)
 
 
 def app_icon_pixmap(size: int) -> QPixmap:
