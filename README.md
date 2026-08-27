@@ -1,111 +1,124 @@
 # Space Video Enhancer
 
-MVP desktop para abrir um video local, comparar antes e depois quadro a quadro, ajustar a intensidade dos filtros e exportar o resultado sem upload.
+Editor de vídeo offline para desktop: abre arquivos locais, mostra **antes e depois** lado a lado enquanto você ajusta estabilização, ruído, cor e geometria, monta uma sequência de clipes com cortes, e exporta no seu computador. Nada sai da máquina.
 
-## Requisitos
+[![CI](https://github.com/OWNER/space-video-enhancer/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/space-video-enhancer/actions/workflows/ci.yml)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
+![PySide6](https://img.shields.io/badge/UI-PySide6-41cd52)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-- Python 3.9+
-- FFmpeg instalado e disponivel no `PATH`
+![Janela principal: preview antes/depois, linha do tempo com clipes, filmstrip e forma de onda, abas de ajuste](docs/screenshots/janela-principal.png)
 
-No macOS com Homebrew:
+## Funcionalidades
+
+**Preview e comparação**
+- Divisor arrastável entre o frame original e o processado; zoom por percentual (100% = 1:1) ou ajustado à janela; modos de qualidade (alta, balanceado, rápido) que só afetam a tela — a exportação é sempre completa.
+- Reprodução em tempo real ou câmera lenta (½×, ¼×) com o som dos clipes em sincronia, pulando os trechos removidos.
+- **Preview em janela separada** para uma segunda tela: frame sobre fundo escuro, controles de transporte, tela cheia (F11); a janela principal para de desenhar o frame enquanto ele está lá.
+- HUD de métricas (tempo de render por estágio, fila, decode) e vetores de movimento da estabilização sobre a imagem.
+
+**Sequência e cortes**
+- Vários arquivos na mesma linha do tempo (faixa de clipes, filmstrip e forma de onda por arquivo); dividir no playhead, remover, reordenar arrastando.
+- Cada clipe tem seus próprios ajustes — as abas mostram os do clipe sob o playhead.
+- Marcadores de início/fim e trechos removidos de dentro do vídeo (vídeo e áudio), editáveis direto na linha do tempo.
+- Desfazer/refazer com rótulos ("Desfazer ajuste de estabilização"); projetos salvos em JSON legível (`.svep`) com lista de recentes.
+
+**Processamento** (OpenCV, CPU ou OpenCL)
+- **Estabilização**: suavizar tremor (deslocamento, +rotação e zoom, +perspectiva), travar uma região (*camera lock*) ou híbrida; intensidade, suavização temporal, crop automático. O estimador escolhe a hipótese de movimento que se **espalha** pelo quadro, então uma pessoa cobrindo metade do frame não vira "a câmera".
+- **Ruído**: NLMeans desligado, manual, automático pelo frame ou por uma amostra escolhida no preview.
+- **Cor**: contraste, brilho, gama, saturação, temperatura e nitidez com presets de *look*; balanço de branco por região cinza ou *gray world*, tint, ajuste de matiz/saturação/luminância por oito faixas de matiz; trava de exposição para câmeras em auto-exposição.
+- **Geometria**: crop interativo com proporções, rotação 90°/180°/270° e espelhamento.
+
+**Exportação**
+- FFmpeg só para encode e mux do áudio original; tenta NVENC/VAAPI e cai para `libx264` sozinho. MP4 `yuv420p` com `+faststart`, pronto para QuickTime, iOS e decoders de hardware.
+- Progresso, cancelamento (apaga o parcial) e paralelismo configurável.
+
+## Instalação
+
+Requisitos: **Python 3.9+** e **FFmpeg** no `PATH`.
 
 ```bash
+# macOS
 brew install ffmpeg
+
+# Ubuntu/Debian (veja docs/GPU.md para OpenCL e NVENC)
+sudo apt install ffmpeg python3-venv
+
+# Windows (PowerShell)
+winget install --id Python.Python.3.12 -e
+winget install --id Gyan.FFmpeg -e
 ```
 
-No Ubuntu/Debian (veja tambem "Linux com GPU" mais abaixo para OpenCL e NVENC):
+Clone e rode:
 
 ```bash
-sudo apt install ffmpeg python3-venv ocl-icd-libopencl1 clinfo
-```
-
-No Windows, instale Python 3.9+ 64-bit e FFmpeg com a pasta `bin` no `PATH` (por exemplo `winget install --id Python.Python.3.12 -e` e `winget install --id Gyan.FFmpeg -e`). Confirme com `python --version` e `ffmpeg -version` em um PowerShell novo. Microsoft Visual C++ Redistributable 2015-2022 x64 so e necessario se aparecer erro de DLL ao abrir o app.
-
-## Executar
-
-```bash
+git clone https://github.com/OWNER/space-video-enhancer.git
+cd space-video-enhancer
 ./run.sh
 ```
 
-O script cria a `.venv` se necessario, garante `pip`, instala as dependencias quando o projeto muda e inicia a interface.
-
-Manualmente (macOS/Linux):
+`run.sh` cria a `.venv`, instala as dependências quando o projeto muda e abre a interface. Manualmente:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
 python -m pip install .
-python -m space_video_enhancer
+space-video-enhancer          # ou: python -m space_video_enhancer
 ```
 
-No Windows (PowerShell):
+## Uso
 
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install .
-python -m space_video_enhancer
-```
+1. **Arquivo › Abrir vídeo…** (Ctrl+O). Arraste o divisor no preview para comparar; ajuste nas abas à direita.
+2. **Arquivo › Adicionar vídeo à sequência…** (Ctrl+Shift+O) para juntar mais arquivos (mesmo fps). Use as ferramentas sob a linha do tempo para marcar início `[` e fim `]`, remover um trecho, dividir, remover ou mover o clipe sob o playhead.
+3. **Estabilizar**: escolha o modo; em *camera lock* arraste o retângulo verde sobre a região que deve ficar parada e use "Usar este frame como referência" para fixar o frame de referência.
+4. **Ruído**: no modo *amostra*, arraste o retângulo azul sobre uma área lisa da imagem.
+5. **Exportar** (Ctrl+E): a aba mostra o resumo (trecho, trechos removidos, tamanho de saída) e o botão. **Arquivo › Salvar projeto** (Ctrl+S) guarda tudo para continuar depois.
 
-Se a ativacao do ambiente virtual for bloqueada, rode antes `Set-ExecutionPolicy -Scope Process Bypass`. `python main.py` continua funcionando como atalho.
+Para uma segunda tela: **Exibir › Preview em janela separada** (Ctrl+Shift+D), arraste a janela (ou "Outra tela") e F11.
 
-## Estrutura do projeto
+![Preview em janela separada, no modo Antes | Depois](docs/screenshots/monitor.png)
+
+### Atalhos
+
+| Ação | Atalho |
+|---|---|
+| Abrir vídeo / adicionar à sequência | Ctrl+O / Ctrl+Shift+O |
+| Abrir, salvar, salvar projeto como | Ctrl+P, Ctrl+S, Ctrl+Shift+S |
+| Exportar | Ctrl+E |
+| Desfazer / refazer | Ctrl+Z / Ctrl+Shift+Z ou Ctrl+Y |
+| Reproduzir ou pausar | Espaço |
+| Primeiro / último frame, frame anterior / próximo | Home / End, ← / → |
+| Marcar início / fim do trecho exportado | I / O |
+| Iniciar ou terminar um trecho removido no frame atual | X |
+| Remover o corte selecionado | Delete |
+| Dividir o clipe no playhead | Ctrl+K |
+| Restaurar o preset ativo | Ctrl+R |
+| Zoom do preview: ajustar, mais, menos | Ctrl+0, Ctrl++, Ctrl+− |
+| Métricas / vetores de movimento | Ctrl+M / Ctrl+Shift+M |
+| Preview em janela separada | Ctrl+Shift+D |
+| No monitor: tela cheia, sair, fechar | F11 ou clique duplo, Esc, Ctrl+W |
+
+As teclas sem modificador só agem quando o widget focado não as usa (um slider focado mantém as setas). No macOS, Ctrl é ⌘.
+
+## Como funciona
+
+- O **pipeline é puro**: `render_frame(frame, settings)` não lê widgets nem estado global. A interface lê os controles uma vez, monta um `RenderSettings` imutável e o entrega ao worker de preview, às miniaturas e à exportação — o que o preview mostra é exatamente o que sai no arquivo.
+- Ordem fixa: estabilização → filtros (inclui escala) → preset → geometria → crop.
+- **Nada por frame na GUI thread**: decodificação e render acontecem em um `QThread` com caixa postal "o último vence"; o filmstrip, a forma de onda e o áudio têm threads próprias.
+- O modelo (`Sequence` de `Clip`s, `RenderSettings`) é imutável, então desfazer/refazer é só guardar referências e um projeto é a serialização direta do estado.
 
 ```
 space_video_enhancer/
-  settings.py              # enums + snapshots imutaveis (RenderSettings) que a UI entrega ao pipeline
-  video.py                 # leitura de frames com decodificacao sequencial; usado pelo worker de preview e pelo export
-  pipeline/
-    render.py              # render_frame(frame, settings, ...) — o unico pipeline (preview, miniaturas, export)
-    filters.py             # denoise/contraste/gama/saturacao/temperatura/nitidez/escala (CPU ou OpenCL)
-    presets.py             # presets tonais ("Sombras abertas", "Atenuar quentes", ...)
-    denoise.py             # estimativa de ruido (modos Auto e Amostra)
-    geometry.py            # rotacao, espelhamento e crop
-    preview.py             # pedidos de preview/miniaturas e a caixa postal "o ultimo vence" do worker
-    stabilization/         # estado, transformacoes, estimadores e orquestracao
-  export/
-    ffmpeg.py              # descoberta do ffmpeg, escolha de encoder e montagem do comando
-    job.py                 # exportacao pura (sem Qt): decodifica -> render_frame -> stdin do ffmpeg
-    worker.py              # adaptador QThread com sinais de progresso/termino
-  ui/
-    main_window.py         # orquestra menus, splitter, status bar e abas; produz RenderSettings; nao processa imagem
-    tabs/                  # uma classe por aba: Cor, HSL, Filtros, Estabilizar, Geometria, Ruido, Exportar
-    preview_worker.py      # QThread que decodifica e renderiza preview e miniaturas; a UI nunca bloqueia
-    widgets/               # ComparePreview (+ SelectionOverlay), TransportBar, TimelineWidget, StatusPanel, LabeledSlider
-    theme.qss              # estilo (icones em ui/icons/)
-tests/                     # pytest; roda sem display (o pipeline nao depende de Qt)
+  settings.py, sequence.py, timeline.py, project.py   # modelo imutável, sequência, cortes, projetos
+  video.py, audio.py                                    # decodificação de frames e de PCM
+  pipeline/                                             # render_frame e cada etapa (filtros, denoise, grade, geometry, stabilization/)
+  export/                                               # ffmpeg, job puro e adaptador QThread
+  ui/                                                   # janela, abas, widgets, workers, monitor
+  telemetry/                                            # log estruturado em JSON
+tests/                                                  # pytest, roda sem display
+benchmarks/                                             # medições que justificaram os algoritmos
 ```
 
-Regras da arquitetura:
-
-- O pipeline e puro: `render_frame(frame, settings, ...)` nao le widgets nem estado global. A UI le os widgets uma vez, monta um `RenderSettings` congelado e entrega ao pipeline, ao worker de export e as miniaturas.
-- Estabilizacao automatica (translacao, similaridade, perspectiva) acumula o movimento entre frames em uma correcao que segue uma versao suavizada da trajetoria da camera (`correction_k = decay * (correction_{k-1} o delta_k)`, em `stabilization/stabilize.py`); alinhar cada frame ao anterior bruto so atrasaria o tremor em um frame. A suavizacao e uma constante de tempo (2 a 60 frames, escala log), a translacao da correcao e limitada a 8% do frame, um frame sem estimativa mantem a correcao anterior, e saltos de ate 12 frames (frames descartados pelo preview quando o render e mais lento que a reproducao) continuam a sequencia em vez de reinicia-la. O movimento entre frames vem de `stabilization/global_motion.py`: cantos escolhidos por celula de uma grade 8x5 (um fundo liso continua representado mesmo com um sujeito cheio de textura no quadro), rastreados por Lucas-Kanade com checagem ida-e-volta, e separados em hipoteses de movimento rigido (a dominante e a dominante entre os outliers dela). A camera e a hipotese cujos inliers se **espalham** pelo quadro (caixa robusta dos inliers em celulas da grade), nao a que tem mais pontos — e assim que uma pessoa cobrindo 60% do frame deixa de virar a referencia; uma memoria por celula reforca as celulas que seguem a camera e desconta as que discordam frame apos frame. No modo perspectiva a hipotese vencedora e promovida a homografia quando tem pontos suficientes e bem espalhados. Camera lock (`stabilization/lock.py`) carrega as correspondencias referencia<->frame de um frame para o outro com Lucas-Kanade (sobrevive a desfoque e a distorcao gradual), re-ancora com ORB a cada poucos frames e escolhe entre tracks e ancora pelo residuo do ajuste; quando o ORB nao acha nada (take inteiro borrado) semeia os tracks por LK direto da referencia, com o template match dando o chute inicial e a referencia borrada ate ficar tao nitida quanto o frame atual (variancia do Laplaciano); com pontos bem espalhados o ajuste e uma homografia, entao uma regiao inclinada cai no lugar. As features ORB da referencia continuam em cache (`estimators.reference_features`, por identidade do array + regiao + escala). Sem alvo, o lock segura a ultima correcao; o hibrido segue o movimento global enquanto perdido e volta suavemente ao lock. A regiao focal e o retangulo verde arrastado direto no preview (aba Estabilizar ativa, modo camera lock ou hibrido); o frame de referencia e o que esta na tela quando o modo e escolhido ou a regiao se move, e o botao "Usar este frame como referencia" o retoma no frame atual sem mexer na regiao ("Redefinir ponto focal" volta a regiao ao centro). `Exibir > Vetores de movimento` (Ctrl+Shift+M) desenha sobre o lado "Antes" os pontos rastreados no ultimo render — verde-azulado os que definiram o movimento da camera, laranja os descartados (o sujeito em movimento), verde os pontos do lock — e o HUD (Ctrl+M) lista as hipoteses (`pontos/celulas`, a escolhida entre colchetes); e assim que se confere o que o estabilizador esta seguindo. O crop automatico recorta uma margem fixa igual a esse teto (5% por lado) em todos os frames — inclusive nos que nao receberam correcao — entao o zoom nao respira; a margem so cresce se um camera lock exceder o teto. `benchmarks/stabilization_shake.py` mede o tremor residual em uma sequencia sintetica; com `--object 0.5` poe um bloco texturizado cobrindo metade do frame andando sobre fundo liso e conta quantas vezes cada modo automatico seguiu a camera (antes: quase nunca; agora: 26-28 de 29 frames).
-- Ordem fixa: estabilizacao -> filtros basicos (inclui escala) -> preset de imagem -> geometria -> crop. O crop e o ultimo passo, no mesmo sistema de coordenadas do preview rotacionado/espelhado, entao o retangulo desenhado e exatamente o exportado.
-- Preview e miniaturas rodam em um `QThread` proprio (`ui/preview_worker.py`): a UI envia um `PreviewRequest` por ajuste e so o mais recente e renderizado; resultados antigos sao descartados por numero de geracao. Miniaturas so sao calculadas com a aba Filtros visivel.
-- Denoise no preview: com o denoise ligado, scrub e reproducao renderizam com o lado maior limitado a 640 px (o custo do NLMeans e proporcional aos pixels) e o frame em que o usuario parou recebe um render completo 250 ms depois (`reason=idle`). A forca automatica vem do ruido medido (MAD da resposta do Laplaciano, `pipeline/denoise.py`), nao do desvio padrao da imagem; `h = 0.8 * sigma`.
-- Nada de trabalho por frame na GUI thread: o worker e dono do `VideoSource` (a UI pede um `frame_index` e recebe o frame decodificado junto com o render, em `PreviewImages.source`, que serve de referencia para camera lock e para as miniaturas). A estimativa de denoise mostrada na aba Ruido vem do trace do ultimo render. Miniaturas sao renderizadas em pixels fisicos (`devicePixelRatio`) para ficarem nitidas em telas Retina.
-- Exportacao roda em `QThread` (`export/worker.py`) sobre `run_export` (`export/job.py`). Cancelamento e falha sempre encerram o ffmpeg e apagam o arquivo parcial.
-- O MP4 sai em `yuv420p` com `+faststart` e dimensoes pares, para tocar em QuickTime, iOS e decoders de hardware.
-- Layout: sem toolbar — abrir/adicionar video e desfazer/refazer ficam nos menus Arquivo/Editar e nos atalhos; acima do preview uma barra com o que so muda como ele e mostrado (zoom, qualidade, Metricas, Vetores, e o botao que abre o preview em janela separada); acima da linha do tempo o timecode, os botoes de transporte e o contador de frames; abaixo dela as ferramentas que agem no playhead e no clipe sob ele (marcar inicio `[` e fim `]`, remover trecho, dividir, remover clipe, mover para tras/frente — `TransportBar`, icones vetoriais em `ui/icons.py`), o zoom da linha do tempo e, a direita, velocidade e som. `QSplitter` com o preview a esquerda e as abas a direita (Ajustes, HSL, Filtros, Estabilizar, Geometria, Ruido, Exportar) + barra de status persistente (mensagens, indicador de render, progresso/cancelamento da exportacao, info do video). A largura minima do painel de abas e calculada a partir do conteudo real (`MainWindow._fit_settings_panel`), entao nada e cortado nem escondido atras de setas; `tests/test_ui_layout.py` verifica isso offscreen.
-- Preview em janela separada (`ui/monitor_window.py`, `Exibir > Preview em janela separada`, Ctrl+Shift+D ou o botao no fim da barra do preview): uma segunda janela de nivel superior — sem parent, para nao ficar presa acima da principal — com o frame renderizado sobre fundo escuro e os controles de reproducao (inicio, frame anterior, play/pause, proximo, fim, um scrubber e o timecode). Ela nao renderiza nada: `_on_preview_ready` entrega a ela as mesmas imagens do preview enquanto estiver visivel, e seus botoes disparam os mesmos slots da barra de transporte; as mesmas QActions de teclado do preview (Espaco, Home/End, setas, I/O/X) sao adicionadas a ela, entao funcionam com o monitor em foco. Combo "Depois / Antes / Antes | Depois" escolhe o que mostrar (sem overlays nem HUD). Ao abrir pela primeira vez vai para outra tela se houver uma (`show_near`), senao sobre a principal; "Outra tela" (visivel so com 2+ telas) leva para a proxima; F11, Ctrl+Shift+F ou clique duplo = tela cheia, Esc volta, e em tela cheia os controles e o cursor somem 2,5 s depois do ultimo movimento do mouse (voltam ao mexer). Fechar a principal fecha o monitor; fechar o monitor so desmarca a acao (a janela e reaproveitada). Enquanto o monitor esta visivel a janela principal para de desenhar o frame (`Exibir > Pausar o preview desta janela`, ligado por padrao): o `QStackedWidget` do preview troca para um painel explicando a situacao, com botoes "Mostrar aqui tambem" e "Fechar a janela separada". Isso nao muda o custo do render — decode, estabilizacao, denoise e filtros rodam uma vez so no worker e as duas janelas recebem as mesmas imagens; o que se economiza e a pintura na GUI thread (~0,8 ms por frame para 1920x1080 numa area de 880 px, medido offscreen no M1). As abas que arrastam regiao sobre a imagem (Geometria, Ruido, Estabilizar, HSL) voltam a mostrar o preview automaticamente enquanto estao ativas. As acoes de transporte tambem sao adicionadas ao painel pausado, entao Espaco/setas continuam funcionando nesta janela. Eventos `ui.monitor` (`state`: open/closed/fullscreen/windowed/screen/pause_preview/resume_preview).
-- Zoom do preview: "Ajustar" (padrao) preenche a area disponivel; os percentuais sao pixels do frame de saida por pixel logico da tela (100% = 1:1). Ctrl+0 ajusta, Ctrl++/Ctrl+- mudam de nivel.
-- Teclado: Espaco, Home/End, setas, I/O e X controlam a reproducao e os cortes, mas so quando o widget focado nao usa a tecla (um slider focado mantem as setas, um botao focado mantem o Espaco). Clicar no preview da o foco a ele; abrir um video tambem.
-- Overlays: o crop aparece sempre que estiver ativo, mas so e editavel na aba Geometria; a amostra de ruido e o ponto focal aparecem apenas nas abas Ruido e Estabilizar, editaveis direto no preview (nao existe modo "editar").
-- Cortes internos (`timeline.py`): alem do inicio/fim (I/O), cada clipe guarda trechos removidos — X (ou o botao correspondente sob a linha do tempo, que fica pressionado enquanto o fim nao e marcado) marca inicio e fim no frame atual; na linha do tempo arrasta-se borda ou corpo de um corte, Delete remove o selecionado e o menu de contexto oferece o resto. A aba Exportar so resume o resultado (trecho, trechos removidos, frames e tamanho de saida). Os trechos aparecem em vermelho na linha do tempo, o playback pula por cima deles e o export le so os trechos mantidos (com seek entre eles) concatenando o audio correspondente (`atrim`/`concat`); fontes sem audio saem mudas em vez de falhar.
-- Sequencia (`sequence.py`): o modelo e uma `Sequence` de `Clip`s — cada clipe e um trecho (`range`) de um `ClipSource` (arquivo) com cortes e `RenderSettings` proprios (ajustes por trecho = dividir um clipe em dois com `split`). Dois eixos: *frames da linha do tempo* (todos os clipes lado a lado, cortes incluidos e navegaveis) e *frames exportados* (linha do tempo menos os cortes). `locate`/`timeline_frame` convertem entre eles, `with_timeline_cuts` distribui cortes desenhados na linha do tempo pelos clipes que atravessam. Tudo imutavel: cada operacao devolve outra `Sequence`. O export (`export/job.py`) percorre `export_segments()` com um `VideoCapture` por arquivo, um contexto de denoise e um estado de estabilizacao por clipe, encaixa cada frame no tamanho do primeiro (letterbox) e manda o ffmpeg concatenar o audio de cada trecho (`AudioSegment`; silencio para fontes sem audio, `aresample`/`aformat` para fontes diferentes, `apad` no fim para o audio nunca ser o stream mais curto e o `-shortest` nao derrubar o ultimo frame). v1 exige o mesmo fps em todos os clipes (adicionar um arquivo com outro fps e recusado com aviso).
-- Sequencia na interface (`ui/main_window.py`): a janela guarda uma `Sequence`; playhead, marcadores I/O e cortes vivem em frames da linha do tempo. `Arquivo > Adicionar video a sequencia…` (Ctrl+Shift+O) acrescenta clipes ao fim; as ferramentas sob a linha do tempo dividem no playhead (tesoura, Ctrl+K), removem (lixeira) e movem (setas) o clipe sob o playhead — tambem no menu de contexto da faixa de clipes, onde um bloco pode ser arrastado. O *clipe ativo* e o que esta sob o playhead: as abas mostram e editam os ajustes dele — a cada render a janela grava os widgets de volta no clipe (`_store_active_clip_settings`) e, ao cruzar uma fronteira, carrega os ajustes do outro clipe em todas as abas (`apply()` de cada aba, sem emitir sinais), inclusive regioes (crop, amostra de ruido, ponto focal, cinza de referencia), ganhos de balanco de branco, referencia de exposicao (`Clip.exposure_reference_frame`) e frame de referencia do camera lock (cache por `(arquivo, frame)`; as metades de um split compartilham). Um clipe novo nasce com o look atual (sliders) e regioes/referencias zeradas. O preview decodifica de um `VideoSource` por arquivo (`PreviewController.set_videos`; `PreviewRequest.source_path`) e encaixa o resultado na proporcao do canvas do primeiro clipe (`fit_to_aspect`, `RenderSettings.output_size`) para mostrar as barras que o export vai adicionar. A exportacao usa `Sequence.for_export(inicio, fim)`: o que esta fora dos marcadores vira corte, clipes vazios sao descartados. Eventos `sequence.add`/`sequence.add_refused`/`sequence.split`/`sequence.remove`/`sequence.move` e `ui.clip_active`.
-- Presets de ajustes (`settings.FILTER_PRESETS`, aba Ajustes): sao *looks* — so os campos de `LOOK_FIELDS` (contraste, brilho, gama, saturacao, temperatura, nitidez). Escolher um nao mexe no ruido nem na escala de saida (`with_look`), e a combo reconhece o preset comparando so esses campos (`same_look`); o botao de reset de um slider de ruido volta ao padrao, nao ao preset.
-- Projetos (`project.py`, menu Arquivo): `Salvar projeto` (Ctrl+S), `Salvar projeto como…`, `Abrir projeto…` (Ctrl+P) e `Projetos recentes` (lista em `~/.space-video-enhancer/recent_projects.json`, ou `SVE_STATE_DIR`). O arquivo `.svep` e JSON legivel: fontes (caminho absoluto + relativo ao projeto, frames, fps, tamanho), clipes (trecho, cortes, `RenderSettings` campo a campo com enums pelo valor, indices dos frames de referencia), marcadores I/O, playhead e threads. Campos ausentes assumem o default do dataclass e campos desconhecidos sao ignorados (`settings_from_dict` infere o tipo pelo default), entao projetos de outras versoes abrem; `version` maior que a conhecida e recusado. Ao abrir, cada arquivo e procurado pelo caminho absoluto e depois ao lado do projeto; o que nao for encontrado continua na sequencia com os fatos salvos, marcado na faixa de clipes (hachura vermelha, ⚠), sem preview, sem forma de onda ("Arquivo nao encontrado") e bloqueando a exportacao — nao ha relink: coloque o arquivo de volta e reabra. Frames de referencia do camera lock nao sao salvos como pixels: os indices sao, e `ui/reference_frames.py` decodifica de novo numa thread propria ao abrir. O titulo da janela mostra o nome do projeto (ou do video) e ` *` enquanto ha alteracao nao salva (estado atual != estado salvo/aberto, threads incluidas); fechar a janela ou abrir outro video/projeto com alteracoes pendentes pergunta Salvar/Nao salvar/Cancelar (`MainWindow.confirm_discard` desliga a pergunta — os testes usam). Eventos `ui.project` (save/open/open_failed/save_failed) e `reference.decoded`.
-- Desfazer/refazer (`ui/history.py`): como a `Sequence` e os `RenderSettings` sao imutaveis, cada passo do historico e so uma referencia ao estado anterior (`EditState`: sequencia + marcadores I/O), entao tirar uma foto a cada edicao nao custa nada. Todo ponto que troca `self.sequence` na janela chama `_commit_edit(rotulo, chave)`: cortes, marcadores, dividir/remover/mover clipes, adicionar video, capturas de referencia e a gravacao dos widgets no clipe ativo a cada render (`_store_active_clip_settings`, rotulada pela secao que mudou via `diff_settings`). Edicoes da mesma chave em menos de 1 s se fundem num passo so — os renders de um arraste de slider, os eventos de um arraste de marcador ou de corte (`seal()` fecha o passo quando o arraste termina) — e o historico guarda 50 passos. `Editar > Desfazer/Refazer` (Ctrl+Z / Ctrl+Shift+Z ou Ctrl+Y) mostram o rotulo do passo; o playhead nao se move; abrir um video zera o historico. Ao restaurar um estado a janela reabre o decoder de um arquivo que tinha saido da sequencia, solta os que nenhum estado alcancavel usa e mantem em cache os frames de referencia do camera lock que qualquer estado do historico ainda referencia (`_prune_reference_frames`). Eventos `ui.edit` (DEBUG), `ui.undo`, `ui.redo`.
-- Trava de exposicao (`pipeline/exposure.py`): cameras em auto-exposicao/AWB re-medem quando o foco caça; a correcao e sem estado — mede a mediana B/G/R de uma regiao estatica da cena no frame fonte (antes da estabilizacao, mesmas coordenadas do retangulo roxo do preview), compara com a mesma regiao no frame de referencia e aplica a razao como ganhos por canal (uma `cv2.LUT` logo apos o denoise, cuja intensidade foi estimada no frame sem ganho). Ganhos limitados a ±`max_ev` stops e atenuados por `strength`; `color=False` usa um ganho unico pela luma. Sem estado, preview e export (serial ou paralelo) produzem o mesmo resultado. Medir o frame inteiro e opcional e sensivel ao conteudo (uma pessoa entrando escurece a media e a correcao 'pulsa'); a regiao fixa nao sofre disso, mas erra enquanto algo a tapa. Realces estourados no frame nao voltam. Na aba HSL (grupo "Iluminacao constante") a regiao e o mesmo retangulo roxo do balanco de branco; "Usar este frame como referencia" mede o frame decodificado atual (mesmo frame do lado "Antes"), mover a regiao ou trocar o escopo re-mede se ainda estamos no frame de referencia e caso contrario apaga a referencia (aviso na barra de status); o rotulo mostra os ganhos do ultimo render lidos do trace. Eventos `ui.exposure`.
-- Diagnostico (`diagnostics.py`, `ui/diagnostics_dialog.py`): relatorio puro (sem Qt) com sistema, OpenCL (linha `OpenCL:` do build, `haveOpenCL`, dispositivo, ICDs) e ffmpeg (versao, encoders conhecidos, `/dev/dri/renderD*`), mais dicas em portugues por caso (`opencl_hint`, `ffmpeg_hint`) e o rotulo esperado na barra de status. Logado na abertura em thread daemon (`diagnostics`) e mostrado em Ajuda; `diagnostics.shown` quando o dialogo abre.
-- Linha do tempo (`widgets/timeline.py`): regua + trilhas com zoom (Ctrl+roda, pinca do trackpad, botoes −/Ajustar/+) e rolagem (roda, barra). `TimelineScale` faz a conversao frame<->pixel (zoom = pixels por frame, scroll = primeiro frame visivel) e todo hit-test usa a mesma conversao. Um corte `(inicio, fim)` ocupa os pixels de `x_of(inicio)` a `x_of(fim + 1)`; arrastar uma borda redimensiona, arrastar o corpo move, clicar seleciona (Delete remove; a selecao e a mesma da lista na aba Exportar), botao direito abre o menu. Os marcadores I/O sao arrastados na regua. Acima da trilha de video ha a faixa de clipes (`ClipBlock`: nome, frames da linha do tempo e frame de origem de cada clipe; o ativo em destaque, fronteiras tracejadas descendo pelas trilhas); clicar nela posiciona o playhead, arrastar um bloco (mais de 6 px) o reordena — um fantasma segue o mouse e uma barra marca o espaco entre clipes onde ele vai cair (`clipMoveRequested(indice, novo_indice)`; o playhead acompanha o clipe movido) — e o menu de contexto oferece dividir/remover o clipe. Enquanto um corte esta sendo arrastado, o widget ignora `set_cuts` (o arraste e a fonte da verdade) e so na soltura o modelo normalizado volta para ele. Na reproducao, quando o playhead sai da area visivel a vista rola para deixa-lo a 10% da borda esquerda.
-- Filmstrip (`ui/timeline_media.py`): a trilha de video mostra miniaturas decodificadas por um `FilmstripController` com thread e um `VideoSource` por arquivo da sequencia (um seek de miniatura nunca atrasa o preview). Cada pedido e uma lista de `FilmstripCell` (frame da linha do tempo -> arquivo + frame de origem, via `Sequence.locate`), e cada miniatura e encaixada na celula com letterbox quando a proporcao difere. As celulas sao ancoradas no frame 0 (rolar reaproveita o cache LRU de 600 imagens), o widget pede apenas as celulas visiveis que faltam apos 60 ms de descanso do zoom/scroll, um pedido novo cancela o anterior entre dois frames e, enquanto a miniatura exata nao chega, a vizinha mais proxima dentro de uma celula e desenhada no lugar. Evento `filmstrip.render` (DEBUG) com quantidade e tempos de decode.
-- Reproducao e som (`ui/audio_preview.py`): o relogio de parede e o mestre. Ao dar play, a janela monta a lista de frames mantidos ate o fim do trecho (`Sequence.playback_runs`: cortes e fronteiras de clipe ja resolvidos) e, a cada tique, mostra o frame que o tempo decorrido pede (`frame = ancora + tempo * fps * velocidade`); quando o render nao acompanha, frames sao pulados, mas o tempo nunca atrasa. O combo Velocidade (1x, 1/2x, 1/4x) substitui o antigo "Pular N". O som toca continuo a partir de PCM mono 22,05 kHz que o ffmpeg decodifica por arquivo (uma vez por velocidade, em thread propria: `PcmController`), ja esticado com `atempo` (mantem o tom) — como video e audio seguem o mesmo relogio, ficam em sincronia por construcao; a defasagem e so o atraso do render. O `AudioFeeder` percorre as mesmas `PlaybackRun`s do video (`AudioPiece` por trecho: arquivo + segundos de origem, ou silencio para arquivo sem audio), entao cortes e trocas de clipe sao emendados antes de tocar; so um seek do usuario, a troca de velocidade ou religar o som reancoram e recomecam. O `QAudioSink` em modo push e mantido ~300 ms a frente (timer de 40 ms na GUI thread); o PCM fica mono na memoria, mas o sink recebe estereo com o mesmo sinal nos dois canais — um stream de 1 canal sai so pelo alto-falante esquerdo em alguns backends (Qt/ffmpeg sobre PulseAudio/ALSA). Botao "Som" na barra de transporte; sem dispositivo de saida (ou com `SVE_PREVIEW_AUDIO=0`, que a suite de testes usa) o botao fica desligado e a reproducao segue muda; arquivos acima de 30 min tocam sem som (o PCM nao caberia com folga na memoria; ~160 MB por hora e por velocidade). Eventos `audio.preview_device`/`audio.preview_disabled`/`audio.preview_decode`/`audio.preview_skipped`, `ui.playback_speed`, `ui.sound`; `playback.start`/`playback.stop` trazem `speed` e `audio_seconds`.
-- Forma de onda (`audio.py`, `WaveformController`): ffmpeg decodifica o primeiro stream de audio para PCM mono 8 kHz e o numpy reduz a picos min/max por bucket (4 buckets por frame de video; 1 h cabe em ~4 MB). Cada coluna de pixel da trilha mostra os extremos dos buckets que cobre (`np.minimum/maximum.reduceat`); com varios clipes, cada coluna le os picos do arquivo do clipe que esta sob ela, com o deslocamento do trecho (`ClipBlock.source_start`), e um unico ganho de exibicao vale para a trilha inteira. Um arquivo e decodificado uma vez por sessao mesmo aparecendo em varios clipes; o resultado chega marcado com o caminho e e descartado se o arquivo saiu da sequencia. Sem ffmpeg a trilha avisa, sem stream de audio mostra \"Sem audio\" no trecho do clipe. Evento `waveform.load`.
-- Cores (aba HSL, `pipeline/grade.py`): balanco de branco por ganhos B/G/R (calculados de uma regiao que deveria ser cinza — retangulo roxo no preview — ou do frame inteiro, gray world) mais tint verde/magenta, aplicados antes da curva tonal; e ajustes de matiz/saturacao/luminancia por oito faixas de matiz interpoladas linearmente no circulo de cores (hue vs hue / sat / lum). Tudo vira tabelas (`cv2.LUT`) resolvidas uma vez por `ProcessingContext`; os ganhos ficam gravados nas settings, entao a exportacao usa exatamente o que o preview mostra.
+Detalhes e decisões de cada parte em [docs/ARQUITETURA.md](docs/ARQUITETURA.md). Aceleração por GPU (OpenCL, NVENC, VAAPI) e como configurar no Linux em [docs/GPU.md](docs/GPU.md). Eventos de log e como analisá-los em [docs/TELEMETRIA.md](docs/TELEMETRIA.md).
 
 ## Desenvolvimento
 
@@ -113,91 +126,18 @@ Regras da arquitetura:
 python -m pip install -e ".[dev]"
 ruff check . && ruff format --check .
 mypy space_video_enhancer
-pytest
+QT_QPA_PLATFORM=offscreen pytest
 ```
 
-Os testes de exportacao ponta a ponta usam o `ffmpeg` do `PATH` e sao pulados se ele nao existir.
+Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos e fluxos completos com vídeos sintéticos; os de exportação usam o `ffmpeg` do `PATH` e são pulados se ele não existir. A suíte inteira leva alguns minutos. `benchmarks/` tem os scripts de medição (tremor residual, custo dos estimadores, variantes de denoise) — veja [benchmarks/README.md](benchmarks/README.md).
 
-## Telemetria e logs
+## Limitações conhecidas
 
-O app grava eventos estruturados (uma linha JSON por evento) em `~/.space-video-enhancer/logs/app.jsonl`, com rotacao em 10 MB x 5. Nada sai do computador: os logs servem para medir e melhorar algoritmos e interface. Nomes de arquivo aparecem sem o diretorio.
+- Todos os clipes de uma sequência precisam ter o mesmo fps.
+- Mídia que mudou de lugar é marcada no projeto, não religada: coloque o arquivo de volta e reabra.
+- Arquivos com mais de 30 min tocam sem som no preview (o PCM não caberia com folga na memória); a exportação não é afetada.
+- Interface em português.
 
-Variaveis de ambiente: `SVE_LOG_DIR` (pasta), `SVE_LOG_LEVEL` (`INFO` padrao; `DEBUG` inclui `preview.render` durante a reproducao), `SVE_LOG_STDERR=1` (espelha no terminal). O menu `Ajuda > Abrir pasta de logs` abre a pasta; `Exibir > Metricas` (Ctrl+M, ou o botao Metricas acima do preview) mostra um HUD com tempo de render por estagio, fila, decode, estabilizacao e backend. `SVE_PREVIEW_AUDIO=0` desliga o som do preview.
+## Licença
 
-Eventos principais:
-
-| Evento | Quando | Campos uteis |
-|---|---|---|
-| `app.start` / `app.stop` | inicio/fim | versoes, CPU, OpenCL (dispositivo), ffmpeg |
-| `video.open` | abrir ou adicionar um arquivo | dimensoes, fps, frames, codec, `open_ms` |
-| `sequence.add` / `sequence.add_refused` / `sequence.split` / `sequence.remove` / `sequence.move` | edicao da sequencia de clipes | nome, `clips`, `frames`, `reason` |
-| `settings.snapshot` / `settings.change` | primeiro render de um video / cada ajuste | `changes`: `{"filters.contrast": [50, 62]}` |
-| `preview.render` | cada render do preview (playback em DEBUG) | `total_ms`, `decode_ms`, `decode_sequential`, `stages` (`decode`, `stabilize`, `context`, `filters`, `filters.denoise`, `preset`, `geometry`), `queue_wait_ms`, `dropped_total`, notas do pipeline |
-| `playback.start` / `playback.stop` | reproducao | `speed`, `audio`, `effective_fps`, `frames_shown`, `seeks`, `sequential_reads`, `decode_ms`, `audio_seconds`, `stabilization` (histograma de `stabilization.result` durante a reproducao) |
-| `audio.preview_device` / `audio.preview_disabled` / `audio.preview_decode` / `audio.preview_skipped` | som do preview | dispositivo, motivo, `tempo`, `seconds`, `megabytes`, `elapsed_ms` |
-| `export.start` / `export.progress` / `export.finish` / `export.cancelled` / `export.failed` | exportacao | `fps`, `elapsed_s`, `render` (estatisticas por estagio), `stabilization` (histograma de estimadores/resultados), `encoder`, `backend`, `output_bytes`, `stderr_tail` |
-| `ui.*` | interacoes (`ui.tab`, `ui.preset`, `ui.render_mode`, `ui.preview_zoom`, `ui.clip_range`, `ui.cuts`, `ui.clip_active`, `ui.hud`, `ui.motion_vectors`, `ui.stabilization_reference`, `ui.undo`, `ui.redo`, `ui.project`, `ui.monitor`) | |
-| `session.summary` | fechar a janela | renders, descartados, exports, erros |
-| `preview.error`, `export.error`, `app.unhandled`, `qt.message` | falhas | `exception`, `settings` |
-
-Notas do pipeline registradas em cada render (`preview.render`) e agregadas no export: `stabilization.mode`, `stabilization.estimator` (`lk_translation`, `phase_correlate`, `lk_similarity`, `lk_perspective`, `lk_lock`, `orb_anchor`, `lk_seed`, `template_match`, `primed`, `sequence_break`, `cached`, `none`), `stabilization.hypotheses` (pares `[inliers, extensao em celulas]` de cada hipotese de movimento) e `stabilization.chosen` (indice da escolhida), `stabilization.model` (`similarity`/`homography` no modo perspectiva), `stabilization.lock_tracked`, `stabilization.lock_blur_match` (sigma aplicado a referencia), `stabilization.lock_residual_px`, `stabilization.lock_model`, `stabilization.result` (`applied`, `negligible`, `no_transform`), `stabilization.path` (`start`, `follow`, `held`, `lock`, `reacquire`, `dead_reckoning`), `stabilization.inliers`, `stabilization.tracked_points`, `stabilization.rejected` (`too_few_inliers`, `unreasonable_similarity`, `too_few_perspective_inliers`, `unreasonable_perspective`, `accumulated`), `stabilization.translation_px`, `denoise.mode`, `denoise.sigma` (ruido estimado em luma e cor), `denoise.h`, `filters.backend` (`opencl`, `cpu`, `cpu_no_denoise`), `exposure.current` (medianas B/G/R da regiao no frame) e `exposure.gains` (ganhos aplicados pela trava de exposicao).
-
-Analise rapida com pandas:
-
-```python
-import pandas as pd
-
-df = pd.read_json("~/.space-video-enhancer/logs/app.jsonl", lines=True)
-renders = df[df.event == "preview.render"]
-print(pd.json_normalize(renders.stages).describe())
-```
-
-## O que o MVP faz
-
-- seleciona um video local e navega pelos frames com a linha do tempo (zoom e rolagem), botoes de transporte e reproducao quadro a quadro
-- junta varios arquivos (mesmo fps) em uma sequencia na mesma linha do tempo, com faixa de clipes, filmstrip e forma de onda por arquivo; divide um clipe no playhead, remove e reordena (botoes ou arrastando o bloco na faixa de clipes); cada clipe tem seus proprios ajustes (as abas mostram os do clipe sob o playhead) e a exportacao concatena tudo, com letterbox para tamanhos diferentes
-- zoom do preview por botoes e percentual, com modos de qualidade (alta, balanceado, rapido); reproducao em tempo real ou camera lenta (1/2x, 1/4x) com o som dos clipes em sincronia, respeitando cortes e fronteiras
-- comparacao antes/depois com divisor arrastavel
-- abas tematicas: cor e detalhe, HSL (balanco de branco e ajuste por cor), filtros (presets com miniaturas do frame atual), estabilizacao, geometria, ruido e midia
-- corte temporal com inicio/fim e uma lista de trechos removidos de dentro do video (video e audio)
-- presets de melhoria e reset por slider para o valor do preset ativo
-- denoise desativado, manual, auto ou por amostra escolhida no preview; nitidez, contraste, brilho, gama, saturacao, temperatura e escala de saida
-- estabilizacao por translacao, similaridade, perspectiva, camera lock por regiao focal ou hibrida, com intensidade, suavizacao temporal, crop automatico e zoom out
-- filtros tonais para sombras, realces, contraste local e atenuacao de cores quentes/frias
-- crop interativo com presets de proporcao e modo livre; rotacao 90/180/270 e espelhamento
-- corte temporal por frame inicial/final com marcadores arrastaveis na linha do tempo
-- exportacao local com barra de progresso e cancelamento, usando FFmpeg apenas para encode e mux do audio original
-- tenta encoders de hardware (NVENC, VAAPI) e OpenCL quando disponiveis, com fallback automatico para CPU/libx264
-
-## Aceleracao por GPU
-
-O processamento em OpenCV pode usar OpenCL (T-API) e o encode pode usar NVENC ou VAAPI. O OpenCL so entra quando o denoise NLMeans esta ligado (num M1, 260 ms contra 1.340 ms na CPU em 720p); os filtros leves rodam na CPU porque a transferencia para o dispositivo custa mais do que o trabalho. Nesse caminho toda a cadeia (denoise, contraste, gama, saturacao, temperatura, nitidez, escala) roda no `UMat` com um unico upload e download. Saturacao e temperatura sao tabelas (`cv2.LUT`), nao aritmetica em float32. Se OpenCL ou o encoder de hardware falharem, o app cai para CPU e `libx264` automaticamente. No Linux, VAAPI exige um dispositivo como `/dev/dri/renderD128`; para NVIDIA, o FFmpeg precisa ter sido compilado com `nvenc`.
-
-**Ajuda -> Diagnostico do sistema** mostra o que a maquina oferece (ICDs OpenCL, dispositivo que o OpenCV usaria, encoders do ffmpeg) com a dica do que falta, e o mesmo relatorio vai para o log na abertura (evento `diagnostics`). O rotulo da barra de status durante o export e `backend + encoder`, por exemplo `OpenCL + NVIDIA NVENC` ou `CPU (OpenCL indisponivel) + libx264 (fallback)`.
-
-### Linux com GPU (Ubuntu 22.04/24.04)
-
-O OpenCV do PyPI ja vem com OpenCL compilado, mas em tempo de execucao ele carrega `libOpenCL.so.1` (o *ICD loader*) e, por ele, o driver da GPU (`/etc/OpenCL/vendors/*.icd`). O caso mais comum de "OpenCL indisponivel" e o driver da NVIDIA instalado sem o loader.
-
-1. Driver da GPU. NVIDIA: `sudo ubuntu-drivers install` (ou `sudo apt install nvidia-driver-550`) e reinicie; o metapacote traz `libnvidia-compute-550`, que e o ICD OpenCL. Intel: `sudo apt install intel-opencl-icd`. AMD: `sudo apt install mesa-opencl-icd` (ou o ROCm).
-2. Loader e utilitario: `sudo apt install ocl-icd-libopencl1 clinfo`.
-3. Confira, dentro da `.venv` do projeto:
-
-```bash
-clinfo | grep -E "Number of platforms|Device Name|Device Version"
-ls /etc/OpenCL/vendors/
-python -c "import cv2; print(cv2.ocl.haveOpenCL()); cv2.ocl.setUseOpenCL(True); print(cv2.ocl.useOpenCL()); d=cv2.ocl.Device.getDefault(); print(d.name(), d.version())"
-ffmpeg -hide_banner -encoders | grep -E "nvenc|vaapi|qsv"
-```
-
-Esperado com uma RTX: `Number of platforms 1`, `NVIDIA GeForce RTX ...`, `True` / `True` e `h264_nvenc` na lista do ffmpeg (o ffmpeg do apt ja vem com nvenc; ele carrega as bibliotecas da NVIDIA em tempo de execucao).
-
-Problemas comuns:
-
-- `Number of platforms 0` e `vendors/` vazio: falta o ICD do driver (`libnvidia-compute-<versao>`), reinstale o metapacote do driver.
-- `clinfo` lista a GPU mas `haveOpenCL()` e `False`: falta o loader (`ocl-icd-libopencl1`); `ldconfig -p | grep libOpenCL` deve mostrar `libOpenCL.so.1`.
-- WSL: a NVIDIA expoe CUDA, mas nao OpenCL, dentro do WSL; o denoise fica na CPU.
-- VAAPI (Intel/AMD): precisa de `/dev/dri/renderD128` acessivel (usuario nos grupos `render` e `video`) e do driver (`intel-media-va-driver-non-free` ou `mesa-va-drivers`); `vainfo` confirma.
-- A variavel `OPENCV_OPENCL_RUNTIME=disabled` desliga o OpenCL no OpenCV; nao a defina.
-
-Lembre que o OpenCL so acelera o denoise NLMeans (a cadeia leve e a estabilizacao sao CPU por escolha); o NVENC acelera a codificacao de todo export.
+[MIT](LICENSE). Depende de [PySide6](https://pypi.org/project/PySide6/) (LGPL), [OpenCV](https://opencv.org/) (Apache 2.0) e chama o [FFmpeg](https://ffmpeg.org/) instalado no sistema como processo externo.
