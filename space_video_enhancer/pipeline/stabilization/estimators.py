@@ -36,8 +36,6 @@ SIMILARITY_RANSAC = {
     "confidence": 0.99,
     "refineIters": 10,
 }
-PERSPECTIVE_MIN_POINTS = 8
-PERSPECTIVE_RANSAC_THRESHOLD = 3.0
 
 # --- camera lock ----------------------------------------------------------------------------
 CAMERA_LOCK_MAX_DIMENSION = 720.0
@@ -251,16 +249,6 @@ def estimate_inter_frame_transform(
     return transform
 
 
-def estimate_geometric_transform(
-    frame: np.ndarray,
-    frame_index: int | None,
-    state: StabilizationState,
-    mode: StabilizationMode,
-) -> np.ndarray | None:
-    """Similarity or perspective transform between the remembered previous frame and ``frame``."""
-    return estimate_inter_frame_transform(frame, frame_index, state, mode)
-
-
 def geometric_transform_from_gray(
     previous_gray: np.ndarray,
     current_gray: np.ndarray,
@@ -311,27 +299,6 @@ def estimate_similarity_transform(
     return scaled
 
 
-def estimate_perspective_transform(
-    source_points: np.ndarray,
-    destination_points: np.ndarray,
-    scale: float,
-    frame_shape: tuple[int, ...],
-) -> np.ndarray | None:
-    if len(source_points) < PERSPECTIVE_MIN_POINTS or len(destination_points) < PERSPECTIVE_MIN_POINTS:
-        return None
-    transform, inliers = cv2.findHomography(source_points, destination_points, cv2.RANSAC, PERSPECTIVE_RANSAC_THRESHOLD)
-    inlier_count = 0 if inliers is None else int(np.count_nonzero(inliers))
-    note("stabilization.perspective_inliers", inlier_count)
-    if transform is None or inlier_count < PERSPECTIVE_MIN_POINTS:
-        note("stabilization.rejected", "too_few_perspective_inliers")
-        return None
-    scaled = transforms.rescale_homography(transform, scale)
-    if not transforms.is_reasonable(scaled, frame_shape, allow_perspective=True):
-        note("stabilization.rejected", "unreasonable_perspective")
-        return None
-    return scaled
-
-
 def estimate_camera_lock_transform(
     frame: np.ndarray,
     reference_frame: np.ndarray,
@@ -343,44 +310,6 @@ def estimate_camera_lock_transform(
     from space_video_enhancer.pipeline.stabilization import lock  # noqa: PLC0415  (lock builds on this module)
 
     return lock.lock_transform(frame, reference_frame, focus_rect, state, frame_index)
-
-
-def orb_lock_transform(
-    frame: np.ndarray,
-    reference_frame: np.ndarray,
-    focus_rect: NormalizedRect,
-) -> np.ndarray | None:
-    """The stateless lock: ORB matches around the region, then template matching. Kept for comparison."""
-    reference_height, reference_width = reference_frame.shape[:2]
-    current_height, current_width = frame.shape[:2]
-    reference_pixels = focus_rect.to_pixels(reference_width, reference_height)
-    current_pixels = focus_rect.to_pixels(current_width, current_height)
-    if reference_pixels is None or current_pixels is None:
-        return None
-
-    scale = min(1.0, CAMERA_LOCK_MAX_DIMENSION / max(reference_width, reference_height, current_width, current_height))
-    reference = reference_features(reference_frame, reference_pixels, scale)
-    current_gray = scaled_gray(frame, scale)
-    if reference.gray.size == 0 or current_gray.size == 0:
-        return None
-
-    current_mask = np.zeros_like(current_gray, dtype=np.uint8)
-    search_rect = expanded_search_rect(current_pixels, current_width, current_height, CAMERA_LOCK_SEARCH_EXPANSION)
-    cur_x, cur_y, cur_w, cur_h = scaled_rect(search_rect, scale, current_gray.shape[1], current_gray.shape[0])
-    current_mask[cur_y : cur_y + cur_h, cur_x : cur_x + cur_w] = 255
-
-    for label, mask in (("orb_masked", current_mask), ("orb_unmasked", None)):
-        transform = camera_lock_feature_transform(reference, current_gray, mask, scale, frame.shape)
-        if transform is not None:
-            note("stabilization.estimator", label)
-            return transform
-
-    shift = estimate_template_shift(frame, reference_frame, focus_rect)
-    if shift is None:
-        note("stabilization.estimator", "none")
-        return None
-    note("stabilization.estimator", "template_match")
-    return transforms.translation_to_affine(shift[0], shift[1])
 
 
 def orb_matches(
