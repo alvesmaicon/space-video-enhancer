@@ -42,7 +42,7 @@ Requisitos: **Python 3.9+** e **FFmpeg** no `PATH`. O mesmo código roda nos tr�
 |---|---|---|
 | macOS (Apple Silicon e Intel) | Desenvolvido e usado aqui | OpenCL no denoise; o nome na barra de menus fica "Python" fora de um `.app` |
 | Linux (Ubuntu 22.04/24.04) | Testado regularmente | OpenCL, NVENC e VAAPI quando disponíveis ([docs/GPU.md](docs/GPU.md)); `scripts/install-desktop-entry.sh` para nome e ícone no dock |
-| Windows 10/11 | Deve funcionar, não validado com frequência | NVENC via FFmpeg com `nvenc`; abra uma issue se algo falhar |
+| Windows 10/11 | Deve funcionar, não validado com frequência | `run.ps1`/`run.cmd` no lugar de `run.sh`; NVENC via FFmpeg com `nvenc`; abra uma issue se algo falhar |
 
 ```bash
 # macOS
@@ -61,10 +61,11 @@ Clone e rode:
 ```bash
 git clone https://github.com/OWNER/space-video-enhancer.git
 cd space-video-enhancer
-./run.sh
+./run.sh        # macOS e Linux
+.\run.ps1       # Windows (PowerShell) — ou clique duas vezes em run.cmd
 ```
 
-`run.sh` cria a `.venv`, instala as dependências quando o projeto muda e abre a interface. Manualmente:
+Os dois fazem o mesmo: criam a `.venv`, instalam as dependências quando o projeto muda e abrem a interface. Manualmente:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
