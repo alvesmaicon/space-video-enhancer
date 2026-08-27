@@ -100,6 +100,7 @@ def ui_video_other_fps(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture
 def window(app):  # type: ignore[no-untyped-def]
     window = MainWindow()
+    window.confirm_discard = False  # tests open and close freely; the prompt has its own test
     window.show()
     pump(app, 0.1)
     yield window

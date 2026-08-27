@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QContextMenuEvent,
     QImage,
@@ -101,7 +102,10 @@ AUDIO_STATE_TEXT = {
     "loading": "Carregando áudio…",
     "none": "Sem áudio",
     "unavailable": "FFmpeg não encontrado: sem forma de onda",
+    "missing": "Arquivo não encontrado",
 }
+CLIP_MISSING_COLOR = QColor(220, 38, 38, 120)
+CLIP_MISSING_TEXT_COLOR = QColor("#7f1d1d")
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -227,6 +231,8 @@ class ClipBlock:
     source: Path
     source_start: int = 0
     """Source frame shown at ``start``; the clip is contiguous, so frame ``start + k`` is ``source_start + k``."""
+    missing: bool = False
+    """The file is not where the project says: the block is hatched and marked, nothing of it can be decoded."""
 
     @property
     def end(self) -> int:
@@ -1064,14 +1070,18 @@ class TimelineWidget(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(CLIP_ACTIVE_COLOR if active else CLIP_COLORS[index % len(CLIP_COLORS)])
             painter.drawRect(rect.adjusted(0, 1, 0, -1))
+            if clip.missing:  # hatched in red: the file is gone from where the project expects it
+                painter.setBrush(QBrush(CLIP_MISSING_COLOR, Qt.BrushStyle.BDiagPattern))
+                painter.drawRect(rect.adjusted(0, 1, 0, -1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(CLIP_BORDER_COLOR if active else CLIP_BOUNDARY_COLOR, 1))
             painter.drawRect(rect.adjusted(0.5, 1.5, -0.5, -1.5))
             if rect.width() >= CLIP_MIN_TEXT_WIDTH:
+                prefix = "⚠ " if clip.missing else ""
                 label = metrics.elidedText(
-                    f"{index + 1}. {clip.name}", Qt.TextElideMode.ElideMiddle, int(rect.width()) - 8
+                    f"{prefix}{index + 1}. {clip.name}", Qt.TextElideMode.ElideMiddle, int(rect.width()) - 8
                 )
-                painter.setPen(CLIP_TEXT_COLOR)
+                painter.setPen(CLIP_MISSING_TEXT_COLOR if clip.missing else CLIP_TEXT_COLOR)
                 painter.drawText(
                     rect.adjusted(4, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label
                 )

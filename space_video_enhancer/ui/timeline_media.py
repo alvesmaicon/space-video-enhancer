@@ -59,6 +59,8 @@ class FilmstripWorker(QObject):
         self._paths_changed = False
         self._latest_generation = 0
         self._videos: dict[Path, VideoSource] = {}
+        self._unavailable: set[Path] = set()
+        """Files that failed to open (missing media): not retried until the sequence's files change."""
 
     def post(self, request: FilmstripRequest) -> None:
         """GUI thread: replace whatever request is waiting; the worker checks the generation between frames."""
@@ -104,13 +106,17 @@ class FilmstripWorker(QObject):
         for path in list(self._videos):
             if path not in paths:
                 self._videos.pop(path).release()
+        self._unavailable &= set(paths)
 
     def _video_for(self, path: Path) -> VideoSource | None:
         video = self._videos.get(path)
         if video is None:
+            if path in self._unavailable:
+                return None
             try:
                 video = VideoSource(path)
             except VideoOpenError as error:
+                self._unavailable.add(path)
                 log_event(LOG, "filmstrip.open_failed", level=logging.WARNING, name=path.name, error=str(error))
                 return None
             self._videos[path] = video

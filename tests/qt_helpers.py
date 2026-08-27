@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("SVE_PREVIEW_AUDIO", "0")  # never play sound from the test-suite
+os.environ.setdefault("SVE_STATE_DIR", tempfile.mkdtemp(prefix="sve-state-"))  # recents etc. never touch ~
 
 from PySide6.QtWidgets import QApplication
 
