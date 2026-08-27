@@ -38,11 +38,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QTabWidget,
     QToolButton,
@@ -295,6 +298,7 @@ class MainWindow(QMainWindow):
         self._export_output_path: Path | None = None
 
         self._monitor: MonitorWindow | None = None  # the detached preview window, created on first use
+        self._main_preview_paused = False  # while the monitor shows the frame, this window stops painting it
 
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self._advance_playback_frame)
@@ -462,6 +466,15 @@ class MainWindow(QMainWindow):
             "F11 para tela cheia (Ctrl+Shift+D)"
         )
         self.monitor_action.toggled.connect(self._toggle_monitor)
+        self.pause_preview_action = QAction("Pausar o preview desta janela", self)
+        self.pause_preview_action.setCheckable(True)
+        self.pause_preview_action.setChecked(True)
+        self.pause_preview_action.setEnabled(False)  # only means anything while the monitor is open
+        self.pause_preview_action.setToolTip(
+            "Com o preview em janela separada, esta janela para de desenhar o frame (o render e a janela separada "
+            "seguem iguais). As abas que ajustam regiões no preview o mostram aqui mesmo assim."
+        )
+        self.pause_preview_action.toggled.connect(self._handle_pause_preview_toggled)
         self.diagnostics_action = self._make_action("Diagnóstico do sistema…", self._show_diagnostics)
         self.open_logs_action = self._make_action("Abrir pasta de logs", self._open_log_folder)
         self.about_action = self._make_action("Sobre", self._show_about_dialog)
@@ -488,7 +501,10 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
         left_layout.addWidget(self._build_preview_bar())
-        left_layout.addWidget(self.preview_scroll, 1)
+        self.preview_stack = QStackedWidget()
+        self.preview_stack.addWidget(self.preview_scroll)
+        self.preview_stack.addWidget(self._build_preview_paused_panel())
+        left_layout.addWidget(self.preview_stack, 1)
         left_layout.addWidget(self.transport)
 
         self.settings_tabs = QTabWidget()
@@ -550,6 +566,47 @@ class MainWindow(QMainWindow):
         row.addWidget(self.monitor_button)
         self.preview_bar = bar
         return bar
+
+    def _build_preview_paused_panel(self) -> QWidget:
+        """What stands in for the preview while the monitor is showing the frame instead."""
+        panel = QWidget()
+        panel.setObjectName("previewPaused")
+        panel.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # the transport keys must keep working from this window
+        for action in self._transport_actions():
+            panel.addAction(action)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(10)
+        layout.addStretch(1)
+        title = QLabel("O preview está na janela separada")
+        title.setObjectName("previewPausedTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        explanation = QLabel(
+            "Esta janela parou de desenhar o frame para não gastar processamento à toa.\n"
+            "As abas Geometria, Ruído, Estabilizar e HSL mostram o preview aqui de novo,\n"
+            "porque nelas as regiões são arrastadas sobre a imagem."
+        )
+        explanation.setObjectName("previewPausedHint")
+        explanation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.preview_resume_button = QPushButton("Mostrar aqui também")
+        self.preview_resume_button.setObjectName("secondaryButton")
+        self.preview_resume_button.setToolTip("Voltar a desenhar o frame nesta janela, com a janela separada aberta")
+        self.preview_resume_button.clicked.connect(lambda: self.pause_preview_action.setChecked(False))
+        self.close_monitor_button = QPushButton("Fechar a janela separada")
+        self.close_monitor_button.setObjectName("secondaryButton")
+        self.close_monitor_button.clicked.connect(lambda: self.monitor_action.setChecked(False))
+        buttons.addWidget(self.preview_resume_button)
+        buttons.addWidget(self.close_monitor_button)
+        buttons.addStretch(1)
+        layout.addWidget(title)
+        layout.addWidget(explanation)
+        layout.addLayout(buttons)
+        layout.addStretch(1)
+        self.preview_paused_panel = panel
+        return panel
 
     def _fit_settings_panel(self) -> None:
         """Never clip the tabs: the panel's minimum width is what its tab bar and widest content need."""
@@ -615,6 +672,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.vectors_action)
         view_menu.addSeparator()
         view_menu.addAction(self.monitor_action)
+        view_menu.addAction(self.pause_preview_action)
 
         help_menu = menu_bar.addMenu("Ajuda")
         help_menu.addAction(self.diagnostics_action)
@@ -905,6 +963,7 @@ class MainWindow(QMainWindow):
         self._video_read_counters = (0, 0)
         self._backend.reset()
         self._discard_pending_previews()
+        self._last_preview = None  # the frames on screen belong to the document being replaced
         if self._monitor is not None:
             self._monitor.set_images(None, None)
         self._preview_controller.set_videos(tuple(self._sources.values()))  # the worker releases the previous ones
@@ -924,7 +983,7 @@ class MainWindow(QMainWindow):
         self._set_controls_enabled(True)
         self.transport.set_value_silently(self.current_frame_index)
         self._load_frame(self.current_frame_index)
-        self.preview.setFocus()
+        self._focus_preview_surface()
 
     def _add_video(self, path: Path) -> None:
         """Append ``path`` as a clip (same fps as the sequence); the new clip starts with the current look."""
@@ -1953,6 +2012,7 @@ class MainWindow(QMainWindow):
 
     def _handle_tab_changed(self, index: int) -> None:
         log_event(LOG, "ui.tab", tab=self.settings_tabs.tabText(index))
+        self._sync_preview_pause()  # the region tabs need the image in this window
         self._sync_overlays()
         if self._filters_tab_visible():
             self._schedule_filter_thumbnails_refresh()
@@ -2064,15 +2124,17 @@ class MainWindow(QMainWindow):
             self._playback_frames_shown += 1
             if "stabilization.result" in images.trace:
                 self._playback_stabilization[str(images.trace["stabilization.result"])] += 1
-        self.preview.set_images(images.before, images.after)
-        self.preview.set_motion_overlay(images.motion if self._vectors_visible else None)
         if self._monitor is not None and self._monitor.isVisible():
             self._monitor.set_images(images.before, images.after)
+        if not self._main_preview_paused:  # paused: the frame is on the other window, this one draws nothing
+            self.preview.set_images(images.before, images.after)
+            self.preview.set_motion_overlay(images.motion if self._vectors_visible else None)
         if images.generation >= self._preview_generation:
             self.status.set_render_busy(False)
         self._update_denoise_info()
         self._update_exposure_info()
-        self._update_hud()
+        if not self._main_preview_paused:
+            self._update_hud()
         self._schedule_filter_thumbnails_refresh()
 
     def _discard_pending_previews(self) -> None:
@@ -2804,6 +2866,7 @@ class MainWindow(QMainWindow):
             if self._monitor is not None and self._monitor.isVisible():
                 self._monitor.hide()
                 log_event(LOG, "ui.monitor", state="closed")
+            self._sync_preview_pause()
             return
         monitor = self._monitor_window()
         monitor.set_frame_count(self.frame_count, self.fps)
@@ -2815,7 +2878,56 @@ class MainWindow(QMainWindow):
         images = self._last_preview
         monitor.set_images(images.before if images is not None else None, images.after if images is not None else None)
         monitor.show_near(self)
+        self._sync_preview_pause()
         log_event(LOG, "ui.monitor", state="open", screens=len(QGuiApplication.screens()))
+
+    def _handle_pause_preview_toggled(self, checked: bool) -> None:
+        log_event(LOG, "ui.monitor", state="pause_preview" if checked else "resume_preview")
+        self._sync_preview_pause()
+
+    def _tab_edits_a_preview_region(self) -> bool:
+        """Tabs whose rectangle is dragged over the image: they need the preview in this window."""
+        return self.settings_tabs.currentWidget() in (
+            self.geometry_tab,
+            self.noise_tab,
+            self.stabilization_tab,
+            self.grade_tab,
+        )
+
+    def _should_pause_main_preview(self) -> bool:
+        showing_elsewhere = self._monitor is not None and self._monitor.isVisible()
+        return showing_elsewhere and self.pause_preview_action.isChecked() and not self._tab_edits_a_preview_region()
+
+    @property
+    def main_preview_paused(self) -> bool:
+        """True while this window leaves the frame to the monitor and paints a panel instead."""
+        return self._main_preview_paused
+
+    def _sync_preview_pause(self) -> None:
+        """Show either the preview or the paused panel; the render itself never stops (the monitor needs it)."""
+        self.pause_preview_action.setEnabled(self._monitor is not None and self._monitor.isVisible())
+        paused = self._should_pause_main_preview()
+        if paused == self._main_preview_paused:
+            return
+        self._main_preview_paused = paused
+        had_focus = self.preview.hasFocus() or self.preview_paused_panel.hasFocus()
+        if paused:
+            self.preview_stack.setCurrentWidget(self.preview_paused_panel)
+            self.preview.set_images(None, None)  # nothing to hold: the frames live on the monitor now
+            self.preview.set_motion_overlay(None)
+        else:
+            self.preview_stack.setCurrentWidget(self.preview_scroll)
+            images = self._last_preview
+            if images is not None:
+                self.preview.set_images(images.before, images.after)
+                self.preview.set_motion_overlay(images.motion if self._vectors_visible else None)
+            self._update_hud()
+        if had_focus:
+            self._focus_preview_surface()
+
+    def _focus_preview_surface(self) -> None:
+        """Focus whichever of the two is on screen, so the bare transport keys keep working."""
+        (self.preview_paused_panel if self._main_preview_paused else self.preview).setFocus()
 
     def _monitor_window(self) -> MonitorWindow:
         """The detached window, created the first time it is asked for and kept (hidden) afterwards."""
@@ -2846,6 +2958,7 @@ class MainWindow(QMainWindow):
             self.monitor_action.setChecked(False)
             self.monitor_action.blockSignals(False)
             log_event(LOG, "ui.monitor", state="closed")
+        self._sync_preview_pause()
 
     # =====================================================================================
     # Misc

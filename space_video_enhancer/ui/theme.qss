@@ -317,6 +317,19 @@ QPushButton#statusReveal {
     color: #0f766e;
     border: 1px solid #0f766e;
 }
+QWidget#previewPaused {
+    background: #f3f4f6;
+    border: 1px solid #d6d3d1;
+    border-radius: 14px;
+}
+QLabel#previewPausedTitle {
+    color: #1f2937;
+    font-size: 15px;
+    font-weight: 600;
+}
+QLabel#previewPausedHint {
+    color: #4b5563;
+}
 QWidget#monitorWindow, QWidget#monitorWindow > QWidget {
     background: #0b0f19;
     color: #e5e7eb;

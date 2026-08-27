@@ -186,3 +186,56 @@ def test_fullscreen_hides_the_controls_when_the_mouse_rests(app: QApplication) -
     monitor.close()
     pump(app, 0.05)
     assert not monitor.isVisible() and not monitor.fullscreen_action.isChecked()
+
+
+def test_the_main_window_stops_painting_while_the_monitor_shows_the_frame(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    assert not window.main_preview_paused and window.preview_stack.currentWidget() is window.preview_scroll
+    assert not window.pause_preview_action.isEnabled(), "it only means anything with the monitor open"
+    assert window.pause_preview_action.isChecked(), "on by default: that is why the monitor was opened"
+
+    window.monitor_action.trigger()
+    monitor = window._monitor
+    assert monitor is not None
+    assert window.main_preview_paused and window.preview_stack.currentWidget() is window.preview_paused_panel
+    assert window.pause_preview_action.isEnabled()
+    assert window.preview._after is None, "this window is not holding the frame any more"
+    assert monitor.view.has_images()
+    assert window.preview_paused_panel.hasFocus(), "the transport keys still work from this window"
+    assert window.play_action in window.preview_paused_panel.actions()
+
+    generation = window._applied_preview_generation
+    window.transport.set_value(5)
+    wait_for_preview(app, window)
+    assert window._applied_preview_generation > generation, "the render never stops: the monitor needs it"
+    assert window.preview._after is None and monitor.view.has_images()
+
+    window.settings_tabs.setCurrentWidget(window.stabilization_tab)
+    wait_for_preview(app, window)
+    assert not window.main_preview_paused, "the focus region is dragged over the image: it has to be here"
+    assert window.preview._after is not None and window.preview_stack.currentWidget() is window.preview_scroll
+    for tab in (window.geometry_tab, window.noise_tab, window.grade_tab):
+        window.settings_tabs.setCurrentWidget(tab)
+        wait_for_preview(app, window)
+        assert not window.main_preview_paused, window.settings_tabs.tabText(window.settings_tabs.currentIndex())
+    window.settings_tabs.setCurrentWidget(window.color_tab)
+    wait_for_preview(app, window)
+    assert window.main_preview_paused, "back to a tab that only needs sliders"
+
+    window.preview_resume_button.click()
+    wait_for_preview(app, window)
+    assert not window.pause_preview_action.isChecked() and not window.main_preview_paused
+    window.transport.set_value(2)
+    wait_for_preview(app, window)
+    assert window.preview._after is not None and monitor.view.has_images(), "both windows draw it"
+
+    window.pause_preview_action.setChecked(True)
+    assert window.main_preview_paused
+    window.close_monitor_button.click()
+    pump(app, 0.05)
+    assert not monitor.isVisible() and not window.main_preview_paused
+    assert not window.pause_preview_action.isEnabled()
+    assert window.preview._after is not None, "the frame is back in this window"
