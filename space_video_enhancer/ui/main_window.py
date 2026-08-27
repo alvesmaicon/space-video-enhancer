@@ -23,7 +23,17 @@ from typing import Any
 import cv2
 import numpy as np
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QImage, QKeyEvent, QKeySequence
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QDesktopServices,
+    QGuiApplication,
+    QIcon,
+    QImage,
+    QKeyEvent,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -91,6 +101,8 @@ from space_video_enhancer.ui.audio_preview import (
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.format import format_duration, format_timecode
 from space_video_enhancer.ui.history import EditHistory
+from space_video_enhancer.ui.icons import glyph_icon
+from space_video_enhancer.ui.monitor_window import MonitorWindow
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.reference_frames import ReferenceFrameController
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo, select_combo_data
@@ -282,6 +294,8 @@ class MainWindow(QMainWindow):
         self._export_started_at = 0.0
         self._export_output_path: Path | None = None
 
+        self._monitor: MonitorWindow | None = None  # the detached preview window, created on first use
+
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self._advance_playback_frame)
         self._preview_refresh_timer = QTimer(self)
@@ -439,6 +453,15 @@ class MainWindow(QMainWindow):
             "definiram o movimento da câmera, em laranja os descartados (objeto em movimento) (Ctrl+Shift+M)"
         )
         self.vectors_action.toggled.connect(self._toggle_vectors)
+        self.monitor_action = QAction("Preview em janela separada", self)
+        self.monitor_action.setCheckable(True)
+        self.monitor_action.setShortcut("Ctrl+Shift+D")
+        self.monitor_action.setIcon(glyph_icon("detach", QColor("#1f2937")))
+        self.monitor_action.setToolTip(
+            "Abrir o preview em uma janela separada com os controles de reprodução — leve para outra tela e use "
+            "F11 para tela cheia (Ctrl+Shift+D)"
+        )
+        self.monitor_action.toggled.connect(self._toggle_monitor)
         self.diagnostics_action = self._make_action("Diagnóstico do sistema…", self._show_diagnostics)
         self.open_logs_action = self._make_action("Abrir pasta de logs", self._open_log_folder)
         self.about_action = self._make_action("Sobre", self._show_about_dialog)
@@ -518,6 +541,13 @@ class MainWindow(QMainWindow):
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(button)
+        self.monitor_button = QToolButton()
+        self.monitor_button.setDefaultAction(self.monitor_action)
+        self.monitor_button.setObjectName("previewToggle")
+        self.monitor_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.monitor_button.setIconSize(QSize(16, 16))
+        self.monitor_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        row.addWidget(self.monitor_button)
         self.preview_bar = bar
         return bar
 
@@ -583,6 +613,8 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.hud_action)
         view_menu.addAction(self.vectors_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.monitor_action)
 
         help_menu = menu_bar.addMenu("Ajuda")
         help_menu.addAction(self.diagnostics_action)
@@ -664,6 +696,8 @@ class MainWindow(QMainWindow):
         for _title, tab in self._tabs:
             tab.set_controls_enabled(enabled)
         self.transport.setEnabled(enabled)
+        if self._monitor is not None:
+            self._monitor.set_controls_enabled(enabled)
         self.export_action.setEnabled(enabled and not self.sequence.is_empty)
         self.save_project_action.setEnabled(enabled and not self.sequence.is_empty)
         self.save_project_as_action.setEnabled(enabled and not self.sequence.is_empty)
@@ -871,6 +905,8 @@ class MainWindow(QMainWindow):
         self._video_read_counters = (0, 0)
         self._backend.reset()
         self._discard_pending_previews()
+        if self._monitor is not None:
+            self._monitor.set_images(None, None)
         self._preview_controller.set_videos(tuple(self._sources.values()))  # the worker releases the previous ones
         self._last_logged_settings = None  # next preview logs a full settings.snapshot for this sequence
         last = self.frame_count - 1
@@ -1002,6 +1038,8 @@ class MainWindow(QMainWindow):
         if self._pending_cut_start is not None and self._pending_cut_start > last:
             self._pending_cut_start = None
         self.transport.set_clips(self._clip_blocks())
+        if self._monitor is not None:
+            self._monitor.set_frame_count(self.frame_count, self.fps)
         self._filmstrip.set_videos(self.sequence.source_paths)
         self._load_waveforms()
         self._audio_player.keep_only(self.sequence.source_paths)
@@ -1174,9 +1212,13 @@ class MainWindow(QMainWindow):
     def _update_window_title(self) -> None:
         if self.sequence.is_empty:
             self.setWindowTitle("Space Video Enhancer")
+            if self._monitor is not None:
+                self._monitor.set_document_name(None)
             return
         marker = " *" if self.has_unsaved_changes else ""
         self.setWindowTitle(f"{self._document_name()}{marker} — Space Video Enhancer")
+        if self._monitor is not None:
+            self._monitor.set_document_name(self._document_name())
 
     def _current_project(self) -> Project:
         return Project(
@@ -1459,6 +1501,8 @@ class MainWindow(QMainWindow):
         playing = self.playback_timer.isActive()
         self.current_frame_index = frame_index
         self.transport.set_position(frame_index)
+        if self._monitor is not None:
+            self._monitor.set_position(frame_index)
         self._sync_active_clip()
         if playing and not self._playback_seeking:
             self._start_playback_clock(frame_index)  # the user seeked while playing: video and sound restart here
@@ -1510,7 +1554,7 @@ class MainWindow(QMainWindow):
             self._stop_playback()
             return
 
-        self.transport.set_playing(True)
+        self._set_playing_indicators(True)
         self._playback_started_at = time.monotonic()
         self._playback_frames_shown = 0
         self._playback_intervals = RollingStats(window=60)
@@ -1563,11 +1607,16 @@ class MainWindow(QMainWindow):
             self.playback_timer.stop()
         self._playback_audio_samples = self._audio_player.samples_written
         self._audio_player.stop()
-        self.transport.set_playing(False)
+        self._set_playing_indicators(False)
         if was_active:
             self._log_playback_stop()
             self._schedule_filter_thumbnails_refresh()
             self._update_hud()
+
+    def _set_playing_indicators(self, playing: bool) -> None:
+        self.transport.set_playing(playing)
+        if self._monitor is not None:
+            self._monitor.set_playing(playing)
 
     def _log_playback_stop(self) -> None:
         seconds = time.monotonic() - self._playback_started_at if self._playback_started_at else 0.0
@@ -1872,6 +1921,8 @@ class MainWindow(QMainWindow):
 
     def _handle_preview_render_mode_changed(self, _index: int) -> None:
         self.preview.set_render_quality(self._preview_render_mode() is not PreviewRenderMode.FAST)
+        if self._monitor is not None:
+            self._monitor.set_render_quality(self._preview_render_mode() is not PreviewRenderMode.FAST)
         self._stabilization_epoch += 1
         log_event(LOG, "ui.render_mode", mode=self._preview_render_mode().value)
         self._schedule_preview_refresh(immediate=True, reason="mode")
@@ -2015,6 +2066,8 @@ class MainWindow(QMainWindow):
                 self._playback_stabilization[str(images.trace["stabilization.result"])] += 1
         self.preview.set_images(images.before, images.after)
         self.preview.set_motion_overlay(images.motion if self._vectors_visible else None)
+        if self._monitor is not None and self._monitor.isVisible():
+            self._monitor.set_images(images.before, images.after)
         if images.generation >= self._preview_generation:
             self.status.set_render_busy(False)
         self._update_denoise_info()
@@ -2728,6 +2781,8 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._stop_playback()
+        if self._monitor is not None:
+            self._monitor.close()
         self._log_session_summary()
         if self._export_controller is not None:
             self._export_controller.stop()
@@ -2740,6 +2795,57 @@ class MainWindow(QMainWindow):
         self._preview_controller.stop()  # also releases the decoders it owns
         self._sources.clear()
         super().closeEvent(event)
+
+    # =====================================================================================
+    # Monitor window (the preview on another screen)
+    # =====================================================================================
+    def _toggle_monitor(self, checked: bool) -> None:
+        if not checked:
+            if self._monitor is not None and self._monitor.isVisible():
+                self._monitor.hide()
+                log_event(LOG, "ui.monitor", state="closed")
+            return
+        monitor = self._monitor_window()
+        monitor.set_frame_count(self.frame_count, self.fps)
+        monitor.set_position(self.current_frame_index)
+        monitor.set_playing(self.playback_timer.isActive())
+        monitor.set_controls_enabled(self.transport.isEnabled())
+        monitor.set_render_quality(self._preview_render_mode() is not PreviewRenderMode.FAST)
+        monitor.set_document_name(None if self.sequence.is_empty else self._document_name())
+        images = self._last_preview
+        monitor.set_images(images.before if images is not None else None, images.after if images is not None else None)
+        monitor.show_near(self)
+        log_event(LOG, "ui.monitor", state="open", screens=len(QGuiApplication.screens()))
+
+    def _monitor_window(self) -> MonitorWindow:
+        """The detached window, created the first time it is asked for and kept (hidden) afterwards."""
+        if self._monitor is None:
+            monitor = MonitorWindow()
+            monitor.firstRequested.connect(self._go_to_first_frame)
+            monitor.previousRequested.connect(self._go_to_previous_frame)
+            monitor.playToggled.connect(self._toggle_playback)
+            monitor.nextRequested.connect(self._go_to_next_frame)
+            monitor.lastRequested.connect(self._go_to_last_frame)
+            monitor.frameRequested.connect(self._seek_from_monitor)
+            monitor.closed.connect(self._on_monitor_closed)
+            # The same key bindings as the preview: Space, Home/End, arrows, I/O/X work with the monitor focused too.
+            for action in self._transport_actions():
+                monitor.addAction(action)
+            monitor.addAction(self.monitor_action)  # Ctrl+Shift+D closes it from there as well
+            self._monitor = monitor
+        return self._monitor
+
+    def _seek_from_monitor(self, frame: int) -> None:
+        if self.frame_count > 0:
+            self._stop_playback()
+            self.transport.set_value(max(0, min(frame, self.transport.maximum())))
+
+    def _on_monitor_closed(self) -> None:
+        if self.monitor_action.isChecked():
+            self.monitor_action.blockSignals(True)
+            self.monitor_action.setChecked(False)
+            self.monitor_action.blockSignals(False)
+            log_event(LOG, "ui.monitor", state="closed")
 
     # =====================================================================================
     # Misc

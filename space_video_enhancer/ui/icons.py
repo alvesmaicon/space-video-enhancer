@@ -15,7 +15,9 @@ BAR_WIDTH = 0.14
 STROKE_WIDTH = 0.11
 """Line width of the stroked glyphs as a fraction of the icon size."""
 FILLED_GLYPHS = frozenset({"first", "previous", "play", "pause", "next", "last"})
-STROKED_GLYPHS = frozenset({"mark_in", "mark_out", "remove_range", "split", "trash", "move_left", "move_right"})
+STROKED_GLYPHS = frozenset(
+    {"mark_in", "mark_out", "remove_range", "split", "trash", "move_left", "move_right", "detach"}
+)
 
 
 def glyph_icon(kind: str, color: QColor, size: int = 18) -> QIcon:
@@ -124,6 +126,18 @@ def _draw_stroked(painter: QPainter, kind: str, size: float, color: QColor) -> N
             painter.drawLine(
                 QPointF(middle + offset, body.top() + size * 0.1), QPointF(middle + offset, body.bottom() - size * 0.1)
             )
+    elif kind == "detach":
+        # A window with an arrow leaving its top-right corner: open this somewhere else.
+        gap = size * 0.3
+        frame = QPainterPath(QPointF(right - gap, top))
+        frame.lineTo(left, top)
+        frame.lineTo(left, bottom)
+        frame.lineTo(right, bottom)
+        frame.lineTo(right, top + gap)
+        painter.drawPath(frame)
+        painter.drawLine(QPointF(middle, middle), QPointF(right, top))
+        painter.drawLine(QPointF(right - size * 0.28, top), QPointF(right, top))
+        painter.drawLine(QPointF(right, top), QPointF(right, top + size * 0.28))
     elif kind in ("move_left", "move_right"):
         head = right if kind == "move_right" else left
         tail = left if kind == "move_right" else right

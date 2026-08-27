@@ -317,3 +317,89 @@ QPushButton#statusReveal {
     color: #0f766e;
     border: 1px solid #0f766e;
 }
+QWidget#monitorWindow, QWidget#monitorWindow > QWidget {
+    background: #0b0f19;
+    color: #e5e7eb;
+}
+QWidget#monitorControls {
+    background: #111827;
+    border-top: 1px solid #1f2937;
+}
+QLabel#monitorTimecode {
+    color: #e5e7eb;
+    font-weight: 600;
+}
+QPushButton#monitorButton, QPushButton#monitorPlayButton {
+    background: #1f2937;
+    border: 1px solid #374151;
+    border-radius: 10px;
+    padding: 4px;
+}
+QPushButton#monitorPlayButton {
+    background: #0f766e;
+    border-color: #0f766e;
+    border-radius: 12px;
+}
+QPushButton#monitorButton:hover {
+    background: #374151;
+    border-color: #14b8a6;
+}
+QPushButton#monitorPlayButton:hover {
+    background: #0d9488;
+}
+QPushButton#monitorButton:disabled, QPushButton#monitorPlayButton:disabled {
+    background: #111827;
+    border-color: #1f2937;
+}
+QToolButton#monitorToggle {
+    background: #1f2937;
+    border: 1px solid #374151;
+    border-radius: 8px;
+    padding: 4px 12px;
+    color: #e5e7eb;
+    font-weight: 600;
+}
+QToolButton#monitorToggle:hover {
+    background: #374151;
+    border-color: #14b8a6;
+}
+QToolButton#monitorToggle:checked {
+    background: #0f766e;
+    border-color: #0f766e;
+    color: white;
+}
+QComboBox#monitorCombo {
+    background: #1f2937;
+    color: #e5e7eb;
+    border: 1px solid #374151;
+    border-radius: 8px;
+    padding: 3px 10px;
+}
+QComboBox#monitorCombo::drop-down {
+    border: none;
+    width: 18px;
+}
+QComboBox#monitorCombo QAbstractItemView {
+    background: #1f2937;
+    color: #e5e7eb;
+    selection-background-color: #0f766e;
+    selection-color: white;
+}
+QSlider#monitorScrubber::groove:horizontal {
+    height: 4px;
+    background: #374151;
+    border-radius: 2px;
+}
+QSlider#monitorScrubber::sub-page:horizontal {
+    background: #14b8a6;
+    border-radius: 2px;
+}
+QSlider#monitorScrubber::handle:horizontal {
+    width: 12px;
+    margin: -5px 0;
+    background: #f9fafb;
+    border-radius: 6px;
+}
+QSlider#monitorScrubber::handle:horizontal:disabled {
+    background: #4b5563;
+}
