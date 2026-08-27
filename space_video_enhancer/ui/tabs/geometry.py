@@ -18,14 +18,14 @@ from space_video_enhancer.ui.tabs.base import (
 
 ROTATION_OPTIONS: list[tuple[str, RotationMode]] = [
     ("Sem rotação", RotationMode.NONE),
-    ("90°", RotationMode.CW_90),
+    ("90° no sentido horário", RotationMode.CW_90),
     ("180°", RotationMode.ROTATE_180),
-    ("270°", RotationMode.CW_270),
+    ("90° no sentido anti-horário", RotationMode.CW_270),
 ]
 FREE_CROP = "free"
 CROP_OPTIONS: list[tuple[str, object]] = [
-    ("Sem crop", None),
-    ("Livre", FREE_CROP),
+    ("Desligado", None),
+    ("Livre (arraste no preview)", FREE_CROP),
     ("16:9", 16 / 9),
     ("4:3", 4 / 3),
     ("1:1", 1.0),

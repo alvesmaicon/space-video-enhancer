@@ -21,10 +21,10 @@ from space_video_enhancer.ui.tabs.base import (
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
 MODE_OPTIONS: list[tuple[str, DenoiseMode]] = [
-    ("Desativado", DenoiseMode.OFF),
-    ("Manual", DenoiseMode.MANUAL),
-    ("Auto", DenoiseMode.AUTO),
-    ("Amostra do preview", DenoiseMode.SAMPLE),
+    ("Desligado", DenoiseMode.OFF),
+    ("Manual (força fixa)", DenoiseMode.MANUAL),
+    ("Automático pelo frame inteiro", DenoiseMode.AUTO),
+    ("Automático pela região azul do preview", DenoiseMode.SAMPLE),
 ]
 TEMPLATE_OPTIONS = (3, 5, 7, 9)
 SEARCH_OPTIONS = (11, 15, 21, 27, 35)
@@ -46,6 +46,13 @@ class NoiseTab(TabPage):
         self.search_combo = QComboBox()
         for value in SEARCH_OPTIONS:
             self.search_combo.addItem(f"{value} px", value)
+        self.template_combo.setToolTip(
+            "Janela de template do NLMeans: o tamanho do bloco comparado. Maior preserva texturas grandes, "
+            "menor limpa grão fino."
+        )
+        self.search_combo.setToolTip(
+            "Janela de busca do NLMeans: até onde procurar blocos parecidos. Maior limpa mais e é mais lento."
+        )
         self.strength_slider = LabeledSlider("Força de luminância", 0, 100, defaults.denoise_strength)
         self.color_slider = LabeledSlider("Força de cor", 0, 100, defaults.denoise_color_strength)
         self.sliders: dict[str, LabeledSlider] = {
@@ -71,8 +78,8 @@ class NoiseTab(TabPage):
                 "Limpeza e redução de ruído",
                 form_rows(
                     ("Modo", self.mode_combo),
-                    ("Janela de template", self.template_combo),
-                    ("Janela de busca", self.search_combo),
+                    ("Tamanho do detalhe", self.template_combo),
+                    ("Área de busca", self.search_combo),
                 ),
                 self.strength_slider,
                 self.color_slider,

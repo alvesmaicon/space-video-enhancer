@@ -47,7 +47,7 @@ def test_adding_a_video_extends_the_timeline_and_the_export_range(
         (0, UI_VIDEO_FRAMES, ui_video.name),
         (UI_VIDEO_FRAMES, UI_VIDEO_B_FRAMES, ui_video_b.name),
     ]
-    assert window.export_tab.clip_list.count() == 2 and window.export_tab.selected_clip() == 0
+    assert window.transport.timeline.active_clip() == 0
     assert "2 clipes" in window.status.video_info_label.text() if hasattr(window.status, "video_info_label") else True
     assert window.windowTitle().startswith(f"{ui_video.name} +1")
     assert window.transport.timecode_label.text().endswith("/ 00:00.20")
@@ -67,7 +67,7 @@ def test_tabs_show_and_store_the_settings_of_the_clip_under_the_playhead(
 
     _go_to(app, window, 15)
     assert window.active_clip_index == 1 and window.transport.timeline.active_clip() == 1
-    assert window.export_tab.selected_clip() == 1
+    assert window.transport.delete_clip_button.isEnabled() and window.transport.move_left_button.isEnabled()
     assert window.color_tab.brightness_slider.value() == 50, "the second clip kept the look it was added with"
     window.color_tab.brightness_slider.setValue(30)
     select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.CAMERA_LOCK.value)
@@ -110,7 +110,7 @@ def test_split_at_the_playhead_gives_each_half_its_own_settings(
     assert [clip.range for clip in window.sequence.clips] == [FrameRange(0, 4), FrameRange(5, UI_VIDEO_FRAMES - 1)]
     assert all(clip.settings.filters.brightness == 70 for clip in window.sequence.clips)
     assert window.frame_count == UI_VIDEO_FRAMES and window.active_clip_index == 1
-    assert len(window.transport.timeline.clips()) == 2 and window.export_tab.clip_list.count() == 2
+    assert len(window.transport.timeline.clips()) == 2
     window.color_tab.brightness_slider.setValue(20)
     wait_for_preview(app, window)
     assert [clip.settings.filters.brightness for clip in window.sequence.clips] == [70, 20]
@@ -188,7 +188,7 @@ def test_cuts_span_clips_and_the_export_joins_the_sequence(
     window._mark_clip_start()
     _go_to(app, window, 17)
     window._mark_clip_end()
-    assert "exporta 12 frames" in window.export_tab.range_label.text()
+    assert "Saída: 12 frames" in window.export_tab.summary_label.text()
 
     monkeypatch.setattr(main_window_module, "ExportController", _FakeExportController)
     monkeypatch.setattr(main_window_module, "find_ffmpeg", lambda: "ffmpeg")

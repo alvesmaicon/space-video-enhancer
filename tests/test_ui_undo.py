@@ -110,7 +110,7 @@ def test_clip_edits_undo_and_redo_including_a_dropped_file(
     assert [block.count for block in window.transport.timeline.clips()] == [UI_VIDEO_FRAMES, UI_VIDEO_B_FRAMES]
     assert window.redo_action.text() == "Refazer dividir clipe"
     _redo(app, window)
-    assert len(window.sequence) == 3 and window.export_tab.clip_list.count() == 3
+    assert len(window.sequence) == 3 and len(window.transport.timeline.clips()) == 3
 
     window._remove_clip(2)  # the only clip of the second file: its decoder goes away with it
     wait_for_preview(app, window)
@@ -149,7 +149,7 @@ def test_cuts_and_export_markers_are_undone_without_moving_the_playhead(
     _undo(app, window)
     assert window.clip_start_frame == 0 and window.cuts == [(3, 6)] and window.current_frame_index == 6
     _undo(app, window)
-    assert window.cuts == [] and window.transport.timeline.cuts() == () and window.export_tab.cut_list.count() == 0
+    assert window.cuts == [] and window.transport.timeline.cuts() == ()
     _redo(app, window)
     assert window.cuts == [(3, 6)] and window.transport.timeline.cuts() == ((3, 6),)
 

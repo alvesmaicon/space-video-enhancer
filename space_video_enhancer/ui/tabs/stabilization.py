@@ -25,12 +25,12 @@ from space_video_enhancer.ui.tabs.base import (
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
 MODE_OPTIONS: list[tuple[str, StabilizationMode]] = [
-    ("Desativado", StabilizationMode.OFF),
-    ("Automático (translação)", StabilizationMode.AUTO),
-    ("Automático por similaridade", StabilizationMode.SIMILARITY),
-    ("Automático por perspectiva", StabilizationMode.PERSPECTIVE),
-    ("Camera lock (região)", StabilizationMode.CAMERA_LOCK),
-    ("Híbrido: camera lock + fallback", StabilizationMode.HYBRID),
+    ("Desligada", StabilizationMode.OFF),
+    ("Suavizar tremor (só deslocamento)", StabilizationMode.AUTO),
+    ("Suavizar tremor + rotação e zoom", StabilizationMode.SIMILARITY),
+    ("Suavizar tremor + perspectiva", StabilizationMode.PERSPECTIVE),
+    ("Travar uma região (camera lock)", StabilizationMode.CAMERA_LOCK),
+    ("Travar uma região, suavizar se perder", StabilizationMode.HYBRID),
 ]
 MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
     StabilizationMode.OFF: "Nenhuma compensação de movimento.",

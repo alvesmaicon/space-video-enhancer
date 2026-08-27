@@ -1,11 +1,11 @@
-"""Tab "Cor": tonal sliders, sharpening and the slider presets."""
+"""Tab "Ajustes": tonal sliders, sharpening and the look presets (which never touch denoise or scale)."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox
 
-from space_video_enhancer.settings import DEFAULT_FILTER_SETTINGS, FILTER_PRESETS, FilterSettings
+from space_video_enhancer.settings import DEFAULT_FILTER_SETTINGS, FILTER_PRESETS, FilterSettings, same_look
 from space_video_enhancer.ui.format import format_signed
 from space_video_enhancer.ui.tabs.base import TabPage, form_rows, group_box
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
@@ -24,6 +24,9 @@ class ColorTab(TabPage):
         self.preset_combo = QComboBox()
         for label, preset in FILTER_PRESETS:
             self.preset_combo.addItem(label, preset)
+        self.preset_combo.setToolTip(
+            "Pontos de partida para os sliders desta aba; ruído e escala de saída não mudam ao escolher um."
+        )
         self.contrast_slider = LabeledSlider("Contraste", 0, 100, defaults.contrast, display=format_signed)
         self.brightness_slider = LabeledSlider("Brilho", 0, 100, defaults.brightness, display=format_signed)
         self.gamma_slider = LabeledSlider("Gama", 0, 100, defaults.gamma, display=format_signed)
@@ -45,7 +48,7 @@ class ColorTab(TabPage):
 
         self.add_sections(
             group_box(
-                "Cor e look",
+                "Tom e cor",
                 form_rows(("Preset", self.preset_combo)),
                 self.contrast_slider,
                 self.brightness_slider,
@@ -64,10 +67,11 @@ class ColorTab(TabPage):
             slider.blockSignals(False)
 
     def select_matching_preset(self, settings: FilterSettings) -> None:
-        """Show the preset equal to ``settings``, or "Personalizado" when none matches (no signal)."""
+        """Show the preset whose look ``settings`` has, or "Personalizado" when none matches (no signal)."""
         matching_index = 0
         for index in range(1, self.preset_combo.count()):
-            if self.preset_combo.itemData(index) == settings:
+            preset = self.preset_combo.itemData(index)
+            if isinstance(preset, FilterSettings) and same_look(settings, preset):
                 matching_index = index
                 break
         if self.preset_combo.currentIndex() != matching_index:

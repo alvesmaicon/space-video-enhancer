@@ -43,13 +43,13 @@ def test_x_marks_the_start_and_end_of_a_cut(app: QApplication, window: MainWindo
     window.transport.set_value(3)
     wait_for_preview(app, window)
     QTest.keyClick(window.preview, Qt.Key.Key_X)
-    assert window._pending_cut_start == 3 and "Terminar" in window.export_tab.cut_toggle_button.text()
+    assert window._pending_cut_start == 3 and window.transport.pending_cut(), "the tool stays pressed meanwhile"
     window.transport.set_value(6)
     wait_for_preview(app, window)
     QTest.keyClick(window.preview, Qt.Key.Key_X)
     assert window.cuts == [(3, 6)] and window._pending_cut_start is None
-    assert window.export_tab.cut_list.count() == 1 and "4 frames" in window.export_tab.cut_list.item(0).text()
-    assert "1 trecho(s) removido(s)" in window.export_tab.range_label.text()
+    assert not window.transport.pending_cut()
+    assert "1 trecho(s) removido(s)" in window.export_tab.summary_label.text()
     assert window.transport.timeline.cuts() == ((3, 6),)
     # Marking backwards and overlapping merges into one range.
     window.transport.set_value(8)
@@ -59,19 +59,6 @@ def test_x_marks_the_start_and_end_of_a_cut(app: QApplication, window: MainWindo
     wait_for_preview(app, window)
     window._toggle_cut_mark()
     assert window.cuts == [(3, 8)]
-
-
-def test_typed_cuts_use_timecodes_and_exclude_the_end_time(
-    app: QApplication, window: MainWindow, ui_video: Path
-) -> None:
-    _open(app, window, ui_video)
-    assert UI_VIDEO_FPS == 24.0
-    window._add_cut_from_text("0:00.02", "0:00.05")  # frames 2..4: "até 0:00.05" stops right before frame 5
-    assert window.cuts == [(2, 4)]
-    window._add_cut_from_text("bogus", "0:00.05")
-    assert window.cuts == [(2, 4)] and "inválidos" in window.status.message()
-    window._remove_cut(0)
-    assert window.cuts == []
 
 
 def test_playback_jumps_over_the_cuts(app: QApplication, window: MainWindow, ui_video: Path) -> None:
@@ -99,9 +86,9 @@ def test_reset_range_clears_the_cuts_and_export_uses_them(
     _open(app, window, ui_video)
     window._add_cut(2, 3)
     window._add_cut(8, 9)
-    assert "exporta 8 frames" in window.export_tab.range_label.text()
+    assert "Saída: 8 frames" in window.export_tab.summary_label.text()
     window._reset_clip_range()
-    assert window.cuts == [] and window.export_tab.cut_list.count() == 0
+    assert window.cuts == [] and window.transport.timeline.cuts() == ()
 
 
 def _timeline_drag(window: MainWindow, x0: float, x1: float) -> None:
@@ -119,42 +106,34 @@ def _timeline_drag(window: MainWindow, x0: float, x1: float) -> None:
         QApplication.sendEvent(timeline, event)
 
 
-def test_dragging_on_the_timeline_edits_the_cuts_and_the_export_list(
-    app: QApplication, window: MainWindow, ui_video: Path
-) -> None:
+def test_dragging_on_the_timeline_edits_the_cuts(app: QApplication, window: MainWindow, ui_video: Path) -> None:
     _open(app, window, ui_video)
     window._add_cut(3, 6)
     timeline = window.transport.timeline
     scale = timeline.scale
     _timeline_drag(window, scale.x_of(7), scale.x_of(9))  # right edge -> cut ends before frame 9
     assert window.cuts == [(3, 8)]
-    assert "6 frames" in window.export_tab.cut_list.item(0).text()
     assert timeline.cuts() == ((3, 8),), "the normalized model came back to the timeline"
     _timeline_drag(window, scale.x_of(5), scale.x_of(6))  # body -> shifted one frame later
     assert window.cuts == [(4, 9)]
-    assert timeline.selected_cut() == 0 and window.export_tab.selected_cut() == 0
+    assert timeline.selected_cut() == 0
     # Dragging one cut over another merges them in the model.
     window._add_cut(0, 1)
     _timeline_drag(window, scale.x_of(2), scale.x_of(4))  # right edge of (0,1) reaches the other cut
     assert window.cuts == [(0, 9)]
 
 
-def test_selection_is_shared_between_list_and_timeline_and_delete_removes(
-    app: QApplication, window: MainWindow, ui_video: Path
-) -> None:
+def test_delete_removes_the_cut_selected_on_the_timeline(app: QApplication, window: MainWindow, ui_video: Path) -> None:
     _open(app, window, ui_video)
     window._add_cut(2, 3)
     window._add_cut(8, 9)
-    window.export_tab.cut_list.setCurrentRow(1)
-    assert window.transport.timeline.selected_cut() == 1
     window.transport.timeline.select_cut(0)
-    assert window.export_tab.selected_cut() == 0
     QTest.keyClick(window.preview, Qt.Key.Key_Delete)
-    assert window.cuts == [(8, 9)] and window.export_tab.cut_list.count() == 1
+    assert window.cuts == [(8, 9)] and window.transport.timeline.cuts() == ((8, 9),)
     window.transport.timeline.select_cut(-1)
-    QTest.keyClick(window.preview, Qt.Key.Key_Backspace)  # nothing selected anywhere: no-op
+    QTest.keyClick(window.preview, Qt.Key.Key_Backspace)  # nothing selected: no-op
     assert window.cuts == [(8, 9)]
-    window.export_tab.cut_list.setCurrentRow(0)
+    window.transport.timeline.select_cut(0)
     window._remove_selected_cut()
     assert window.cuts == []
 
@@ -178,4 +157,4 @@ def test_dragging_the_clip_markers_updates_the_clip_range(
             ),
         )
     assert (window.clip_start_frame, window.clip_end_frame) == (0, 8)
-    assert "frames 1\u20139" in window.export_tab.range_label.text()
+    assert "frames 1\u20139" in window.export_tab.summary_label.text()

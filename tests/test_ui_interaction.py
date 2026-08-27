@@ -87,7 +87,7 @@ def test_space_clicks_a_focused_button_but_plays_from_the_preview(
 ) -> None:
     open_video(app, window, ui_video)
     clicks: list[bool] = []
-    button = window.export_tab.mark_end_button
+    button = window.grade_tab.region_reset_button
     button.clicked.connect(lambda: clicks.append(True))
     button.setFocus()
     pump(app)
@@ -115,7 +115,7 @@ def test_clip_markers_from_the_keyboard(app: QApplication, window: MainWindow, u
     wait_for_preview(app, window)
     QTest.keyClick(window.preview, Qt.Key.Key_O)
     assert window._selected_frame_range() == (3, 8)
-    assert "00:00.03 → 00:00.09" in window.export_tab.range_label.text()
+    assert "00:00.03 → 00:00.09" in window.export_tab.summary_label.text()
 
 
 # --- overlays follow the active tab ------------------------------------------------------------

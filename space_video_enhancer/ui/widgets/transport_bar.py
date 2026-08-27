@@ -1,7 +1,10 @@
-"""Timecode, the zoomable timeline with clip markers and cuts, and the transport buttons, below the preview.
+"""Timecode, the zoomable timeline with clip markers and cuts, the timeline tools and the transport buttons.
 
-The two labels above the timeline have fixed widths sized for the widest text they can show
-for the open video, so changing digits never moves anything.
+Below the timeline, from left to right: the tools that act on the playhead and the clip under it
+(mark in/out, remove a range, split, delete, move back/forward), the transport buttons centred
+under the timeline, and the playback speed and sound controls. The two labels above the
+timeline have fixed widths sized for the widest text they can show for the open video, so
+changing digits never moves anything.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.ui.format import format_timecode
@@ -22,12 +25,20 @@ from space_video_enhancer.ui.widgets.timeline import ClipBlock, TimelineWidget
 
 PRIMARY_COLOR = QColor("#0f766e")
 ON_PRIMARY_COLOR = QColor("#ffffff")
+TOOL_COLOR = QColor("#374151")
 BUTTON_SIZE = QSize(42, 38)
 PLAY_BUTTON_SIZE = QSize(54, 40)
+TOOL_BUTTON_SIZE = QSize(34, 30)
 ICON_SIZE = QSize(18, 18)
 PLAY_ICON_SIZE = QSize(22, 22)
+TOOL_ICON_SIZE = QSize(17, 17)
 LABEL_SLACK_PX = 4
 SECONDS_PER_HOUR = 3600
+PLAYBACK_SPEED_OPTIONS: list[tuple[str, float]] = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25)]
+"""Playhead speed relative to real time; the sound is stretched to match (pitch kept)."""
+REMOVE_RANGE_TOOLTIP = "Marcar o início de um trecho a remover no frame atual (X)"
+REMOVE_RANGE_PENDING_TOOLTIP = "Terminar aqui o trecho a remover (X); o início já está marcado"
+SOUND_TOOLTIP = "Tocar o áudio dos clipes durante a reprodução do preview"
 
 
 def widest_digits_width(metrics: QFontMetrics, template: str) -> int:
@@ -57,9 +68,17 @@ class TransportBar(QWidget):
     cutSelected = Signal(int)
     cutRemoveRequested = Signal(int)
     cutToggleRequested = Signal()
+    """The remove-range tool or the timeline menu: start a removed range here, or finish the pending one."""
+    markInRequested = Signal()
+    markOutRequested = Signal()
+    """The bracket tools: the export range starts / ends at the current frame."""
     clipSplitRequested = Signal()
     clipRemoveRequested = Signal(int)
+    clipDeleteRequested = Signal()
+    """The trash tool: remove the clip under the playhead."""
     clipMoveRequested = Signal(int, int)
+    clipMoveStepRequested = Signal(int)
+    """The arrow tools: move the clip under the playhead one position back (``-1``) or forward (``+1``)."""
     soundToggled = Signal(bool)
     """The speaker button: ``True`` = play sound with the preview."""
     thumbnailsRequested = Signal(object, int, float)
@@ -69,6 +88,8 @@ class TransportBar(QWidget):
         super().__init__()
         self._fps = 30.0
         self._frame_count = 0
+        self._clip_count = 0
+        self._active_clip = -1
         self.timecode_label = QLabel()
         self.timecode_label.setObjectName("timecodeLabel")
         self.timecode_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -86,14 +107,39 @@ class TransportBar(QWidget):
         self.zoom_in_button = QToolButton()
         self.zoom_in_button.setText("+")
         self.zoom_in_button.setToolTip("Aumentar zoom da linha do tempo (Ctrl+roda do mouse ou pinça)")
+        for zoom_button in (self.zoom_out_button, self.zoom_fit_button, self.zoom_in_button):
+            zoom_button.setObjectName("previewZoomButton")
+            zoom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        # --- timeline tools: act on the playhead and on the clip under it -------------------
+        self.mark_in_button = self._tool_button("mark_in", "Início do trecho exportado no frame atual (I)")
+        self.mark_out_button = self._tool_button("mark_out", "Fim do trecho exportado no frame atual (O)")
+        self.remove_range_button = self._tool_button("remove_range", REMOVE_RANGE_TOOLTIP)
+        self.remove_range_button.setCheckable(True)
+        self.split_button = self._tool_button(
+            "split", "Dividir o clipe no frame atual: cada parte passa a ter ajustes próprios (Ctrl+K)"
+        )
+        self.delete_clip_button = self._tool_button("trash", "Remover o clipe sob o playhead da sequência")
+        self.move_left_button = self._tool_button("move_left", "Mover o clipe sob o playhead uma posição para trás")
+        self.move_right_button = self._tool_button(
+            "move_right", "Mover o clipe sob o playhead uma posição para a frente"
+        )
+
+        # --- playback: speed and sound ---------------------------------------------------------
+        self.speed_combo = QComboBox()
+        for label, speed in PLAYBACK_SPEED_OPTIONS:
+            self.speed_combo.addItem(label, speed)
+        self.speed_combo.setToolTip(
+            "Velocidade da reprodução do preview; o som acompanha (a câmera lenta mantém o tom)"
+        )
+        self.speed_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.sound_button = QToolButton()
         self.sound_button.setText("Som")
         self.sound_button.setCheckable(True)
         self.sound_button.setChecked(True)
-        self.sound_button.setToolTip("Tocar o áudio dos clipes durante a reprodução do preview")
-        for zoom_button in (self.zoom_out_button, self.zoom_fit_button, self.zoom_in_button, self.sound_button):
-            zoom_button.setObjectName("previewZoomButton")
-            zoom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.sound_button.setToolTip(SOUND_TOOLTIP)
+        self.sound_button.setObjectName("previewZoomButton")
+        self.sound_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.sound_button.toggled.connect(self.soundToggled.emit)
 
         self._play_icon = glyph_icon("play", ON_PRIMARY_COLOR)
@@ -134,6 +180,13 @@ class TransportBar(QWidget):
         self.zoom_out_button.clicked.connect(self.timeline.zoom_out)
         self.zoom_fit_button.clicked.connect(self.timeline.zoom_to_fit)
         self.zoom_in_button.clicked.connect(self.timeline.zoom_in)
+        self.mark_in_button.clicked.connect(self.markInRequested.emit)
+        self.mark_out_button.clicked.connect(self.markOutRequested.emit)
+        self.remove_range_button.clicked.connect(self.cutToggleRequested.emit)
+        self.split_button.clicked.connect(self.clipSplitRequested.emit)
+        self.delete_clip_button.clicked.connect(self.clipDeleteRequested.emit)
+        self.move_left_button.clicked.connect(lambda: self.clipMoveStepRequested.emit(-1))
+        self.move_right_button.clicked.connect(lambda: self.clipMoveStepRequested.emit(1))
         self.go_first_button.clicked.connect(self.firstRequested.emit)
         self.prev_frame_button.clicked.connect(self.previousRequested.emit)
         self.play_button.clicked.connect(self.playToggled.emit)
@@ -147,12 +200,34 @@ class TransportBar(QWidget):
         header_row.addWidget(self.zoom_out_button)
         header_row.addWidget(self.zoom_fit_button)
         header_row.addWidget(self.zoom_in_button)
-        header_row.addSpacing(12)
-        header_row.addWidget(self.sound_button)
         header_row.addStretch(1)
         header_row.addWidget(self.frame_label)
+
+        self.tools = QWidget()
+        self.tools.setObjectName("timelineTools")
+        tools_row = QHBoxLayout(self.tools)
+        tools_row.setContentsMargins(0, 0, 0, 0)
+        tools_row.setSpacing(4)
+        for tool in (self.mark_in_button, self.mark_out_button, self.remove_range_button):
+            tools_row.addWidget(tool)
+        tools_row.addSpacing(8)
+        for tool in (self.split_button, self.delete_clip_button, self.move_left_button, self.move_right_button):
+            tools_row.addWidget(tool)
+        self.playback_controls = QWidget()
+        playback_row = QHBoxLayout(self.playback_controls)
+        playback_row.setContentsMargins(0, 0, 0, 0)
+        playback_row.setSpacing(8)
+        playback_row.addWidget(self.speed_combo)
+        playback_row.addWidget(self.sound_button)
+        # Equal side widths keep the transport buttons centred under the timeline.
+        side_width = max(self.tools.sizeHint().width(), self.playback_controls.sizeHint().width())
+        self.tools.setMinimumWidth(side_width)
+        self.playback_controls.setMinimumWidth(side_width)
+        playback_row.insertStretch(0, 1)
+
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
+        button_row.addWidget(self.tools)
         button_row.addStretch(1)
         for transport_button in (
             self.go_first_button,
@@ -163,6 +238,7 @@ class TransportBar(QWidget):
         ):
             button_row.addWidget(transport_button)
         button_row.addStretch(1)
+        button_row.addWidget(self.playback_controls)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -172,7 +248,19 @@ class TransportBar(QWidget):
         layout.addLayout(button_row)
         self._fit_labels()
         self._update_zoom_buttons()
+        self._update_tool_buttons()
         self.set_position(0)
+
+    @staticmethod
+    def _tool_button(kind: str, tooltip: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("timelineToolButton")
+        button.setFixedSize(TOOL_BUTTON_SIZE)
+        button.setIconSize(TOOL_ICON_SIZE)
+        button.setIcon(glyph_icon(kind, TOOL_COLOR))
+        button.setToolTip(tooltip)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        return button
 
     def value(self) -> int:
         return self.timeline.value()
@@ -186,6 +274,7 @@ class TransportBar(QWidget):
         self.timeline.set_media(self._frame_count, self._fps, aspect_ratio)
         self._fit_labels()
         self.set_position(self.timeline.value())
+        self._update_tool_buttons()
 
     def set_value(self, index: int) -> None:
         self.timeline.setValue(index)
@@ -232,6 +321,16 @@ class TransportBar(QWidget):
         self.zoom_out_button.setEnabled(loaded and not self.timeline.is_fit())
         self.zoom_fit_button.setEnabled(loaded and not self.timeline.is_fit())
 
+    def _update_tool_buttons(self) -> None:
+        """Markers and split need a video; delete and move need a clip under the playhead (and somewhere to go)."""
+        loaded = self._frame_count > 0
+        for tool in (self.mark_in_button, self.mark_out_button, self.remove_range_button, self.split_button):
+            tool.setEnabled(loaded)
+        active, count = self._active_clip, self._clip_count
+        self.delete_clip_button.setEnabled(loaded and count > 1 and 0 <= active < count)
+        self.move_left_button.setEnabled(loaded and 0 < active < count)
+        self.move_right_button.setEnabled(loaded and 0 <= active < count - 1)
+
     def set_sound_available(self, available: bool) -> None:
         """Without an output device the speaker button is off and disabled (the tooltip says why)."""
         self.sound_button.setEnabled(available)
@@ -239,7 +338,7 @@ class TransportBar(QWidget):
             self.sound_button.setChecked(False)
             self.sound_button.setToolTip("Sem dispositivo de áudio: a reprodução segue sem som")
         else:
-            self.sound_button.setToolTip("Tocar o áudio dos clipes durante a reprodução do preview")
+            self.sound_button.setToolTip(SOUND_TOOLTIP)
 
     def sound_enabled(self) -> bool:
         return self.sound_button.isChecked()
@@ -255,7 +354,14 @@ class TransportBar(QWidget):
         self.timeline.set_cuts(cuts)
 
     def set_pending_cut(self, frame: int | None) -> None:
+        """A removed range has its start marked: the timeline shows it and the tool stays pressed until the end."""
         self.timeline.set_pending_cut(frame)
+        pending = frame is not None
+        self.remove_range_button.setChecked(pending)
+        self.remove_range_button.setToolTip(REMOVE_RANGE_PENDING_TOOLTIP if pending else REMOVE_RANGE_TOOLTIP)
+
+    def pending_cut(self) -> bool:
+        return self.remove_range_button.isChecked()
 
     def select_cut(self, index: int) -> None:
         self.timeline.select_cut(index)
@@ -264,12 +370,16 @@ class TransportBar(QWidget):
         """The sequence layout; the labels follow the new total length."""
         self.timeline.set_clips(clips)
         self._frame_count = self.timeline.frame_count
+        self._clip_count = len(clips)
         self._fit_labels()
         self.set_position(self.timeline.value())
         self._update_zoom_buttons()
+        self._update_tool_buttons()
 
     def set_active_clip(self, index: int) -> None:
         self.timeline.set_active_clip(index)
+        self._active_clip = index
+        self._update_tool_buttons()
 
     def set_thumbnail(self, frame: int, image: QImage) -> None:
         self.timeline.set_thumbnail(frame, image)

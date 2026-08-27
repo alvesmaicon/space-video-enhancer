@@ -27,6 +27,7 @@ from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QImage,
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -80,7 +81,7 @@ from space_video_enhancer.ui.audio_preview import (
     PreviewAudioPlayer,
 )
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
-from space_video_enhancer.ui.format import format_duration, format_timecode, parse_timecode
+from space_video_enhancer.ui.format import format_duration, format_timecode
 from space_video_enhancer.ui.history import EditHistory
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo, select_combo_data
@@ -104,8 +105,6 @@ LOG = get_logger("ui")
 DEFAULT_WINDOW_SIZE = QSize(1280, 800)
 PLAYBACK_TICK_MAX_HZ = 30.0
 """Playback consults the clock at most this often; the frame shown is whatever the elapsed time calls for."""
-PLAYBACK_SPEED_OPTIONS: list[tuple[str, float]] = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25)]
-"""Playhead speed relative to real time; the sound is stretched to match (pitch kept)."""
 THUMBNAIL_REFRESH_DELAY_MS = 140
 PREVIEW_SIZE_LIMIT = {PreviewRenderMode.FAST: 960, PreviewRenderMode.BALANCED: 1280}
 INTERACTIVE_DENOISE_SIZE_LIMIT = 640
@@ -154,6 +153,11 @@ SETTINGS_SECTION_NAMES = {
     "exposure": "exposição",
 }
 """Undo labels for a change confined to one section of ``RenderSettings`` (keys of ``diff_settings``)."""
+
+
+def seconds_text(seconds: float) -> str:
+    """Short durations with two decimals ("0.50 s"), longer ones as m:ss."""
+    return f"{seconds:.2f} s" if seconds < 60 else format_duration(seconds)
 
 
 def settings_edit_label(changes: dict[str, Any]) -> str:
@@ -301,7 +305,7 @@ class MainWindow(QMainWindow):
         self.noise_tab = NoiseTab()
         self.export_tab = ExportTab()
         self._tabs: tuple[tuple[str, TabPage], ...] = (
-            ("Cor", self.color_tab),
+            ("Ajustes", self.color_tab),
             ("HSL", self.grade_tab),
             ("Filtros", self.filters_tab),
             ("Estabilizar", self.stabilization_tab),
@@ -323,14 +327,10 @@ class MainWindow(QMainWindow):
         self.preview_zoom_in_button.setToolTip("Aumentar zoom do preview")
         for button in (self.preview_zoom_out_button, self.preview_zoom_in_button):
             button.setObjectName("previewZoomButton")
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.preview_render_mode_combo = enum_combo(PREVIEW_RENDER_MODE_OPTIONS)
         self.preview_render_mode_combo.setToolTip("Troca qualidade por velocidade apenas no preview")
-        self.preview_speed_combo = QComboBox()
-        for label, speed in PLAYBACK_SPEED_OPTIONS:
-            self.preview_speed_combo.addItem(label, speed)
-        self.preview_speed_combo.setToolTip(
-            "Velocidade da reprodução do preview; o som acompanha (a câmera lenta mantém o tom)"
-        )
+        self.preview_speed_combo = self.transport.speed_combo  # lives next to the play buttons
 
     def _create_actions(self) -> None:
         style = self.style()
@@ -363,6 +363,8 @@ class MainWindow(QMainWindow):
             if QKeySequence(extra) not in redo_keys:
                 redo_keys.append(QKeySequence(extra))
         self.redo_action.setShortcuts(redo_keys)
+        self.undo_action.setIconText("Desfazer")  # the toolbar keeps a fixed label; the menu says what is undone
+        self.redo_action.setIconText("Refazer")
         self.undo_action.setEnabled(False)
         self.redo_action.setEnabled(False)
         self.restore_preset_action = self._make_action(
@@ -380,6 +382,7 @@ class MainWindow(QMainWindow):
         self.cut_toggle_action = self._make_action("Iniciar/terminar corte aqui", self._toggle_cut_mark, "X")
         self.remove_cut_action = self._make_action("Remover corte selecionado", self._remove_selected_cut, "Del")
         self.remove_cut_action.setShortcuts([QKeySequence("Del"), QKeySequence("Backspace")])
+        self.clear_cuts_action = self._make_action("Limpar trechos removidos", self._clear_cuts)
         # Bare keys must not steal arrows from sliders or Space from buttons: as QAction shortcuts they
         # only fire while the preview has focus; everywhere else keyPressEvent handles what widgets left.
         for action in self._transport_actions():
@@ -430,6 +433,7 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
+        left_layout.addWidget(self._build_preview_bar())
         left_layout.addWidget(self.preview_scroll, 1)
         left_layout.addWidget(self.transport)
 
@@ -460,6 +464,34 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(load_stylesheet())
         self._fit_settings_panel()
 
+    def _build_preview_bar(self) -> QWidget:
+        """Zoom, render quality and the diagnostic overlays: what changes only how the preview is shown."""
+        bar = QWidget()
+        bar.setObjectName("previewBar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(QLabel("Zoom"))
+        row.addWidget(self.preview_zoom_out_button)
+        row.addWidget(self.preview_zoom_combo)
+        row.addWidget(self.preview_zoom_in_button)
+        row.addSpacing(12)
+        row.addWidget(QLabel("Qualidade"))
+        row.addWidget(self.preview_render_mode_combo)
+        row.addStretch(1)
+        self.hud_button = QToolButton()
+        self.hud_button.setDefaultAction(self.hud_action)
+        self.vectors_button = QToolButton()
+        self.vectors_button.setDefaultAction(self.vectors_action)
+        self.vectors_button.setText("Vetores")
+        for button in (self.hud_button, self.vectors_button):
+            button.setObjectName("previewToggle")
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            row.addWidget(button)
+        self.preview_bar = bar
+        return bar
+
     def _fit_settings_panel(self) -> None:
         """Never clip the tabs: the panel's minimum width is what its tab bar and widest content need."""
         for child in self.settings_tabs.findChildren(QWidget):
@@ -482,25 +514,15 @@ class MainWindow(QMainWindow):
         toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
         toolbar.addAction(self.open_action)
         toolbar.addAction(self.add_video_action)
-        toolbar.addAction(self.export_action)
-        for action in (self.open_action, self.export_action):
-            widget = toolbar.widgetForAction(action)
-            if widget is not None:
-                widget.setObjectName("toolbarPrimary")
+        open_button = toolbar.widgetForAction(self.open_action)
+        if open_button is not None:
+            open_button.setObjectName("toolbarPrimary")
         toolbar.addSeparator()
-        toolbar.addWidget(QLabel("Zoom"))
-        toolbar.addWidget(self.preview_zoom_out_button)
-        toolbar.addWidget(self.preview_zoom_combo)
-        toolbar.addWidget(self.preview_zoom_in_button)
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("Qualidade"))
-        toolbar.addWidget(self.preview_render_mode_combo)
-        toolbar.addWidget(QLabel("Velocidade"))
-        toolbar.addWidget(self.preview_speed_combo)
+        toolbar.addAction(self.undo_action)
+        toolbar.addAction(self.redo_action)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
-        toolbar.addAction(self.hud_action)
         self.toolbar = toolbar
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
@@ -537,6 +559,7 @@ class MainWindow(QMainWindow):
         playback_menu.addAction(self.mark_end_action)
         playback_menu.addAction(self.cut_toggle_action)
         playback_menu.addAction(self.remove_cut_action)
+        playback_menu.addAction(self.clear_cuts_action)
 
         view_menu = menu_bar.addMenu("Exibir")
         view_menu.addAction(self.zoom_fit_action)
@@ -576,19 +599,18 @@ class MainWindow(QMainWindow):
         self.transport.lastRequested.connect(self._go_to_last_frame)
         self.transport.cutsEdited.connect(self._set_cuts_from_timeline)
         self.transport.clipRangeEdited.connect(self._set_clip_range_from_timeline)
-        self.transport.cutSelected.connect(self.export_tab.select_cut)
         self.transport.cutRemoveRequested.connect(self._remove_cut)
         self.transport.cutToggleRequested.connect(self._toggle_cut_mark)
-        self.export_tab.cutSelectionChanged.connect(self.transport.select_cut)
+        self.transport.markInRequested.connect(self._mark_clip_start)
+        self.transport.markOutRequested.connect(self._mark_clip_end)
         self.transport.thumbnailsRequested.connect(self._request_filmstrip)
         self.transport.clipSplitRequested.connect(self._split_clip_at_playhead)
         self.transport.clipRemoveRequested.connect(self._remove_clip)
+        self.transport.clipDeleteRequested.connect(self._remove_active_clip)
         self.transport.clipMoveRequested.connect(self._move_clip)
-        self.export_tab.clipAddRequested.connect(self._select_video_to_add)
-        self.export_tab.clipRemoveRequested.connect(self._remove_clip)
-        self.export_tab.clipMoveRequested.connect(self._move_clip)
-        self.export_tab.clipSplitRequested.connect(self._split_clip_at_playhead)
-        self.export_tab.clipActivated.connect(self._go_to_clip)
+        self.transport.clipMoveStepRequested.connect(self._move_active_clip)
+        self.export_tab.exportRequested.connect(self._export_video)
+        self.export_action.changed.connect(self._sync_export_button)
 
         self.color_tab.presetChanged.connect(self._handle_preset_changed)
         self.color_tab.valueChanged.connect(self._handle_filter_control_change)
@@ -614,14 +636,10 @@ class MainWindow(QMainWindow):
         self.noise_tab.resetRequested.connect(self._reset_slider_to_preset)
         self.noise_tab.sampleResetRequested.connect(self._reset_denoise_sample_rect)
         self.export_tab.scaleChanged.connect(self._handle_filter_control_change)
-        self.export_tab.markStartRequested.connect(self._mark_clip_start)
-        self.export_tab.markEndRequested.connect(self._mark_clip_end)
-        self.export_tab.resetRangeRequested.connect(self._reset_clip_range)
-        self.export_tab.cutToggleRequested.connect(self._toggle_cut_mark)
-        self.export_tab.cutAddRequested.connect(self._add_cut_from_text)
-        self.export_tab.cutRemoveRequested.connect(self._remove_cut)
-        self.export_tab.cutsClearRequested.connect(self._clear_cuts)
-        self.export_tab.cutActivated.connect(self._go_to_cut)
+
+    def _sync_export_button(self) -> None:
+        """The button in the export tab mirrors the export action: on with a sequence, off while exporting."""
+        self.export_tab.export_button.setEnabled(self.export_action.isEnabled())
 
     def _filter_sliders(self) -> dict[str, Any]:
         return {**self.color_tab.sliders, **self.noise_tab.sliders}
@@ -634,6 +652,7 @@ class MainWindow(QMainWindow):
         self.split_clip_action.setEnabled(enabled and not self.sequence.is_empty)
         self.remove_clip_action.setEnabled(enabled and len(self.sequence) > 1)
         self._update_history_actions()
+        self._sync_export_button()
         self.filters_tab.set_video_loaded(self.frame_count > 0)
         self._update_denoise_controls_state()
         self._update_stabilization_controls_state()
@@ -933,11 +952,11 @@ class MainWindow(QMainWindow):
         self.transport.set_value_silently(self.current_frame_index)
         self._load_frame(self.current_frame_index)
 
-    def _go_to_clip(self, index: int) -> None:
-        """The clip picked in the export tab's list: put the playhead on it (that makes it the active clip)."""
-        if 0 <= index < len(self.sequence.clips) and self.sequence.clip_at(self.current_frame_index) != index:
-            self._stop_playback()
-            self.transport.set_value(self.sequence.clip_span(index).start)
+    def _move_active_clip(self, step: int) -> None:
+        """The arrow tools under the timeline: the clip under the playhead moves one position back or forward."""
+        index = self.active_clip_index
+        if 0 <= index < len(self.sequence.clips) and 0 <= index + step < len(self.sequence.clips):
+            self._move_clip(index, index + step)
 
     def _sequence_changed(self) -> None:
         """The clips changed (added, removed, moved, split): push the layout everywhere it is shown."""
@@ -954,9 +973,8 @@ class MainWindow(QMainWindow):
         self._pcm_requested = {key for key in self._pcm_requested if key[0] in self.sequence.source_paths}
         self._load_preview_audio()
         self._sync_active_clip(force=True)
-        self.export_tab.set_clips(self._clip_items(), self.active_clip_index)
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
         self._update_sequence_info()
         self.export_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
         self.remove_clip_action.setEnabled(len(self.sequence) > 1 and self._export_controller is None)
@@ -968,18 +986,6 @@ class MainWindow(QMainWindow):
             ClipBlock(offset, clip.timeline_count, clip.name, clip.source.path, clip.range.start)
             for offset, clip in zip(offsets, self.sequence.clips)
         ]
-
-    def _clip_items(self) -> list[str]:
-        items = []
-        for number, (offset, clip) in enumerate(zip(self.sequence.clip_offsets(), self.sequence.clips), start=1):
-            text = (
-                f"{number}. {clip.name} · {format_timecode(offset, self.fps)} → "
-                f"{format_timecode(offset + clip.timeline_count, self.fps)} ({clip.timeline_count} frames)"
-            )
-            if clip.range != clip.source.full_range:
-                text += f" · frames {clip.range.start + 1}–{clip.range.end + 1} do arquivo"
-            items.append(text)
-        return items
 
     def _update_sequence_info(self) -> None:
         clip = self.active_clip
@@ -1036,7 +1042,6 @@ class MainWindow(QMainWindow):
         self._load_clip_into_controls(self.sequence.clips[index])
         self._stabilization_epoch += 1  # inter-frame memory must not cross into another clip
         self.transport.set_active_clip(index)
-        self.export_tab.select_clip(index)
         self._update_sequence_info()
         log_event(LOG, "ui.clip_active", clip=index, name=self.sequence.clips[index].name)
 
@@ -1385,7 +1390,7 @@ class MainWindow(QMainWindow):
         log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="start")
         self._commit_edit("marcar início")
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
 
     def _mark_clip_end(self) -> None:
         if self.frame_count <= 0:
@@ -1395,7 +1400,7 @@ class MainWindow(QMainWindow):
         log_event(LOG, "ui.clip_range", start=self.clip_start_frame, end=self.clip_end_frame, edge="end")
         self._commit_edit("marcar fim")
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
 
     def _reset_clip_range(self) -> None:
         if self.frame_count <= 0:
@@ -1405,7 +1410,7 @@ class MainWindow(QMainWindow):
         self._set_timeline_cuts([], label="redefinir corte temporal")
         self._pending_cut_start = None
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
 
     # --- cuts inside the clip -----------------------------------------------------------------
     def _set_timeline_cuts(self, cuts: Sequence[tuple[int, int]], *, label: str, key: Hashable | None = None) -> None:
@@ -1421,37 +1426,23 @@ class MainWindow(QMainWindow):
             self._pending_cut_start = self.current_frame_index
             self.status.show_message(
                 f"Início do corte em {format_timecode(self.current_frame_index, self.fps)} — "
-                "vá até o fim do trecho e pressione X de novo."
+                "vá até o fim do trecho e pressione X (ou o mesmo botão) de novo."
             )
         else:
             start, self._pending_cut_start = self._pending_cut_start, None
             self._add_cut(start, self.current_frame_index)
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
 
     def _add_cut(self, start: int, end: int) -> None:
         self._set_timeline_cuts([*self.cuts, (start, end)], label="adicionar corte")
         log_event(LOG, "ui.cuts", action="add", start=min(start, end), end=max(start, end), cuts=self.cuts)
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
         self.status.show_message(
             f"Trecho {format_timecode(min(start, end), self.fps)} → {format_timecode(max(start, end) + 1, self.fps)} "
             "removido da exportação."
         )
-
-    def _add_cut_from_text(self, start_text: str, end_text: str) -> None:
-        if self.frame_count <= 0:
-            return
-        start = parse_timecode(start_text, self.fps)
-        end = parse_timecode(end_text, self.fps)
-        if start is None or end is None:
-            self.status.show_message("Tempos inválidos: use mm:ss, h:mm:ss ou mm:ss.ff (ff = frames).")
-            return
-        if start == end:
-            self.status.show_message("O fim do corte precisa ser diferente do início.")
-            return
-        self._add_cut(start, max(start, end) - 1 if end > start else end)  # "até 2:15" excludes 2:15 itself
-        self.export_tab.clear_typed_cut()
 
     def _remove_cut(self, index: int) -> None:
         cuts = self.cuts
@@ -1460,13 +1451,11 @@ class MainWindow(QMainWindow):
             self._set_timeline_cuts(cuts, label="remover corte")
             log_event(LOG, "ui.cuts", action="remove", start=removed[0], end=removed[1], cuts=self.cuts)
             self._update_timeline_markers()
-            self._update_range_label()
+            self._update_export_summary()
 
     def _remove_selected_cut(self) -> None:
-        """Delete/Backspace: the cut selected on the timeline (or in the export list)."""
+        """Delete/Backspace: the cut selected on the timeline."""
         index = self.transport.timeline.selected_cut()
-        if index < 0:
-            index = self.export_tab.selected_cut()
         if index >= 0:
             self._remove_cut(index)
 
@@ -1499,7 +1488,7 @@ class MainWindow(QMainWindow):
             self._history.seal()
             log_event(LOG, "ui.cuts", action="drag", cuts=self.cuts)
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
 
     def _set_clip_range_from_timeline(self, start: int, end: int, finished: bool) -> None:
         if self.frame_count <= 0:
@@ -1510,7 +1499,7 @@ class MainWindow(QMainWindow):
             self._history.seal()
             log_event(LOG, "ui.clip_range", start=start, end=end, edge="drag")
         self._update_timeline_markers()
-        self._update_range_label()
+        self._update_export_summary()
 
     def _clear_cuts(self) -> None:
         if not self.cuts and self._pending_cut_start is None:
@@ -1519,19 +1508,7 @@ class MainWindow(QMainWindow):
         self._pending_cut_start = None
         log_event(LOG, "ui.cuts", action="clear", cuts=[])
         self._update_timeline_markers()
-        self._update_range_label()
-
-    def _go_to_cut(self, index: int) -> None:
-        if 0 <= index < len(self.cuts):
-            self._stop_playback()
-            self.transport.set_value(self.cuts[index][0])
-
-    def _cut_items(self) -> list[str]:
-        return [
-            f"{number}. {format_timecode(start, self.fps)} → {format_timecode(end + 1, self.fps)} "
-            f"({end - start + 1} frames)"
-            for number, (start, end) in enumerate(self.cuts, start=1)
-        ]
+        self._update_export_summary()
 
     def _selected_frame_range(self) -> tuple[int, int]:
         if self.frame_count <= 0:
@@ -1542,27 +1519,32 @@ class MainWindow(QMainWindow):
             start_frame, end_frame = end_frame, start_frame
         return (start_frame, end_frame)
 
-    def _update_range_label(self) -> None:
-        self.export_tab.set_cuts(self._cut_items())
-        self.export_tab.set_pending_cut(self._pending_cut_start is not None)
+    def _update_export_summary(self) -> None:
+        """What the export will contain — range, removed ranges, output — shown in the export tab."""
         if self.frame_count <= 0:
-            self.export_tab.set_range_text("Corte: vídeo inteiro")
+            self.export_tab.set_summary("Abra um vídeo para exportar.")
             return
         start_frame, end_frame = self._selected_frame_range()
         clip = FrameRange(start_frame, end_frame)
-        segments = kept_segments(clip, self.cuts)
-        exported = frame_count(segments)
-        text = (
-            f"Corte: {format_timecode(start_frame, self.fps)} → {format_timecode(end_frame + 1, self.fps)} "
-            f"(frames {start_frame + 1}–{end_frame + 1}, {clip.count / self.fps:.2f} s)"
-        )
+        exported = frame_count(kept_segments(clip, self.cuts))
+        first = self.sequence.clips[0]
+        width, height = first.settings.output_size(first.source.width, first.source.height)
+        lines = [
+            f"Trecho: {format_timecode(start_frame, self.fps)} → {format_timecode(end_frame + 1, self.fps)} "
+            f"(frames {start_frame + 1}–{end_frame + 1}, {seconds_text(clip.count / self.fps)})"
+        ]
         if self.cuts:
             removed = clip.count - exported
-            text += (
-                f" · {len(self.cuts)} trecho(s) removido(s), {format_duration(removed / self.fps)} · "
-                f"exporta {exported} frames ({format_duration(exported / self.fps)})"
-            )
-        self.export_tab.set_range_text(text)
+            lines.append(f"{len(self.cuts)} trecho(s) removido(s): {seconds_text(removed / self.fps)}")
+        output = [
+            f"{exported} frames ({seconds_text(exported / self.fps)})",
+            f"{width}x{height}",
+            f"{self.fps:.2f} fps",
+        ]
+        if len(self.sequence) > 1:
+            output.append(f"{len(self.sequence)} clipes")
+        lines.append("Saída: " + " · ".join(output))
+        self.export_tab.set_summary("\n".join(lines))
 
     def _update_timeline_markers(self) -> None:
         self.transport.set_cuts(self.cuts)
@@ -1673,6 +1655,7 @@ class MainWindow(QMainWindow):
         self._store_active_clip_settings()
         settings = self._current_render_settings()
         self._log_settings(settings)
+        self._update_export_summary()  # output size follows scale, rotation and crop
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
         self._sync_stabilization_preview()
@@ -1831,20 +1814,26 @@ class MainWindow(QMainWindow):
             return
         self.active_preset_settings = preset
         log_event(LOG, "ui.preset", preset=self.color_tab.preset_name(index))
-        self._apply_settings_to_controls(preset)
+        self._apply_look(preset)
         self._schedule_preview_refresh()
         if self.current_frame is not None:
-            self.status.show_message("Preset aplicado. Ajuste os sliders se quiser um refinamento manual.")
+            self.status.show_message("Preset aplicado a tom, cor e nitidez; ruído e escala de saída não mudam.")
+
+    def _apply_look(self, look: FilterSettings) -> None:
+        """A preset moves only the sliders of the "Ajustes" tab: denoise and output scale are not part of a look."""
+        self.color_tab.apply(look)
 
     def _reset_slider_to_preset(self, field_name: str) -> None:
-        self._filter_sliders()[field_name].setValue(int(getattr(self.active_preset_settings, field_name)))
+        """A slider's reset button: the active preset's value for look sliders, the default for denoise ones."""
+        source = self.active_preset_settings if field_name in self.color_tab.sliders else DEFAULT_FILTER_SETTINGS
+        self._filter_sliders()[field_name].setValue(int(getattr(source, field_name)))
 
     def _restore_active_preset_settings(self) -> None:
-        self._apply_settings_to_controls(self.active_preset_settings)
+        self._apply_look(self.active_preset_settings)
         self._sync_preset_selection()
         self._schedule_preview_refresh()
         if self.current_frame is not None:
-            self.status.show_message("Ajustes restaurados para o preset ativo.")
+            self.status.show_message("Tom, cor e nitidez restaurados para o preset ativo.")
 
     def _apply_settings_to_controls(self, settings: FilterSettings) -> None:
         self.color_tab.apply(settings)

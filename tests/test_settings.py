@@ -15,6 +15,8 @@ from space_video_enhancer.settings import (
     RotationMode,
     StabilizationMode,
     StabilizationSettings,
+    same_look,
+    with_look,
 )
 
 
@@ -70,14 +72,18 @@ def test_render_settings_is_frozen_and_hashable() -> None:
     assert hash(settings) == hash(RenderSettings())
 
 
-def test_filter_presets_match_by_equality() -> None:
+def test_filter_presets_are_looks_that_leave_denoise_and_scale_alone() -> None:
     labels = [label for label, preset in FILTER_PRESETS if preset is not None]
-    assert "Balanceado 1080p" in labels
-    balanced = dict(FILTER_PRESETS)["Balanceado 1080p"]
-    assert balanced is not None
-    assert balanced == dataclasses.replace(balanced)
-    assert balanced.denoise_mode is DenoiseMode.MANUAL
-    assert balanced != FilterSettings()
+    assert "Balanceado" in labels
+    balanced = dict(FILTER_PRESETS)["Balanceado"]
+    assert balanced is not None and balanced != FilterSettings()
+    assert balanced.denoise_mode is DenoiseMode.OFF and balanced.scale_factor == 1.0, "a look never sets those"
+    current = FilterSettings(denoise_mode=DenoiseMode.MANUAL, denoise_strength=40, scale_factor=2.0, contrast=70)
+    applied = with_look(current, balanced)
+    assert (applied.denoise_mode, applied.denoise_strength, applied.scale_factor) == (DenoiseMode.MANUAL, 40, 2.0)
+    assert (applied.contrast, applied.sharpen) == (balanced.contrast, balanced.sharpen)
+    assert same_look(applied, balanced) and not same_look(current, balanced)
+    assert same_look(FilterSettings(), FilterSettings(denoise_strength=99, scale_factor=0.5))
 
 
 def test_render_settings_output_size_follows_scale_rotation_and_crop() -> None:

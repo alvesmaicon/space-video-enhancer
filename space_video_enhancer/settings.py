@@ -8,7 +8,7 @@ in worker threads and easy to instrument.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 
@@ -150,70 +150,29 @@ class FilterSettings:
 
 DEFAULT_FILTER_SETTINGS = FilterSettings()
 
+LOOK_FIELDS = ("contrast", "brightness", "gamma", "saturation", "temperature", "sharpen")
+"""What a slider preset (a *look*) sets. Denoise and the output scale are not part of a look and stay as they are."""
+
+
+def same_look(settings: FilterSettings, other: FilterSettings) -> bool:
+    """True when the two settings agree on every look field (denoise and scale may differ)."""
+    return all(getattr(settings, name) == getattr(other, name) for name in LOOK_FIELDS)
+
+
+def with_look(settings: FilterSettings, look: FilterSettings) -> FilterSettings:
+    """``settings`` with the look fields taken from ``look``."""
+    return replace(settings, **{name: getattr(look, name) for name in LOOK_FIELDS})
+
+
 FILTER_PRESETS: tuple[tuple[str, FilterSettings | None], ...] = (
     ("Personalizado", None),
-    (
-        "Limpeza leve",
-        FilterSettings(
-            denoise_mode=DenoiseMode.MANUAL,
-            denoise_strength=12,
-            denoise_color_strength=10,
-            sharpen=12,
-            contrast=52,
-        ),
-    ),
-    (
-        "Limpeza clara",
-        FilterSettings(
-            denoise_mode=DenoiseMode.MANUAL,
-            denoise_strength=25,
-            denoise_color_strength=20,
-            sharpen=15,
-            gamma=35,
-            saturation=40,
-        ),
-    ),
-    (
-        "Balanceado 1080p",
-        FilterSettings(
-            denoise_mode=DenoiseMode.MANUAL,
-            denoise_strength=22,
-            denoise_color_strength=18,
-            sharpen=24,
-            contrast=54,
-            brightness=51,
-            saturation=52,
-            scale_factor=1.5,
-        ),
-    ),
-    (
-        "Recuperação forte",
-        FilterSettings(
-            denoise_mode=DenoiseMode.MANUAL,
-            denoise_strength=38,
-            denoise_color_strength=34,
-            denoise_search_window=27,
-            sharpen=32,
-            contrast=56,
-            brightness=52,
-            gamma=52,
-            saturation=54,
-            scale_factor=1.5,
-        ),
-    ),
-    (
-        "Mais detalhe 2x",
-        FilterSettings(
-            denoise_mode=DenoiseMode.MANUAL,
-            denoise_strength=24,
-            denoise_color_strength=18,
-            sharpen=38,
-            contrast=55,
-            saturation=55,
-            scale_factor=2.0,
-        ),
-    ),
+    ("Suave", FilterSettings(sharpen=12, contrast=52)),
+    ("Claro e suave", FilterSettings(sharpen=15, gamma=35, saturation=40)),
+    ("Balanceado", FilterSettings(sharpen=24, contrast=54, brightness=51, saturation=52)),
+    ("Recuperação forte", FilterSettings(sharpen=32, contrast=56, brightness=52, gamma=52, saturation=54)),
+    ("Mais detalhe", FilterSettings(sharpen=38, contrast=55, saturation=55)),
 )
+"""Slider presets: only look fields (see :data:`LOOK_FIELDS`); applying one leaves denoise and scale alone."""
 
 
 @dataclass(frozen=True)
