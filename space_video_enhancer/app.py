@@ -78,14 +78,23 @@ def configure_application(app: QApplication) -> None:
     app.setApplicationVersion(__version__)
     app.setDesktopFileName(DESKTOP_FILE_NAME)
     app.setWindowIcon(app_icon())
-    if sys.platform == "win32":
-        import ctypes  # noqa: PLC0415  (Windows only)
 
-        # Otherwise the taskbar groups the window under python.exe and shows its icon.
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_USER_MODEL_ID)
+
+def claim_windows_taskbar_identity() -> None:
+    """Windows: group the window under our own taskbar id, not python.exe's, so it gets our icon.
+
+    Must run before any window exists — the taskbar reads the id when the first window is created —
+    so ``main`` calls it before creating the ``QApplication``.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes  # noqa: PLC0415  (Windows only)
+
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_USER_MODEL_ID)
 
 
 def main() -> int:
+    claim_windows_taskbar_identity()
     session = setup_logging()
     install_crash_hooks()
     started = time.monotonic()
