@@ -41,10 +41,10 @@ from PySide6.QtWidgets import (
 )
 
 from space_video_enhancer.telemetry.log import get_logger, log_event
-from space_video_enhancer.ui.format import format_timecode
+from space_video_enhancer.ui.format import position_labels
 from space_video_enhancer.ui.icons import glyph_icon
 from space_video_enhancer.ui.theme import load_stylesheet
-from space_video_enhancer.ui.widgets.compare_preview import CAPTION_BACKGROUND, draw_pill
+from space_video_enhancer.ui.widgets.compare_preview import CAPTION_BACKGROUND, draw_pill, fit_rect
 from space_video_enhancer.ui.widgets.transport_bar import BUTTON_SIZE, ICON_SIZE, PLAY_BUTTON_SIZE, PLAY_ICON_SIZE
 
 LOG = get_logger("ui")
@@ -61,18 +61,6 @@ IDLE_HIDE_MS = 2500
 """In fullscreen, the controls and the cursor disappear this long after the mouse last moved."""
 VIEW_MODES: tuple[tuple[str, str], ...] = (("Depois", "after"), ("Antes", "before"), ("Antes | Depois", "split"))
 """Combo label -> what the view draws: the result, the source, or both split down the middle."""
-
-
-def fit_rect(image_size: QSize, bounds: QRectF) -> QRectF:
-    """``image_size`` scaled to fit ``bounds`` keeping its aspect ratio, centred."""
-    if image_size.width() <= 0 or image_size.height() <= 0 or bounds.width() <= 0 or bounds.height() <= 0:
-        return QRectF()
-    scale = min(bounds.width() / image_size.width(), bounds.height() / image_size.height())
-    width = image_size.width() * scale
-    height = image_size.height() * scale
-    left = bounds.left() + (bounds.width() - width) / 2.0
-    top = bounds.top() + (bounds.height() - height) / 2.0
-    return QRectF(left, top, width, height)
 
 
 def next_screen(screens: Sequence[QScreen], current: QScreen | None) -> QScreen | None:
@@ -336,11 +324,8 @@ class MonitorWindow(QWidget):
         self.scrubber.blockSignals(True)
         self.scrubber.setValue(frame_index)
         self.scrubber.blockSignals(False)
-        hours = self._frame_count / self._fps >= 3600
-        position = format_timecode(frame_index, self._fps, force_hours=hours)
-        duration = format_timecode(self._frame_count, self._fps, force_hours=hours)
-        shown = frame_index + 1 if self._frame_count else 0
-        self.timecode_label.setText(f"{position} / {duration}   ·   frame {shown} / {self._frame_count}")
+        timecode, frame = position_labels(frame_index, self._frame_count, self._fps)
+        self.timecode_label.setText(f"{timecode}   ·   {frame}")
 
     def set_playing(self, playing: bool) -> None:
         self.play_button.setIcon(self._pause_icon if playing else self._play_icon)

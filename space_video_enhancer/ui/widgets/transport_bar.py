@@ -20,7 +20,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from space_video_enhancer.audio import AudioPeaks
-from space_video_enhancer.ui.format import format_timecode
+from space_video_enhancer.ui.format import format_timecode, position_labels, shows_hours
 from space_video_enhancer.ui.icons import glyph_icon
 from space_video_enhancer.ui.widgets.timeline import ClipBlock, TimelineWidget
 
@@ -34,7 +34,6 @@ ICON_SIZE = QSize(18, 18)
 PLAY_ICON_SIZE = QSize(22, 22)
 TOOL_ICON_SIZE = QSize(16, 16)
 LABEL_SLACK_PX = 4
-SECONDS_PER_HOUR = 3600
 PLAYBACK_SPEED_OPTIONS: list[tuple[str, float]] = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25)]
 """Playhead speed relative to real time; the sound is stretched to match (pitch kept)."""
 REMOVE_RANGE_TOOLTIP = "Marcar o início de um trecho a remover no frame atual (X)"
@@ -285,12 +284,9 @@ class TransportBar(QWidget):
 
     def set_position(self, frame_index: int) -> None:
         """Timecode of ``frame_index`` next to the clip duration, plus the frame counter."""
-        hours = self._shows_hours()
-        position = format_timecode(frame_index, self._fps, force_hours=hours)
-        duration = format_timecode(self._frame_count, self._fps, force_hours=hours)
-        self.timecode_label.setText(f"{position} / {duration}")
-        shown = frame_index + 1 if self._frame_count else 0
-        self.frame_label.setText(f"frame {shown} / {self._frame_count}")
+        timecode, frame = position_labels(frame_index, self._frame_count, self._fps)
+        self.timecode_label.setText(timecode)
+        self.frame_label.setText(frame)
 
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
@@ -298,7 +294,7 @@ class TransportBar(QWidget):
             self._fit_labels()
 
     def _shows_hours(self) -> bool:
-        return self._frame_count / self._fps >= SECONDS_PER_HOUR
+        return shows_hours(self._frame_count, self._fps)
 
     def _fit_labels(self) -> None:
         """Fixed label widths for the widest text this video can produce, so nothing shifts as digits change."""

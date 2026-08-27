@@ -43,6 +43,30 @@ def quadrant_frame() -> np.ndarray:
     return make_quadrant_frame()
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Every test in a module that touches Qt (PySide6 or the ``ui`` package) is marked ``ui``.
+
+    The Qt tests are most of the suite's wall time; ``pytest -m "not ui"`` is the fast loop for the pipeline
+    and the model, the full run stays the gate. Marking by module (not by fixture) also lets the autouse
+    fixture below guarantee a ``QApplication`` for tests that build widgets without asking for ``app``.
+    """
+    qt_modules: dict[Path, bool] = {}
+    for item in items:
+        path = Path(str(item.fspath))
+        if path not in qt_modules:
+            text = path.read_text(encoding="utf-8")
+            qt_modules[path] = "PySide6" in text or "space_video_enhancer.ui" in text
+        if qt_modules[path]:
+            item.add_marker(pytest.mark.ui)
+
+
+@pytest.fixture(autouse=True)
+def _qt_application_for_ui_tests(request: pytest.FixtureRequest) -> None:
+    """A widget created before the first ``app`` fixture ran would abort the process; never depend on test order."""
+    if request.node.get_closest_marker("ui") is not None:
+        request.getfixturevalue("app")
+
+
 # --- offscreen Qt fixtures (skipped when PySide6 is not installed) ---------------------------
 
 UI_VIDEO_SIZE = (320, 180)

@@ -14,8 +14,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.ui.main_window import MainWindow
-from space_video_enhancer.ui.monitor_window import MonitorView, MonitorWindow, fit_rect, next_screen
+from space_video_enhancer.ui.monitor_window import MonitorView, MonitorWindow, next_screen
 from space_video_enhancer.ui.tabs.base import select_combo_data
+from space_video_enhancer.ui.widgets.compare_preview import fit_rect
 from tests.conftest import UI_VIDEO_FRAMES
 from tests.qt_helpers import pump, wait_for_preview, wait_until
 

@@ -81,3 +81,4 @@ follow_imports_for_stubs = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["ui: drives Qt offscreen (the slow part of the suite); skip with -m 'not ui' for a fast loop"]

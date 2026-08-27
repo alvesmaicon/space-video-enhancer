@@ -24,6 +24,20 @@ def format_timecode(frame_index: int, fps: float, *, force_hours: bool = False) 
     return f"{minutes:02d}:{seconds:02d}.{frame:02d}"
 
 
+def shows_hours(frame_count: int, fps: float) -> bool:
+    """A clip of an hour or more shows hours in every timecode, so position and duration keep one width."""
+    return fps > 0 and frame_count / fps >= 3600
+
+
+def position_labels(frame_index: int, frame_count: int, fps: float) -> tuple[str, str]:
+    """``("mm:ss.ff / mm:ss.ff", "frame n / N")`` for the playhead: what the transport bar and the monitor show."""
+    hours = shows_hours(frame_count, fps)
+    position = format_timecode(frame_index, fps, force_hours=hours)
+    duration = format_timecode(frame_count, fps, force_hours=hours)
+    shown = frame_index + 1 if frame_count else 0
+    return f"{position} / {duration}", f"frame {shown} / {frame_count}"
+
+
 def format_duration(seconds: float) -> str:
     """``m:ss`` for ETAs and elapsed times."""
     total = max(0, round(seconds))

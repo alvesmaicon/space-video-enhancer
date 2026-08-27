@@ -64,6 +64,18 @@ _ANCHOR_CORNER = {
 }
 
 
+def fit_rect(image_size: QSize, bounds: QRectF) -> QRectF:
+    """``image_size`` scaled to fit ``bounds`` keeping its aspect ratio, centred; empty when either is empty."""
+    if image_size.width() <= 0 or image_size.height() <= 0 or bounds.width() <= 0 or bounds.height() <= 0:
+        return QRectF()
+    scale = min(bounds.width() / image_size.width(), bounds.height() / image_size.height())
+    width = image_size.width() * scale
+    height = image_size.height() * scale
+    left = bounds.left() + (bounds.width() - width) / 2.0
+    top = bounds.top() + (bounds.height() - height) / 2.0
+    return QRectF(left, top, width, height)
+
+
 def clamp_rect_within_unit(rect: QRectF) -> QRectF:
     x = min(max(0.0, rect.x()), 1.0 - rect.width())
     y = min(max(0.0, rect.y()), 1.0 - rect.height())
@@ -560,22 +572,10 @@ class ComparePreview(QWidget):
 
     # --- helpers -------------------------------------------------------------------------
     def _fit_rect_for_size(self, size: QSize) -> QRectF:
-        available = self.rect().adjusted(IMAGE_MARGIN, IMAGE_MARGIN, -IMAGE_MARGIN, -IMAGE_MARGIN)
+        available = QRectF(self.rect().adjusted(IMAGE_MARGIN, IMAGE_MARGIN, -IMAGE_MARGIN, -IMAGE_MARGIN))
         if size.width() <= 0 or size.height() <= 0:
-            return QRectF(available)
-
-        image_ratio = size.width() / size.height()
-        available_ratio = available.width() / max(1, available.height())
-        if image_ratio > available_ratio:
-            target_width = float(available.width())
-            target_height = target_width / image_ratio
-        else:
-            target_height = float(available.height())
-            target_width = target_height * image_ratio
-
-        offset_x = available.x() + ((available.width() - target_width) / 2)
-        offset_y = available.y() + ((available.height() - target_height) / 2)
-        return QRectF(offset_x, offset_y, target_width, target_height)
+            return available
+        return fit_rect(size, available)
 
     def _position_open_button(self) -> None:
         hint = self.open_button.sizeHint()

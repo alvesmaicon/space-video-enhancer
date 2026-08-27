@@ -129,7 +129,7 @@ mypy space_video_enhancer
 QT_QPA_PLATFORM=offscreen pytest
 ```
 
-Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos e fluxos completos com vídeos sintéticos; os de exportação usam o `ffmpeg` do `PATH` e são pulados se ele não existir. A suíte inteira leva alguns minutos. `benchmarks/` tem os scripts de medição (tremor residual, custo dos estimadores, variantes de denoise) — veja [benchmarks/README.md](benchmarks/README.md).
+Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos e fluxos completos com vídeos sintéticos; os de exportação usam o `ffmpeg` do `PATH` e são pulados se ele não existir. Os testes que tocam Qt levam a marca `ui` — `pytest -m "not ui"` é o loop rápido (pipeline e modelo, ~6 s); a suíte inteira é o critério. `benchmarks/` tem os scripts de medição (tremor residual, custo dos estimadores, variantes de denoise) — veja [benchmarks/README.md](benchmarks/README.md).
 
 ## Limitações conhecidas
 
