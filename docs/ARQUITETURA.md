@@ -29,6 +29,7 @@ space_video_enhancer/
     tabs/                  # uma classe por aba: Cor, HSL, Filtros, Estabilizar, Geometria, Ruido, Exportar
     preview_worker.py      # QThread que decodifica e renderiza preview e miniaturas; a UI nunca bloqueia
     widgets/               # ComparePreview (+ SelectionOverlay), TransportBar, TimelineWidget, StatusPanel, LabeledSlider
+    app_icon.py            # icone do app desenhado com QPainter (janela, dock, .desktop via scripts/install-desktop-entry.sh)
     theme.qss              # estilo (icones em ui/icons/)
 tests/                     # pytest; roda sem display (o pipeline nao depende de Qt)
 ```

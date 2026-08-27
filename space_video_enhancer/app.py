@@ -11,13 +11,20 @@ from types import TracebackType
 from PySide6.QtCore import QMessageLogContext, QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 
+from space_video_enhancer import __version__
 from space_video_enhancer.diagnostics import log_diagnostics
 from space_video_enhancer.export.ffmpeg import find_ffmpeg
 from space_video_enhancer.telemetry.environment import collect_environment
 from space_video_enhancer.telemetry.log import get_logger, log_event, setup_logging
+from space_video_enhancer.ui.app_icon import app_icon
 from space_video_enhancer.ui.main_window import MainWindow
 
 LOG = get_logger("app")
+
+APPLICATION_NAME = "Space Video Enhancer"
+DESKTOP_FILE_NAME = "space-video-enhancer"
+"""Basename of the Linux ``.desktop`` entry; Qt also uses it as the X11 WM_CLASS and the Wayland app id."""
+WINDOWS_APP_USER_MODEL_ID = "SpaceVideoEnhancer.App"
 
 _QT_LEVELS = {
     QtMsgType.QtDebugMsg: logging.DEBUG,
@@ -56,6 +63,28 @@ def install_crash_hooks() -> None:
     qInstallMessageHandler(_qt_message_handler)
 
 
+def configure_application(app: QApplication) -> None:
+    """Give the process the app's identity instead of the interpreter's.
+
+    Without this the window manager shows "python" and the Python icon: the icon here goes to the
+    window, Alt-Tab and the dock/taskbar; the desktop-file name is what GNOME/KDE match against an
+    installed ``space-video-enhancer.desktop`` (see ``scripts/install-desktop-entry.sh``) to show the
+    right name and icon in the dock. On macOS the menu-bar name still comes from the executable's
+    bundle — only packaging into a ``.app`` changes it — but the Dock icon does follow the window icon.
+    """
+    app.setApplicationName(APPLICATION_NAME)
+    app.setApplicationDisplayName(APPLICATION_NAME)
+    app.setOrganizationName(APPLICATION_NAME)
+    app.setApplicationVersion(__version__)
+    app.setDesktopFileName(DESKTOP_FILE_NAME)
+    app.setWindowIcon(app_icon())
+    if sys.platform == "win32":
+        import ctypes  # noqa: PLC0415  (Windows only)
+
+        # Otherwise the taskbar groups the window under python.exe and shows its icon.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_USER_MODEL_ID)
+
+
 def main() -> int:
     session = setup_logging()
     install_crash_hooks()
@@ -66,6 +95,7 @@ def main() -> int:
     threading.Thread(target=log_diagnostics, args=(ffmpeg_path,), name="diagnostics", daemon=True).start()
 
     app = QApplication(sys.argv)
+    configure_application(app)
     window = MainWindow()
     window.show()
     exit_code = app.exec()

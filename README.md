@@ -65,6 +65,16 @@ python -m pip install .
 space-video-enhancer          # ou: python -m space_video_enhancer
 ```
 
+### Nome e ícone no sistema
+
+O app já define nome, ícone e id de aplicação (`space-video-enhancer`), então a janela, o Alt-Tab e o Dock mostram o ícone próprio. No **Linux**, para o dock e o menu de aplicativos também mostrarem o nome certo em vez de "python", instale a entrada de menu uma vez:
+
+```bash
+./scripts/install-desktop-entry.sh        # --remove desfaz
+```
+
+No **macOS**, o nome na barra de menus continua "Python" enquanto o app roda direto do interpretador — só um `.app` empacotado (PyInstaller/briefcase) muda isso; o ícone do Dock já é o do app.
+
 ## Uso
 
 1. **Arquivo › Abrir vídeo…** (Ctrl+O). Arraste o divisor no preview para comparar; ajuste nas abas à direita.
