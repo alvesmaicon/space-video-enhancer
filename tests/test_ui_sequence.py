@@ -18,7 +18,7 @@ from space_video_enhancer.timeline import FrameRange
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.sections import exporting as exporting_module
 from space_video_enhancer.ui.tabs.base import select_combo_data
-from tests.conftest import UI_VIDEO_B_FRAMES, UI_VIDEO_FRAMES
+from tests.conftest import UI_VIDEO_B_FRAMES, UI_VIDEO_FPS, UI_VIDEO_FRAMES
 from tests.qt_helpers import wait_for_preview, wait_until
 
 TOTAL = UI_VIDEO_FRAMES + UI_VIDEO_B_FRAMES
@@ -138,16 +138,18 @@ def test_moving_and_removing_clips_keeps_the_playhead_on_its_frame(
     assert len(window.sequence) == 1, "the last clip cannot be removed"
 
 
-def test_a_video_with_another_fps_is_refused(
+def test_a_video_with_another_fps_is_retimed_onto_the_timeline(
     app: QApplication, window: MainWindow, ui_video: Path, ui_video_other_fps: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     warnings: list[str] = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(str(args[2])))
-    window._open_video(ui_video)
+    window._open_video(ui_video)  # 24 fps: this pins the timeline rate
     wait_for_preview(app, window)
-    window._add_video(ui_video_other_fps)
-    assert len(window.sequence) == 1 and ui_video_other_fps not in window._sources
-    assert warnings and "fps" in warnings[0]
+    window._add_video(ui_video_other_fps)  # 30 fps, 6 frames -> retimed to ~5 frames at 24 fps
+    assert len(window.sequence) == 2 and ui_video_other_fps in window._sources
+    assert not warnings, "a different fps is retimed now, not refused"
+    assert window.sequence.timeline_fps == UI_VIDEO_FPS
+    assert UI_VIDEO_FRAMES < window.sequence.timeline_count < UI_VIDEO_FRAMES + 6  # the 30 fps clip is compressed
 
 
 class _FakeExportController(QObject):

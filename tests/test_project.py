@@ -167,3 +167,19 @@ def test_recent_projects_keep_newest_first_without_duplicates(tmp_path: Path) ->
     assert [path.name for path in recent.paths] == ["d.svep", "c.svep"]
     recent.clear()
     assert recent.paths == []
+
+
+def test_timeline_fps_is_saved_and_restored(tmp_path: Path) -> None:
+    (tmp_path / "a.mp4").write_bytes(b"a")
+    (tmp_path / "b.mp4").write_bytes(b"b")
+    a = ClipSource(tmp_path / "a.mp4", 240, 24.0, 1280, 720)
+    b = ClipSource(tmp_path / "b.mp4", 96, 48.0, 640, 480)  # a different fps clip on the same timeline
+    sequence = Sequence((Clip.whole(a), Clip.whole(b)), timeline_fps=24.0)
+    project = Project(sequence, (0, sequence.last_timeline_frame), playhead=0, threads=1)
+
+    data = project_from_dict(project_to_dict(project, tmp_path), tmp_path)
+    assert data.sequence.timeline_fps == 24.0 and data.sequence == sequence
+
+    legacy = project_to_dict(project, tmp_path)
+    del legacy["timeline_fps"]  # a project saved before the field existed
+    assert project_from_dict(legacy, tmp_path).sequence.timeline_fps is None

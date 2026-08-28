@@ -157,6 +157,7 @@ def project_to_dict(project: Project, base_dir: Path | None = None) -> dict[str,
         "range": [project.clip_range[0], project.clip_range[1]],
         "playhead": project.playhead,
         "threads": project.threads,
+        "timeline_fps": project.sequence.timeline_fps,
     }
 
 
@@ -222,7 +223,9 @@ def _read_project(data: Mapping[str, Any], base_dir: Path | None, exists: Callab
         )
     if not clips:
         raise ProjectError("o projeto não tem clipes")
-    sequence = Sequence(tuple(clips))
+    timeline_fps_raw = data.get("timeline_fps")
+    timeline_fps = float(timeline_fps_raw) if timeline_fps_raw is not None else None
+    sequence = Sequence(tuple(clips), timeline_fps=timeline_fps)
     last = sequence.timeline_count - 1
     range_start, range_end = data.get("range", [0, last])
     clip_range = (max(0, min(int(range_start), last)), max(0, min(int(range_end), last)))

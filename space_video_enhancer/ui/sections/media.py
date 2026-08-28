@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.export.ffmpeg import find_ffmpeg
-from space_video_enhancer.sequence import Clip, ClipSource
+from space_video_enhancer.sequence import FPS_TOLERANCE, Clip, ClipSource
 from space_video_enhancer.sequence import Sequence as ClipSequence
 from space_video_enhancer.settings import (
     DEFAULT_DENOISE_SAMPLE_RECT,
@@ -114,7 +114,9 @@ class MediaSection(WindowState):
         if source is None:
             self._sources = previous_sources
             return
-        sequence = ClipSequence.single(source, settings=self._fresh_clip_settings(source))
+        # Pin the timeline rate to the first video, so adding or reordering clips later never retimes it.
+        single = ClipSequence.single(source, settings=self._fresh_clip_settings(source))
+        sequence = replace(single, timeline_fps=source.fps)
         self._start_document(sequence, playhead=min(sequence.timeline_count - 1, sequence.timeline_count // 2))
         self.status.show_message(
             "Arraste o divisor na imagem e ajuste os controles à direita para comparar o resultado."
@@ -175,36 +177,39 @@ class MediaSection(WindowState):
         self._focus_preview_surface()
 
     def _add_video(self, path: Path) -> None:
-        """Append ``path`` as a clip (same fps as the sequence); the new clip starts with the current look."""
+        """Append ``path`` as a clip; a clip of another fps is retimed to the timeline (set by the first clip)."""
         if self.sequence.is_empty:
             self._open_video(path)
             return
         self._stop_playback()
-        already_open = path in self._sources
         source = self._open_source(path)
         if source is None:
             return
         self._store_active_clip_settings()
         candidate = self.sequence.add(Clip.whole(source, settings=self._fresh_clip_settings(source)))
-        mismatch = candidate.fps_mismatch()
-        if mismatch is not None:
-            if not already_open:
-                self._sources.pop(path).release()  # never handed to the worker, so releasing here is safe
-            log_event(LOG, "sequence.add_refused", name=path.name, reason=mismatch)
-            QMessageBox.warning(self, "fps diferente", mismatch)
-            return
+        retimed = abs(source.fps - candidate.fps) > FPS_TOLERANCE
         covers_end = self.clip_end_frame >= self.frame_count - 1
         self.active_clip_index = -1
         self.sequence = candidate
         if covers_end:
             self.clip_end_frame = self.frame_count - 1  # an export range that reached the end keeps reaching it
         self._preview_controller.set_videos(tuple(self._sources.values()))
-        log_event(LOG, "sequence.add", name=path.name, clips=len(self.sequence), frames=self.frame_count)
+        log_event(
+            LOG,
+            "sequence.add",
+            name=path.name,
+            clips=len(self.sequence),
+            frames=self.frame_count,
+            fps=round(source.fps, 3),
+            timeline_fps=round(self.fps, 3),
+            retimed=retimed,
+        )
         self._sequence_changed()
         self._commit_edit("adicionar vídeo")
+        note = f" ({source.fps:.0f} fps reajustado para {self.fps:.0f} fps da timeline)" if retimed else ""
         self.status.show_message(
             f"{path.name} adicionado à sequência: {len(self.sequence)} clipes, "
-            f"{format_duration(self.frame_count / self.fps)}."
+            f"{format_duration(self.frame_count / self.fps)}.{note}"
         )
 
     def _begin_sequence_edit(self) -> None:

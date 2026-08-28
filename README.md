@@ -87,7 +87,7 @@ No **macOS**, o nome na barra de menus continua "Python" enquanto o app roda dir
 ## Uso
 
 1. **Arquivo › Abrir vídeo…** (Ctrl+O). Arraste o divisor no preview para comparar; ajuste nas abas à direita.
-2. **Arquivo › Adicionar vídeo à sequência…** (Ctrl+Shift+O) para juntar mais arquivos (mesmo fps). Use as ferramentas sob a linha do tempo para marcar início `[` e fim `]`, remover um trecho, dividir, remover ou mover o clipe sob o playhead.
+2. **Arquivo › Adicionar vídeo à sequência…** (Ctrl+Shift+O) para juntar mais arquivos; um clipe com fps diferente é reajustado para o fps da linha do tempo (o do primeiro clipe). Use as ferramentas sob a linha do tempo para marcar início `[` e fim `]`, remover um trecho, dividir, remover ou mover o clipe sob o playhead.
 3. **Estabilizar**: escolha o modo; em *camera lock* arraste o retângulo verde sobre a região que deve ficar parada e use "Usar este frame como referência" para fixar o frame de referência.
 4. **Ruído**: no modo *amostra*, arraste o retângulo azul sobre uma área lisa da imagem.
 5. **Exportar** (Ctrl+E): a aba mostra o resumo (trecho, trechos removidos, tamanho de saída) e o botão. **Arquivo › Salvar projeto** (Ctrl+S) guarda tudo para continuar depois.
@@ -155,7 +155,7 @@ Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos
 
 ## Limitações conhecidas
 
-- Todos os clipes de uma sequência precisam ter o mesmo fps.
+- Clipes de fps diferente são reajustados por *frame mais próximo* (repete ou descarta quadros): funciona e preserva a duração, mas em movimento rápido pode trepidar. Mistura de quadros e optical flow (retiming suave) ainda não existem.
 - Mídia que mudou de lugar é marcada no projeto, não religada: coloque o arquivo de volta e reabra.
 - Arquivos com mais de 30 min tocam sem som no preview (o PCM não caberia com folga na memória); a exportação não é afetada.
 - Interface em português.
