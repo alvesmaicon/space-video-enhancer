@@ -835,6 +835,18 @@ class MainWindow(
     # =====================================================================================
     # Misc
     # =====================================================================================
+    def report_previous_session_failure(self, crash_log: Path, report: str | None) -> None:
+        """Tell the user the last session died and where the evidence is (a crash dump, or just a missing goodbye)."""
+        if report is not None:
+            self.status.show_message(
+                f"A sessão anterior fechou com um erro fatal; a pilha está em {crash_log.name} "
+                "(Ajuda › Abrir pasta de logs). Mande esse arquivo junto com o relato do que estava fazendo."
+            )
+        else:
+            self.status.show_message(
+                "A sessão anterior não fechou normalmente (sem relatório de erro: fechada à força ou queda de energia)."
+            )
+
     def _show_diagnostics(self) -> None:
         """OpenCL device, ICDs and ffmpeg encoders with hints — what to paste when asking for help."""
         self._diagnostics_dialog = DiagnosticsDialog(find_ffmpeg(), self)

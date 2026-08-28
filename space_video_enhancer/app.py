@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 from space_video_enhancer import __version__
 from space_video_enhancer.diagnostics import log_diagnostics
 from space_video_enhancer.export.ffmpeg import find_ffmpeg
+from space_video_enhancer.telemetry import crash
 from space_video_enhancer.telemetry.environment import collect_environment
 from space_video_enhancer.telemetry.log import get_logger, log_event, setup_logging
 from space_video_enhancer.ui.app_icon import app_icon
@@ -96,10 +97,17 @@ def claim_windows_taskbar_identity() -> None:
 def main() -> int:
     claim_windows_taskbar_identity()
     session = setup_logging()
+    # Fatal signals (segfault/abort in Qt, OpenCV, numpy) bypass every Python hook: faulthandler writes the
+    # stacks to crash.log next to app.jsonl, and the next start reports what the dead session left there.
+    capture = crash.install(session.log_path.parent, session.session_id)
     install_crash_hooks()
     started = time.monotonic()
     ffmpeg_path = find_ffmpeg()
     log_event(LOG, "app.start", log_path=str(session.log_path), **collect_environment(ffmpeg_path))
+    if capture.previous_report is not None:
+        log_event(LOG, "app.previous_crash", level=logging.ERROR, report=capture.previous_report)
+    elif capture.previous_unclean:
+        log_event(LOG, "app.previous_session_unclean", level=logging.WARNING)
     # OpenCL device + ffmpeg encoders with hints; off the GUI thread so startup does not wait for ffmpeg.
     threading.Thread(target=log_diagnostics, args=(ffmpeg_path,), name="diagnostics", daemon=True).start()
 
@@ -107,8 +115,11 @@ def main() -> int:
     configure_application(app)
     window = MainWindow()
     window.show()
+    if capture.previous_session_failed:
+        window.report_previous_session_failure(capture.path, capture.previous_report)
     exit_code = app.exec()
 
     log_event(LOG, "app.stop", exit_code=exit_code, seconds=round(time.monotonic() - started, 1))
+    crash.finish(capture)  # a clean exit: the running marker goes away
     logging.shutdown()
     return exit_code

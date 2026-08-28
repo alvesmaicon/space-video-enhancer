@@ -138,6 +138,8 @@ tests/                                                  # pytest, roda sem displ
 benchmarks/                                             # medições que justificaram os algoritmos
 ```
 
+Se a janela sumir do nada (falha fatal dentro do Qt, OpenCV ou numpy), a pilha de todas as threads fica em `~/.space-video-enhancer/logs/crash.log` — na abertura seguinte a barra de status avisa e aponta para o arquivo (`Ajuda › Abrir pasta de logs`). Exceções Python comuns vão para `app.jsonl` como `app.unhandled` e não fecham o app.
+
 Detalhes e decisões de cada parte em [docs/ARQUITETURA.md](docs/ARQUITETURA.md). Aceleração por GPU (OpenCL, NVENC, VAAPI) e como configurar no Linux em [docs/GPU.md](docs/GPU.md). Eventos de log e como analisá-los em [docs/TELEMETRIA.md](docs/TELEMETRIA.md).
 
 ## Desenvolvimento

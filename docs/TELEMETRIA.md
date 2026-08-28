@@ -4,11 +4,14 @@ O app grava eventos estruturados (uma linha JSON por evento) em `~/.space-video-
 
 Variaveis de ambiente: `SVE_LOG_DIR` (pasta), `SVE_LOG_LEVEL` (`INFO` padrao; `DEBUG` inclui `preview.render` durante a reproducao), `SVE_LOG_STDERR=1` (espelha no terminal). O menu `Ajuda > Abrir pasta de logs` abre a pasta; `Exibir > Metricas` (Ctrl+M, ou o botao Metricas acima do preview) mostra um HUD com tempo de render por estagio, fila, decode, estabilizacao e backend. `SVE_PREVIEW_AUDIO=0` desliga o som do preview.
 
+Falhas fatais (`telemetry/crash.py`): `faulthandler` escreve a pilha de todas as threads em `crash.log`, na mesma pasta, sob um cabecalho `=== session <id> started ... ===` por sessao; um marcador `session.running` e criado no inicio e removido na saida limpa. Na abertura seguinte, o que estiver abaixo do ultimo cabecalho vira o evento `app.previous_crash` (com o relatorio) e um aviso na barra de status; marcador sem relatorio vira `app.previous_session_unclean` (fechamento a forca ou queda de energia). O arquivo e aparado para os ultimos 200 KB quando passa de 1 MB. Excecoes Python em slots nao fecham o app: PySide6 chama `sys.excepthook` (`app.unhandled`) e o loop continua.
+
 Eventos principais:
 
 | Evento | Quando | Campos uteis |
 |---|---|---|
 | `app.start` / `app.stop` | inicio/fim | versoes, CPU, OpenCL (dispositivo), ffmpeg |
+| `app.previous_crash` / `app.previous_session_unclean` | na abertura, se a sessao anterior morreu | `report` (pilha do faulthandler) |
 | `video.open` | abrir ou adicionar um arquivo | dimensoes, fps, frames, codec, `open_ms` |
 | `sequence.add` / `sequence.add_refused` / `sequence.split` / `sequence.remove` / `sequence.move` | edicao da sequencia de clipes | nome, `clips`, `frames`, `reason` |
 | `settings.snapshot` / `settings.change` | primeiro render de um video / cada ajuste | `changes`: `{"filters.contrast": [50, 62]}` |
