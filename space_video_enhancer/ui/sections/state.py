@@ -166,6 +166,7 @@ class WindowState(QMainWindow):
     preview_zoom_out_button: QToolButton
     preview_zoom_in_button: QToolButton
     preview_render_mode_combo: QComboBox
+    preview_compare_combo: QComboBox
     preview_speed_combo: QComboBox
     open_action: QAction
     add_video_action: QAction

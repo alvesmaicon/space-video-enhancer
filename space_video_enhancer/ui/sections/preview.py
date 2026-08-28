@@ -20,8 +20,9 @@ from space_video_enhancer.telemetry.diff import diff as diff_settings
 from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.ui.preview_worker import PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.sections.state import WindowState
-from space_video_enhancer.ui.tabs.base import TabPage, select_combo_data
+from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, select_combo_data
 from space_video_enhancer.ui.tabs.filters import THUMBNAIL_SIZE
+from space_video_enhancer.ui.widgets.compare_preview import CompareMode
 
 LOG = get_logger("ui")
 
@@ -34,11 +35,23 @@ IDLE_REFRESH_DELAY_MS = 250
 INTERACTIVE_REASONS = ("scrub", "playback")
 PREVIEW_REFRESH_DELAY_MS = {PreviewRenderMode.FAST: 20, PreviewRenderMode.BALANCED: 35, PreviewRenderMode.HIGH: 50}
 PREVIEW_ZOOM_STEPS = (25, 50, 100, 200, 400)
+COMPARE_MODE_OPTIONS: list[tuple[str, CompareMode]] = [
+    ("Divisor vertical", CompareMode.SPLIT_VERTICAL),
+    ("Divisor horizontal", CompareMode.SPLIT_HORIZONTAL),
+    ("Lado a lado", CompareMode.SIDE_BY_SIDE),
+    ("Um sobre o outro", CompareMode.STACKED),
+]
+COMPARE_MODE_DESCRIPTIONS: dict[CompareMode, str] = {
+    CompareMode.SPLIT_VERTICAL: "Uma imagem só: antes à esquerda, depois à direita; arraste a linha para os lados.",
+    CompareMode.SPLIT_HORIZONTAL: "Uma imagem só: antes em cima, depois embaixo; arraste a linha na vertical.",
+    CompareMode.SIDE_BY_SIDE: "Os dois frames inteiros, um ao lado do outro (bom para vídeo em pé).",
+    CompareMode.STACKED: "Os dois frames inteiros, um sobre o outro (bom para vídeo deitado).",
+}
 """Fixed zoom levels; 100% shows one output pixel per logical screen pixel. "Ajustar" (fit) is the default."""
 PREVIEW_RENDER_MODE_OPTIONS: list[tuple[str, PreviewRenderMode]] = [
-    ("Alta qualidade", PreviewRenderMode.HIGH),
-    ("Balanceado", PreviewRenderMode.BALANCED),
-    ("Rápido", PreviewRenderMode.FAST),
+    ("Alta", PreviewRenderMode.HIGH),
+    ("Média", PreviewRenderMode.BALANCED),
+    ("Rápida", PreviewRenderMode.FAST),
 ]
 
 
@@ -87,6 +100,12 @@ class PreviewSection(WindowState):
             target = candidates[-1] if candidates else None
         if target is not None:
             select_combo_data(self.preview_zoom_combo, target)
+
+    def _handle_compare_mode_changed(self, _index: int) -> None:
+        mode = combo_enum(self.preview_compare_combo, CompareMode, CompareMode.SPLIT_VERTICAL)
+        self.preview.set_compare_mode(mode)
+        self._update_zoom_buttons()
+        log_event(LOG, "ui.compare_mode", mode=mode.value)
 
     def _toggle_pan(self, checked: bool) -> None:
         self.preview.set_pan_mode(checked)

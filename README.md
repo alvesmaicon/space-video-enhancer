@@ -13,7 +13,7 @@ Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windo
 ## Funcionalidades
 
 **Preview e comparação**
-- Divisor arrastável entre o frame original e o processado; zoom por percentual (100% = 1:1) ou ajustado à janela, com a ferramenta de mão (H, ou o botão do meio do mouse) para arrastar a imagem ampliada; modos de qualidade (alta, balanceado, rápido) que só afetam a tela — a exportação é sempre completa.
+- Quatro jeitos de comparar antes e depois — divisor vertical ou horizontal arrastável, lado a lado ou um sobre o outro (seletor ao lado da qualidade); zoom por percentual (100% = 1:1) ou ajustado à janela, com a ferramenta de mão (H, ou o botão do meio do mouse) para arrastar a imagem ampliada; modos de qualidade (alta, balanceado, rápido) que só afetam a tela — a exportação é sempre completa.
 - Reprodução em tempo real ou câmera lenta (½×, ¼×) com o som dos clipes em sincronia, pulando os trechos removidos.
 - **Preview em janela separada** para uma segunda tela: frame sobre fundo escuro, controles de transporte, tela cheia (F11); a janela principal para de desenhar o frame enquanto ele está lá.
 - HUD de métricas (tempo de render por estágio, fila, decode) e vetores de movimento da estabilização sobre a imagem.

@@ -1,14 +1,20 @@
-"""Before/after preview with a draggable split, up to three selection overlays and an empty-state CTA.
+"""Before/after preview with a draggable split (or two panels), selection overlays and an empty-state CTA.
 
-Two sizing modes: *fit* (default) fills whatever the scroll area gives it and scales the
-image to fit; *zoom* sizes itself so the output frame shows at ``zoom_factor`` logical
-pixels per output pixel (1.0 = 1:1) and lets the scroll area pan.
+Four ways to compare (:class:`CompareMode`): a vertical divider dragged left/right, a horizontal one
+dragged up/down, the two frames side by side, or one above the other. The overlays, the HUD and
+the hit-testing always refer to the *after* rectangle; the motion vectors are drawn on the *before*
+side, wherever it is.
+
+Two sizing modes: *fit* (default) fills whatever the scroll area gives it and scales the image to
+fit; *zoom* sizes itself so the output frame shows at ``zoom_factor`` logical pixels per output
+pixel (1.0 = 1:1) — per panel, so side by side is twice as wide — and lets the scroll area pan.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, Signal
 from PySide6.QtGui import (
@@ -26,6 +32,22 @@ from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
 
 from space_video_enhancer.pipeline.preview import MotionOverlay
 
+
+class CompareMode(str, Enum):
+    SPLIT_VERTICAL = "split_vertical"
+    """One image, a vertical divider: before on the left, after on the right."""
+    SPLIT_HORIZONTAL = "split_horizontal"
+    """One image, a horizontal divider: before above, after below."""
+    SIDE_BY_SIDE = "side_by_side"
+    STACKED = "stacked"
+
+    @property
+    def is_split(self) -> bool:
+        return self in (CompareMode.SPLIT_VERTICAL, CompareMode.SPLIT_HORIZONTAL)
+
+
+PANEL_GAP = 10
+"""Pixels between the two panels in side-by-side / stacked modes."""
 HANDLE_SIZE = 10.0
 MIN_SELECTION_SIZE = 0.08
 IMAGE_MARGIN = 18
@@ -340,7 +362,10 @@ class ComparePreview(QWidget):
         self._before: QImage | None = None
         self._after: QImage | None = None
         self._split_ratio = 0.5
+        self._compare_mode = CompareMode.SPLIT_VERTICAL
         self._image_rect = QRectF()
+        """Where the *after* frame is drawn (the whole image in split modes): overlays and hit-tests live here."""
+        self._before_rect = QRectF()
         self._reference_size = QSize(DEFAULT_REFERENCE_SIZE)
         """Output frame size in pixels; zoom 1.0 shows it 1:1 in logical pixels."""
         self._zoom_factor = 1.0
@@ -377,8 +402,14 @@ class ComparePreview(QWidget):
     def sizeHint(self) -> QSize:
         if self._fit_mode:
             return QSize(MIN_WIDGET_SIZE)
-        width = int(self._reference_size.width() * self._zoom_factor) + (2 * IMAGE_MARGIN)
-        height = int(self._reference_size.height() * self._zoom_factor) + (2 * IMAGE_MARGIN)
+        panel_width = int(self._reference_size.width() * self._zoom_factor)
+        panel_height = int(self._reference_size.height() * self._zoom_factor)
+        width = panel_width + (2 * IMAGE_MARGIN)
+        height = panel_height + (2 * IMAGE_MARGIN)
+        if self._compare_mode is CompareMode.SIDE_BY_SIDE:
+            width += panel_width + PANEL_GAP
+        elif self._compare_mode is CompareMode.STACKED:
+            height += panel_height + PANEL_GAP
         return QSize(
             max(MIN_WIDGET_SIZE.width(), min(MAX_WIDGET_SIDE, width)),
             max(MIN_WIDGET_SIZE.height(), min(MAX_WIDGET_SIDE, height)),
@@ -419,7 +450,7 @@ class ComparePreview(QWidget):
             return 1.0
         if self._image_rect.width() > 0:
             return self._image_rect.width() / reference_width
-        return self._fit_rect_for_size(self._reference_size).width() / reference_width
+        return self._layout_rects(self._reference_size)[1].width() / reference_width
 
     def set_render_quality(self, smooth_transform_enabled: bool) -> None:
         self._smooth_transform_enabled = smooth_transform_enabled
@@ -437,6 +468,24 @@ class ComparePreview(QWidget):
 
     # --- state ---------------------------------------------------------------------------
     @property
+    def compare_mode(self) -> CompareMode:
+        return self._compare_mode
+
+    def set_compare_mode(self, mode: CompareMode) -> None:
+        if mode is self._compare_mode:
+            return
+        self._compare_mode = mode
+        self.setCursor(self._idle_cursor())
+        self._relayout()
+
+    def before_rect(self) -> QRectF:
+        """Where the last paint put the *before* frame (equal to :meth:`after_rect` in the split modes)."""
+        return QRectF(self._before_rect)
+
+    def after_rect(self) -> QRectF:
+        return QRectF(self._image_rect)
+
+    @property
     def pan_mode(self) -> bool:
         return self._pan_mode
 
@@ -444,7 +493,16 @@ class ComparePreview(QWidget):
         """Hand tool: left-drag scrolls the zoomed image instead of moving the split or an overlay."""
         self._pan_mode = enabled
         self._pan_anchor = None
-        self.setCursor(Qt.CursorShape.OpenHandCursor if enabled else Qt.CursorShape.SizeHorCursor)
+        self.setCursor(self._idle_cursor())
+
+    def _idle_cursor(self) -> Qt.CursorShape:
+        if self._pan_mode:
+            return Qt.CursorShape.OpenHandCursor
+        if self._compare_mode is CompareMode.SPLIT_VERTICAL:
+            return Qt.CursorShape.SizeHorCursor
+        if self._compare_mode is CompareMode.SPLIT_HORIZONTAL:
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.ArrowCursor
 
     def set_hud_visible(self, visible: bool) -> None:
         self._hud_visible = visible
@@ -475,7 +533,7 @@ class ComparePreview(QWidget):
         """``editing`` is true only while the geometry tab is active; elsewhere the crop is just shown."""
         self.crop.set_state(enabled, crop_rect_norm, editing=editing, aspect_ratio=aspect_ratio)
         if not enabled:
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.setCursor(self._idle_cursor())
         self.update()
 
     def set_sample_state(self, enabled: bool, sample_rect_norm: QRectF, editing: bool) -> None:
@@ -504,37 +562,11 @@ class ComparePreview(QWidget):
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, PLACEHOLDER_TEXT)
             return
 
-        self._image_rect = self._fit_rect_for_size(self._after.size())
-        painter.drawImage(self._image_rect, self._after)
-
-        split_x = self._image_rect.left() + (self._image_rect.width() * self._split_ratio)
-        painter.save()
-        painter.setClipRect(
-            QRectF(
-                self._image_rect.left(),
-                self._image_rect.top(),
-                split_x - self._image_rect.left(),
-                self._image_rect.height(),
-            )
-        )
-        painter.drawImage(self._image_rect, self._before)
-        if self._motion is not None:
-            self._draw_motion(painter, self._image_rect)
-        painter.restore()
-
-        painter.setPen(QPen(SPLIT_LINE_COLOR, 3))
-        painter.drawLine(int(split_x), int(self._image_rect.top()), int(split_x), int(self._image_rect.bottom()))
-
-        draw_pill(
-            painter, QPointF(self._image_rect.left() + 10, self._image_rect.top() + 10), "Antes", CAPTION_BACKGROUND
-        )
-        after_width = pill_size(painter, "Depois").width()
-        draw_pill(
-            painter,
-            QPointF(self._image_rect.right() - 10 - after_width, self._image_rect.top() + 10),
-            "Depois",
-            CAPTION_BACKGROUND,
-        )
+        self._before_rect, self._image_rect = self._layout_rects(self._after.size())
+        if self._compare_mode.is_split:
+            self._paint_split(painter)
+        else:
+            self._paint_panels(painter)
 
         for overlay in (self.crop, self.sample, self.focus, self.white_balance):
             if overlay.enabled:
@@ -542,6 +574,49 @@ class ComparePreview(QWidget):
 
         if self._hud_visible and self._hud_lines:
             self._draw_hud(painter)
+
+    def _paint_split(self, painter: QPainter) -> None:
+        """One image: the before frame shows on one side of a draggable divider, the after frame on the other."""
+        rect = self._image_rect
+        assert self._before is not None and self._after is not None
+        painter.drawImage(rect, self._after)
+        vertical = self._compare_mode is CompareMode.SPLIT_VERTICAL
+        if vertical:
+            split = rect.left() + rect.width() * self._split_ratio
+            before_clip = QRectF(rect.left(), rect.top(), split - rect.left(), rect.height())
+        else:
+            split = rect.top() + rect.height() * self._split_ratio
+            before_clip = QRectF(rect.left(), rect.top(), rect.width(), split - rect.top())
+        painter.save()
+        painter.setClipRect(before_clip)
+        painter.drawImage(rect, self._before)
+        if self._motion is not None:
+            self._draw_motion(painter, rect)
+        painter.restore()
+
+        painter.setPen(QPen(SPLIT_LINE_COLOR, 3))
+        if vertical:
+            painter.drawLine(int(split), int(rect.top()), int(split), int(rect.bottom()))
+        else:
+            painter.drawLine(int(rect.left()), int(split), int(rect.right()), int(split))
+
+        draw_pill(painter, QPointF(rect.left() + 10, rect.top() + 10), "Antes", CAPTION_BACKGROUND)
+        after_size = pill_size(painter, "Depois")
+        if vertical:
+            after_at = QPointF(rect.right() - 10 - after_size.width(), rect.top() + 10)
+        else:
+            after_at = QPointF(rect.left() + 10, rect.bottom() - 10 - after_size.height())
+        draw_pill(painter, after_at, "Depois", CAPTION_BACKGROUND)
+
+    def _paint_panels(self, painter: QPainter) -> None:
+        """Two panels (side by side or stacked): the whole before frame and the whole after frame."""
+        assert self._before is not None and self._after is not None
+        painter.drawImage(self._before_rect, self._before)
+        painter.drawImage(self._image_rect, self._after)
+        if self._motion is not None:
+            self._draw_motion(painter, self._before_rect)
+        draw_pill(painter, self._before_rect.topLeft() + QPointF(10, 10), "Antes", CAPTION_BACKGROUND)
+        draw_pill(painter, self._image_rect.topLeft() + QPointF(10, 10), "Depois", CAPTION_BACKGROUND)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -565,7 +640,7 @@ class ComparePreview(QWidget):
                 if cursor is not None:
                     self.setCursor(cursor)
                     return
-        self._update_split_ratio(event.position().x())
+        self._update_split_ratio(event.position())
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._pan_anchor is not None:
@@ -586,39 +661,56 @@ class ComparePreview(QWidget):
         for overlay in self._overlays:
             if overlay.interactive:
                 cursor = overlay.hover_cursor(event.position(), self._image_rect)
-                self.setCursor(cursor if cursor is not None else Qt.CursorShape.SizeHorCursor)
+                self.setCursor(cursor if cursor is not None else self._idle_cursor())
                 break
 
         if left_pressed:
-            self._update_split_ratio(event.position().x())
+            self._update_split_ratio(event.position())
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         del event
         if self._pan_anchor is not None:
             self._pan_anchor = None
-            self.setCursor(Qt.CursorShape.OpenHandCursor if self._pan_mode else Qt.CursorShape.SizeHorCursor)
+            self.setCursor(self._idle_cursor())
             return
         for overlay in self._overlays:
             overlay.end_drag()
         if any(overlay.enabled for overlay in self._overlays):
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.setCursor(self._idle_cursor())
 
     # --- helpers -------------------------------------------------------------------------
-    def _fit_rect_for_size(self, size: QSize) -> QRectF:
+    def _layout_rects(self, size: QSize) -> tuple[QRectF, QRectF]:
+        """``(before rect, after rect)`` for a frame of ``size`` in the current compare mode (same rect when split)."""
         available = QRectF(self.rect().adjusted(IMAGE_MARGIN, IMAGE_MARGIN, -IMAGE_MARGIN, -IMAGE_MARGIN))
         if size.width() <= 0 or size.height() <= 0:
-            return available
-        return fit_rect(size, available)
+            return available, available
+        if self._compare_mode.is_split:
+            rect = fit_rect(size, available)
+            return rect, rect
+        if self._compare_mode is CompareMode.SIDE_BY_SIDE:
+            half = max(1.0, (available.width() - PANEL_GAP) / 2.0)
+            first = QRectF(available.left(), available.top(), half, available.height())
+            second = QRectF(available.left() + half + PANEL_GAP, available.top(), half, available.height())
+        else:
+            half = max(1.0, (available.height() - PANEL_GAP) / 2.0)
+            first = QRectF(available.left(), available.top(), available.width(), half)
+            second = QRectF(available.left(), available.top() + half + PANEL_GAP, available.width(), half)
+        return fit_rect(size, first), fit_rect(size, second)
 
     def _position_open_button(self) -> None:
         hint = self.open_button.sizeHint()
         self.open_button.resize(hint)
         self.open_button.move((self.width() - hint.width()) // 2, self.height() // 2 - 24)
 
-    def _update_split_ratio(self, mouse_x: float) -> None:
-        if self._image_rect.width() <= 0:
+    def _update_split_ratio(self, position: QPointF) -> None:
+        """Move the divider to the pointer along the axis of the current split mode (no-op with two panels)."""
+        rect = self._image_rect
+        if self._compare_mode is CompareMode.SPLIT_VERTICAL and rect.width() > 0:
+            ratio = (position.x() - rect.left()) / rect.width()
+        elif self._compare_mode is CompareMode.SPLIT_HORIZONTAL and rect.height() > 0:
+            ratio = (position.y() - rect.top()) / rect.height()
+        else:
             return
-        ratio = (mouse_x - self._image_rect.left()) / self._image_rect.width()
         self._split_ratio = min(1.0, max(0.0, ratio))
         self.update()
 

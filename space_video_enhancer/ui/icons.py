@@ -16,7 +16,19 @@ STROKE_WIDTH = 0.11
 """Line width of the stroked glyphs as a fraction of the icon size."""
 FILLED_GLYPHS = frozenset({"first", "previous", "play", "pause", "next", "last"})
 STROKED_GLYPHS = frozenset(
-    {"mark_in", "mark_out", "remove_range", "split", "trash", "move_left", "move_right", "detach", "hand"}
+    {
+        "mark_in",
+        "mark_out",
+        "remove_range",
+        "split",
+        "trash",
+        "move_left",
+        "move_right",
+        "detach",
+        "hand",
+        "metrics",
+        "vectors",
+    }
 )
 
 
@@ -138,6 +150,25 @@ def _draw_stroked(painter: QPainter, kind: str, size: float, color: QColor) -> N
         painter.drawLine(QPointF(middle, middle), QPointF(right, top))
         painter.drawLine(QPointF(right - size * 0.28, top), QPointF(right, top))
         painter.drawLine(QPointF(right, top), QPointF(right, top + size * 0.28))
+    elif kind == "metrics":
+        # Three bars of a small chart, longest at the bottom: the HUD's numbers.
+        for index, length in enumerate((0.45, 0.75, 1.0)):
+            y = top + size * 0.12 + index * size * 0.25
+            painter.drawLine(QPointF(left, y), QPointF(left + (right - left) * length, y))
+    elif kind == "vectors":
+        # Two tracked points and the arrows that carry them: the motion-vector overlay.
+        for start, end in (((0.12, 0.72), (0.5, 0.42)), ((0.5, 0.84), (0.88, 0.54))):
+            arrow_tail = QPointF(left + (right - left) * start[0], top + (bottom - top) * start[1])
+            arrow_head = QPointF(left + (right - left) * end[0], top + (bottom - top) * end[1])
+            painter.drawLine(arrow_tail, arrow_head)
+            wing = size * 0.14
+            painter.drawLine(arrow_head, QPointF(arrow_head.x() - wing, arrow_head.y()))
+            painter.drawLine(arrow_head, QPointF(arrow_head.x(), arrow_head.y() + wing))
+        painter.setBrush(color)
+        painter.drawEllipse(
+            QPointF(left + (right - left) * 0.12, top + (bottom - top) * 0.72), size * 0.07, size * 0.07
+        )
+        painter.drawEllipse(QPointF(left + (right - left) * 0.5, top + (bottom - top) * 0.84), size * 0.07, size * 0.07)
     elif kind == "hand":
         # An open hand: palm, four fingers with round tips, thumb out to the left.
         palm = QRectF(left + size * 0.2, middle - size * 0.02, size * 0.42, size * 0.36)

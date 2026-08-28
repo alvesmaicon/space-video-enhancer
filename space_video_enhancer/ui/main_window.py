@@ -91,7 +91,13 @@ from space_video_enhancer.ui.sections.exporting import ExportSection
 from space_video_enhancer.ui.sections.media import MediaSection
 from space_video_enhancer.ui.sections.monitor import MonitorSection
 from space_video_enhancer.ui.sections.playback import PlaybackSection
-from space_video_enhancer.ui.sections.preview import PREVIEW_RENDER_MODE_OPTIONS, PREVIEW_ZOOM_STEPS, PreviewSection
+from space_video_enhancer.ui.sections.preview import (
+    COMPARE_MODE_DESCRIPTIONS,
+    COMPARE_MODE_OPTIONS,
+    PREVIEW_RENDER_MODE_OPTIONS,
+    PREVIEW_ZOOM_STEPS,
+    PreviewSection,
+)
 from space_video_enhancer.ui.sections.projects import ProjectSection
 from space_video_enhancer.ui.sections.state import WindowState
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo
@@ -301,7 +307,15 @@ class MainWindow(
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.preview_render_mode_combo = enum_combo(PREVIEW_RENDER_MODE_OPTIONS)
         self.preview_render_mode_combo.setToolTip(
-            "Qualidade do preview: troca fidelidade por velocidade só na tela; a exportação é sempre completa"
+            "Qualidade do preview — alta, média (equilibrada) ou rápida: troca fidelidade por velocidade só na tela; "
+            "a exportação é sempre completa"
+        )
+        self.preview_compare_combo = enum_combo(COMPARE_MODE_OPTIONS)
+        for index, (_label, mode) in enumerate(COMPARE_MODE_OPTIONS):
+            self.preview_compare_combo.setItemData(index, COMPARE_MODE_DESCRIPTIONS[mode], Qt.ItemDataRole.ToolTipRole)
+        self.preview_compare_combo.setToolTip(
+            "Como comparar antes e depois: um divisor que você arrasta (vertical ou horizontal) ou os dois frames "
+            "inteiros, lado a lado ou um sobre o outro"
         )
         self.preview_speed_combo = self.transport.speed_combo  # lives next to the play buttons
 
@@ -388,11 +402,13 @@ class MainWindow(
             "Diminuir zoom", lambda: self._step_preview_zoom(-1), QKeySequence.StandardKey.ZoomOut
         )
         self.hud_action = QAction("Métricas", self)
+        self.hud_action.setIcon(glyph_icon("metrics", QColor("#1f2937")))
         self.hud_action.setCheckable(True)
         self.hud_action.setShortcut("Ctrl+M")
         self.hud_action.setToolTip("Mostrar métricas de render, fila e decode sobre o preview (Ctrl+M)")
         self.hud_action.toggled.connect(self._toggle_hud)
         self.vectors_action = QAction("Vetores de movimento", self)
+        self.vectors_action.setIcon(glyph_icon("vectors", QColor("#1f2937")))
         self.vectors_action.setCheckable(True)
         self.vectors_action.setShortcut("Ctrl+Shift+M")
         self.vectors_action.setToolTip(
@@ -488,6 +504,7 @@ class MainWindow(
         row.addWidget(self.preview_zoom_combo)
         row.addWidget(self.preview_zoom_in_button)
         row.addWidget(self.preview_render_mode_combo)
+        row.addWidget(self.preview_compare_combo)
         self.pan_button = QToolButton()
         self.pan_button.setDefaultAction(self.pan_action)
         self.pan_button.setObjectName("previewToggle")
@@ -500,10 +517,10 @@ class MainWindow(
         self.hud_button.setDefaultAction(self.hud_action)
         self.vectors_button = QToolButton()
         self.vectors_button.setDefaultAction(self.vectors_action)
-        self.vectors_button.setText("Vetores")
-        for button in (self.hud_button, self.vectors_button):
+        for button in (self.hud_button, self.vectors_button):  # icon-only: the row must fit a 1280 px screen
             button.setObjectName("previewToggle")
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            button.setIconSize(QSize(16, 16))
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(button)
         self.monitor_button = QToolButton()
@@ -642,6 +659,7 @@ class MainWindow(
         self.preview_zoom_in_button.clicked.connect(lambda: self._step_preview_zoom(1))
         self.preview_zoom_combo.currentIndexChanged.connect(self._handle_preview_zoom_changed)
         self.preview_render_mode_combo.currentIndexChanged.connect(self._handle_preview_render_mode_changed)
+        self.preview_compare_combo.currentIndexChanged.connect(self._handle_compare_mode_changed)
         self.preview_speed_combo.currentIndexChanged.connect(self._handle_playback_speed_changed)
         self.transport.soundToggled.connect(self._set_sound_enabled)
         self.status.cancelExportRequested.connect(self._request_export_cancel)

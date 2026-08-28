@@ -23,8 +23,9 @@ from space_video_enhancer.settings import (
     RotationMode,
     StabilizationMode,
 )
+from space_video_enhancer.ui.widgets.compare_preview import CompareMode
 
-E = TypeVar("E", DenoiseMode, StabilizationMode, RotationMode, PreviewRenderMode, DeinterlaceMode)
+E = TypeVar("E", DenoiseMode, StabilizationMode, RotationMode, PreviewRenderMode, DeinterlaceMode, CompareMode)
 Section = Union[QWidget, QLayout]
 
 CONTENT_MARGIN = 14
