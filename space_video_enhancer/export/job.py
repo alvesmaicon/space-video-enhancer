@@ -41,6 +41,7 @@ from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.telemetry.stats import Histogram, StageStats
 from space_video_enhancer.telemetry.trace import RenderTrace
 from space_video_enhancer.timeline import FrameRange
+from space_video_enhancer.video import capture_rotation
 
 LOG = get_logger("export")
 ProgressCallback = Callable[[int, int], None]
@@ -316,6 +317,10 @@ class _SourceReaders:
         self._positions[path] = frame_index + 1
         return frame
 
+    def rotation(self, path: Path) -> int:
+        capture = self.open(path)
+        return capture_rotation(capture) if capture is not None else 0
+
     def release_all(self) -> None:
         for capture in self._captures.values():
             capture.release()
@@ -356,16 +361,20 @@ def _analyze_clip_wobble(
             force=done == total,
         )
 
-    analysis = analyze_wobble(read, path, first, last, window, progress=report, cancelled=cancel.is_set)
+    analysis = analyze_wobble(
+        read, path, first, last, window, rotation=readers.rotation(path), progress=report, cancelled=cancel.is_set
+    )
     if analysis.cancelled:
         return None, None
+    track = analysis.track
     summary: dict[str, Any] = {
         "clip": index,
         "name": clip.name,
         "first": first,
         "last": last,
         "frames": analysis.frames_read,
-        "measured": round(analysis.track.measured_fraction, 3) if analysis.track is not None else None,
+        "measured": round(track.measured_fraction, 3) if track is not None else None,
+        "axis": track.detected_axis.value if track is not None else None,
         "elapsed_ms": round(analysis.elapsed_ms, 1),
     }
     log_event(LOG, "export.wobble_analysis", **summary)
@@ -375,14 +384,15 @@ def _analyze_clip_wobble(
 def _wobble_tracks(
     readers: _SourceReaders, request: ExportRequest, cancel: threading.Event, status: _StatusThrottle
 ) -> tuple[dict[int, WobbleTrack], list[dict[str, Any]]] | None:
-    """A wobble track per clip that undoes the wobble: the one handed in when it covers the clip, else analysed now.
+    """A wobble track per clip that needs one (wobble, or the readout axis): the one handed in when it covers the
+    clip, else analysed now.
 
     ``None`` when the export was cancelled during an analysis.
     """
     tracks: dict[int, WobbleTrack] = {}
     summaries: list[dict[str, Any]] = []
     for index, clip in enumerate(request.sequence.clips):
-        if not clip.settings.stabilization.rolling_shutter_auto:
+        if not clip.settings.stabilization.needs_wobble_analysis:
             continue
         provided = next(
             (

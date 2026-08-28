@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -24,8 +25,15 @@ from space_video_enhancer.pipeline.stabilization.stabilize import (
     smoothing_time_constant,
 )
 from space_video_enhancer.pipeline.stabilization.state import MAX_FRAME_GAP, StabilizationState, frame_gap
-from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble, filter_wobble, wobble_window_frames
-from space_video_enhancer.settings import NormalizedRect, StabilizationMode, StabilizationSettings
+from space_video_enhancer.pipeline.stabilization.wobble import (
+    analyze_wobble,
+    detect_readout_axis,
+    filter_wobble,
+    wobble_window_frames,
+)
+from space_video_enhancer.settings import NormalizedRect, ReadoutAxis, StabilizationMode, StabilizationSettings
+from space_video_enhancer.telemetry import trace as tracing
+from space_video_enhancer.telemetry.trace import RenderTrace
 
 SHIFT_DOWN, SHIFT_LEFT = 5, 7
 FOCUS = NormalizedRect(0.10, 0.12, 0.28, 0.42)  # around the green rectangle of the textured frame
@@ -396,6 +404,25 @@ def test_rolling_shutter_correction_straightens_a_skewed_frame() -> None:
     assert rolling_shutter.correct(scene, (0.4, 0.0)) is scene, "sub-pixel skew is left alone"
 
 
+def _edge_rows(frame: np.ndarray, column: int) -> list[int]:
+    luma = frame[:, column, 1].astype(int)
+    return [int(y) for y in np.flatnonzero(np.diff(luma) > 60) + 1]
+
+
+def test_column_readout_skews_and_unskews_along_the_width() -> None:
+    """A phone held upright reads along the frame's columns: horizontal bars lean when the scene moves vertically."""
+    scene = np.ascontiguousarray(np.transpose(_bars_scene(), (1, 0, 2)))  # 320x180: the bars are now horizontal
+    skewed = rolling_shutter.skew(scene, (0.0, 16.0), 1.0, ReadoutAxis.COLUMNS)
+    left, right = _edge_rows(skewed, 2), _edge_rows(skewed, 177)
+    assert right[0] - left[0] >= 14, "the simulated readout leans the bars"
+    fixed = rolling_shutter.correct(skewed, (0.0, 16.0), ReadoutAxis.COLUMNS)
+    left, right = _edge_rows(fixed, 2), _edge_rows(fixed, 177)
+    assert abs(right[0] - left[0]) <= 1 and abs(left[0] - 60) <= 1, "after the correction the bars lie flat"
+    wrong_axis = rolling_shutter.correct(skewed, (0.0, 16.0), ReadoutAxis.ROWS)
+    left, right = _edge_rows(wrong_axis, 2), _edge_rows(wrong_axis, 177)
+    assert right[0] - left[0] >= 12, "shifting rows cannot undo a distortion that varies along the columns"
+
+
 def test_center_displacement_is_the_opposite_of_where_delta_sends_the_centre() -> None:
     delta = transforms.translation_to_affine(-12.0, 5.0)  # aligns this frame onto the previous one
     assert rolling_shutter.center_displacement(delta, (180, 320)) == pytest.approx((12.0, -5.0))
@@ -441,6 +468,42 @@ def test_row_motion_gradient_reads_the_change_of_wobble_between_frames(textured_
     assert rolling_shutter.row_motion_gradient(few, textured_frame.shape[0]) is None, "too few points: no gradient"
 
 
+def _pair_vectors(first: np.ndarray, second: np.ndarray) -> MotionVectors:
+    state = StabilizationState()
+    estimate_inter_frame_transform(first, 0, state, StabilizationMode.AUTO)
+    estimate_inter_frame_transform(second, 1, state, StabilizationMode.AUTO)
+    assert state.last_vectors is not None
+    return state.last_vectors  # type: ignore[no-any-return]
+
+
+def test_motion_gradient_reads_the_readout_axis_and_ignores_roll_and_zoom(textured_frame: np.ndarray) -> None:
+    height, width = textured_frame.shape[:2]
+    stretched = rolling_shutter.wobble(textured_frame, (10.0, 0.0), ReadoutAxis.COLUMNS)  # wider on the right
+    vectors = _pair_vectors(textured_frame, stretched)
+    along_columns = rolling_shutter.motion_gradient(vectors, width, ReadoutAxis.COLUMNS)
+    along_rows = rolling_shutter.motion_gradient(vectors, height, ReadoutAxis.ROWS)
+    assert along_columns is not None and abs(along_columns[0] - 10.0) < 2.5 and abs(along_columns[1]) < 2.5
+    # Read along the rows, the same field is a zoom plus the opposite vertical stretch: one pair of frames cannot
+    # tell the two axes apart (the analysis uses the correlation with the camera's acceleration over time).
+    assert along_rows is not None and abs(along_rows[0]) < 2.5 and abs(along_rows[1] + 10.0 * height / width) < 2.5
+
+    centre = (width / 2.0, height / 2.0)
+    for label, matrix in (
+        ("roll", cv2.getRotationMatrix2D(centre, 1.0, 1.0)),
+        ("zoom", cv2.getRotationMatrix2D(centre, 0.0, 1.03)),
+    ):
+        moved = cv2.warpAffine(textured_frame, matrix, (width, height), borderMode=cv2.BORDER_REFLECT)
+        vectors = _pair_vectors(textured_frame, moved)
+        for axis, length in ((ReadoutAxis.ROWS, height), (ReadoutAxis.COLUMNS, width)):
+            gradient = rolling_shutter.motion_gradient(vectors, length, axis)
+            assert gradient is not None, (label, axis)
+            assert abs(gradient[0]) < 2.5 and abs(gradient[1]) < 2.5, (
+                label,
+                axis,
+                gradient,
+            )  # a 1° roll would read ~4.7 px
+
+
 def _band_shift(image: np.ndarray, reference: np.ndarray, rows: slice) -> float:
     """Vertical offset of ``image`` against ``reference`` inside a horizontal band (phase correlation)."""
     to_gray = lambda frame: cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)[rows, 20:-20]  # noqa: E731
@@ -451,6 +514,89 @@ def _band_shift(image: np.ndarray, reference: np.ndarray, rows: slice) -> float:
 def _residual_gradient(image: np.ndarray, reference: np.ndarray) -> float:
     """How much more the bottom band is displaced than the top one: the wobble left in ``image``."""
     return _band_shift(image, reference, slice(15, 95)) - _band_shift(image, reference, slice(175, 255))
+
+
+def _band_shift_x(image: np.ndarray, reference: np.ndarray, columns: slice) -> float:
+    """Horizontal offset of ``image`` against ``reference`` inside a vertical band (phase correlation)."""
+    to_gray = lambda frame: cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)[20:-20, columns]  # noqa: E731
+    (dx, _dy), _response = cv2.phaseCorrelate(to_gray(reference), to_gray(image))
+    return float(dx)
+
+
+def _residual_gradient_x(image: np.ndarray, reference: np.ndarray) -> float:
+    """How much more the right band is displaced than the left one: the column-wise wobble left in ``image``."""
+    return _band_shift_x(image, reference, slice(15, 95)) - _band_shift_x(image, reference, slice(385, 465))
+
+
+def _shaky_rolling_shutter_sequence(
+    scene: np.ndarray, count: int, axis: ReadoutAxis, readout: float = 0.7
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """A camera shaking over a static scene, read by a rolling shutter along ``axis``: ``(distorted, clean)`` frames.
+
+    Each frame's distortion is the readout time times the displacement since the previous frame — the
+    physics the axis detection relies on.
+    """
+    distorted: list[np.ndarray] = []
+    clean: list[np.ndarray] = []
+    position = np.zeros(2, dtype=int)
+    for index in range(count):
+        velocity = np.array(
+            [round(16.0 * np.sin(2.0 * np.pi * index / 7.0)), round(9.0 * np.sin(2.0 * np.pi * index / 5.0))]
+        )
+        position = position + velocity
+        moved = np.roll(scene, (int(position[1]), int(position[0])), axis=(0, 1))
+        clean.append(moved)
+        distorted.append(rolling_shutter.skew(moved, (float(velocity[0]), float(velocity[1])), readout, axis))
+    return distorted, clean
+
+
+def test_wobble_analysis_detects_the_readout_axis_and_the_setting_can_force_it(textured_frame: np.ndarray) -> None:
+    window = wobble_window_frames(30.0)
+    along_rows, _clean_rows = _shaky_rolling_shutter_sequence(textured_frame, 40, ReadoutAxis.ROWS)
+    along_columns, clean = _shaky_rolling_shutter_sequence(textured_frame, 40, ReadoutAxis.COLUMNS)
+    still = [textured_frame] * 30
+
+    rows_track = analyze_wobble(_read_from(along_rows), Path("rows.mp4"), 0, 39, window).track
+    assert rows_track is not None and rows_track.detected_axis is ReadoutAxis.ROWS
+    assert rows_track.correlation(ReadoutAxis.ROWS) > 0.8 > rows_track.correlation(ReadoutAxis.COLUMNS) + 0.3
+    columns_track = analyze_wobble(_read_from(along_columns), Path("columns.mp4"), 0, 39, window).track
+    assert columns_track is not None and columns_track.detected_axis is ReadoutAxis.COLUMNS
+    assert columns_track.correlation(ReadoutAxis.COLUMNS) > 0.8 > columns_track.correlation(ReadoutAxis.ROWS) + 0.3
+    upright = analyze_wobble(_read_from(still), Path("still.mp4"), 0, 29, window, rotation=90).track
+    landscape = analyze_wobble(_read_from(still), Path("still.mp4"), 0, 29, window, rotation=0).track
+    assert upright is not None and upright.detected_axis is ReadoutAxis.COLUMNS, "no motion: the rotation decides"
+    assert landscape is not None and landscape.detected_axis is ReadoutAxis.ROWS
+    assert detect_readout_axis(0.2, 0.25, 270) is ReadoutAxis.COLUMNS, "too weak a signature: the rotation decides"
+    assert detect_readout_axis(0.6, 0.1, 270) is ReadoutAxis.ROWS, "a clear signature beats the rotation"
+    assert detect_readout_axis(0.5, 0.45, 0) is ReadoutAxis.ROWS, "too close to call: the rotation decides"
+
+    automatic = StabilizationSettings(rolling_shutter_auto=True)
+    assert automatic.needs_wobble_analysis and StabilizationSettings(rolling_shutter=0.5).needs_wobble_analysis
+    assert not StabilizationSettings(rolling_shutter=0.5, readout_axis=ReadoutAxis.ROWS).needs_wobble_analysis
+    assert not StabilizationSettings().needs_wobble_analysis
+    before: list[float] = []
+    after: list[float] = []
+    for index in range(window, 40 - window):
+        trace = RenderTrace()
+        with tracing.active(trace):
+            corrected = apply_stabilization(
+                along_columns[index], automatic, frame_index=index, state=None, wobble_track=columns_track
+            )
+        assert trace.notes["rolling_shutter.axis"] == "columns"
+        assert trace.notes["rolling_shutter.axis_source"] == "detected"
+        before.append(abs(_residual_gradient_x(along_columns[index], clean[index])))
+        after.append(abs(_residual_gradient_x(corrected, clean[index])))
+    assert np.mean(before) > 3.0 and np.mean(after) < 0.3 * np.mean(before), (np.mean(before), np.mean(after))
+
+    forced = replace(automatic, readout_axis=ReadoutAxis.ROWS)
+    trace = RenderTrace()
+    with tracing.active(trace):
+        apply_stabilization(along_columns[15], forced, frame_index=15, state=None, wobble_track=columns_track)
+    assert trace.notes["rolling_shutter.axis"] == "rows" and trace.notes["rolling_shutter.axis_source"] == "forced"
+    trace = RenderTrace()
+    with tracing.active(trace):
+        apply_stabilization(along_columns[15], automatic, frame_index=15, state=None)
+    assert trace.notes["rolling_shutter.axis_source"] == "default", "no analysis yet: rows"
 
 
 def _read_from(frames: list[np.ndarray]) -> Callable[[int], np.ndarray | None]:

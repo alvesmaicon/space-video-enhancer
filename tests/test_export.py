@@ -442,6 +442,7 @@ def test_wobble_export_analyses_the_clip_first_and_renders_in_parallel(tmp_path:
     assert result.processed_frames == 12 and int(_probe_video(output)["nb_read_frames"]) == 12
     [analysis] = result.metrics["wobble_analysis"]
     assert analysis["clip"] == 0 and analysis["frames"] == 12 and (analysis["first"], analysis["last"]) == (0, 11)
+    assert analysis["axis"] == "rows", "no wobble and no rotation metadata: a landscape readout"
     assert statuses and "oscilação" in statuses[-1] and "100%" in statuses[-1], statuses
 
     video = VideoSource(source)

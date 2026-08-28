@@ -13,7 +13,7 @@ from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.project import load_project
-from space_video_enhancer.settings import DeinterlaceMode
+from space_video_enhancer.settings import DeinterlaceMode, ReadoutAxis
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from tests.qt_helpers import pump, wait_for_preview, wait_until
@@ -44,10 +44,11 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
 
     tab.rolling_shutter_slider.setValue(70)
     tab.wobble_checkbox.setChecked(True)
+    select_combo_data(tab.readout_axis_combo, ReadoutAxis.COLUMNS.value)
     wait_for_preview(app, window)
     settings = window.sequence.clips[0].settings.stabilization
     assert settings.rolling_shutter == pytest.approx(0.7) and settings.requires_sequential_processing
-    assert settings.rolling_shutter_auto
+    assert settings.rolling_shutter_auto and settings.readout_axis is ReadoutAxis.COLUMNS
     assert "exportação sequencial" not in tab.info_label.text(), "the stabilization mode itself is still off"
     assert "rolling shutter" in tab.capture_info_label.text()
     # The wobble checkbox started an analysis of the clip on its own thread; the preview follows once it lands.
@@ -61,23 +62,26 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     trace = window._last_preview.trace
     assert trace.get("rolling_shutter.result") in ("applied", "negligible", "no_motion")
     assert "rolling_shutter.wobble_px" in trace, "the analysed wobble reaches the render"
+    assert trace["rolling_shutter.axis"] == "columns" and trace["rolling_shutter.axis_source"] == "forced"
+    assert "leitura do sensor: colunas" in tab.capture_info_label.text(), tab.capture_info_label.text()
     assert window._wobble_track_for(window.sequence.clips[0]) is track, "the same range is not analysed twice"
 
     project_path = tmp_path / "capture.svep"
     assert window._write_project(project_path)
     loaded = load_project(project_path).sequence.clips[0].settings
     assert loaded.capture.deinterlace is DeinterlaceMode.FIELD and loaded.stabilization.rolling_shutter == 0.7
-    assert loaded.stabilization.rolling_shutter_auto
+    assert loaded.stabilization.rolling_shutter_auto and loaded.stabilization.readout_axis is ReadoutAxis.COLUMNS
 
     select_combo_data(tab.deinterlace_combo, DeinterlaceMode.OFF.value)
     tab.rolling_shutter_slider.setValue(0)
     tab.wobble_checkbox.setChecked(False)
+    select_combo_data(tab.readout_axis_combo, ReadoutAxis.AUTO.value)
     wait_for_preview(app, window)
     _open(app, window, ui_video)
     assert window._open_project(project_path)
     wait_for_preview(app, window)
     assert tab.deinterlace_combo.currentData() == "field" and tab.rolling_shutter_slider.value() == 70
-    assert tab.wobble_checkbox.isChecked()
+    assert tab.wobble_checkbox.isChecked() and tab.readout_axis_combo.currentData() == "columns"
 
 
 def _drag(widget: object, start: QPointF, end: QPointF, button: Qt.MouseButton) -> None:

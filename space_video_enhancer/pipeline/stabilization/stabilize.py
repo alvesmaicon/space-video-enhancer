@@ -29,7 +29,7 @@ import numpy as np
 from space_video_enhancer.pipeline.stabilization import estimators, rolling_shutter, transforms
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
-from space_video_enhancer.settings import StabilizationMode, StabilizationSettings, clamp_unit
+from space_video_enhancer.settings import ReadoutAxis, StabilizationMode, StabilizationSettings, clamp_unit
 from space_video_enhancer.telemetry.trace import note
 
 SMOOTHING_MIN_FRAMES = 2.0
@@ -124,6 +124,9 @@ def unskew_rolling_shutter(
     estimated here — without a previous frame in ``state`` there is no motion to speak of. The wobble
     comes from ``wobble_track`` (the clip's analysis, see :mod:`wobble`) and needs no memory at all.
     """
+    axis, axis_source = resolve_readout_axis(settings, wobble_track)
+    note("rolling_shutter.axis", axis.value)
+    note("rolling_shutter.axis_source", axis_source)
     gradient_x = gradient_y = 0.0
     contributions = 0
     if settings.corrects_rolling_shutter_skew:
@@ -136,21 +139,31 @@ def unskew_rolling_shutter(
     if settings.rolling_shutter_auto:
         wobble = None
         if wobble_track is not None and frame_index is not None:
-            wobble = wobble_track.wobble_at(frame_index, settings.rolling_shutter)
+            wobble = wobble_track.wobble_at(frame_index, settings.rolling_shutter, axis)
         if wobble is None:
             note("rolling_shutter.wobble", "unanalysed")
         else:
-            height = float(frame.shape[0])
-            note("rolling_shutter.wobble_px", [round(wobble[0] * height, 2), round(wobble[1] * height, 2)])
-            gradient_x += wobble[0] * height
-            gradient_y += wobble[1] * height
+            length = float(frame.shape[1] if axis is ReadoutAxis.COLUMNS else frame.shape[0])
+            note("rolling_shutter.wobble_px", [round(wobble[0] * length, 2), round(wobble[1] * length, 2)])
+            gradient_x += wobble[0] * length
+            gradient_y += wobble[1] * length
             contributions += 1
     if contributions == 0:
         note("rolling_shutter.result", "no_motion" if settings.corrects_rolling_shutter_skew else "unanalysed")
         return frame
-    corrected = rolling_shutter.correct(frame, (gradient_x, gradient_y))
+    corrected = rolling_shutter.correct(frame, (gradient_x, gradient_y), axis)
     note("rolling_shutter.result", "applied" if corrected is not frame else "negligible")
     return corrected
+
+
+def resolve_readout_axis(settings: StabilizationSettings, wobble_track: WobbleTrack | None) -> tuple[ReadoutAxis, str]:
+    """The axis the corrections work along and where it came from: ``forced`` (the setting), ``detected``
+    (the clip's wobble analysis) or ``default`` (rows, until an analysis exists)."""
+    if settings.readout_axis is not ReadoutAxis.AUTO:
+        return settings.readout_axis, "forced"
+    if wobble_track is not None:
+        return wobble_track.detected_axis, "detected"
+    return ReadoutAxis.ROWS, "default"
 
 
 def _scene_displacement(

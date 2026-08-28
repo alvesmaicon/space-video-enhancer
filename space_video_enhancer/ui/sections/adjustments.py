@@ -374,7 +374,19 @@ class AdjustmentsSection(WindowState):
                 facts.append("rolling shutter: aguardando o render")
         if stabilization.rolling_shutter_auto:
             facts.append(self._wobble_status_text(trace))
+        if stabilization.corrects_rolling_shutter:
+            facts.append(self._readout_axis_text(trace))
         self.stabilization_tab.set_capture_info(" · ".join(facts) + ("." if facts else ""))
+
+    @staticmethod
+    def _readout_axis_text(trace: dict[str, object]) -> str:
+        names = {"rows": "linhas (topo → base)", "columns": "colunas (esquerda → direita)"}
+        name = names.get(str(trace.get("rolling_shutter.axis")))
+        if name is None:
+            return "leitura do sensor: aguardando o render"
+        sources = {"forced": "escolhida", "detected": "detectada", "default": "padrão até a análise"}
+        source = sources.get(str(trace.get("rolling_shutter.axis_source")))
+        return f"leitura do sensor: {name}" + (f" ({source})" if source else "")
 
     def _wobble_status_text(self, trace: dict[str, object]) -> str:
         if self._wobble_pending is not None:

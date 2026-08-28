@@ -95,6 +95,7 @@ class WobbleAnalysisWorker(QObject):
                 request.first,
                 request.last,
                 request.window,
+                rotation=video.rotation,
                 progress=report,
                 cancelled=lambda: self._latest_generation != request.generation,
             )
@@ -119,6 +120,8 @@ class WobbleAnalysisWorker(QObject):
             last=request.last,
             frames=analysis.frames_read,
             measured=round(track.measured_fraction, 3) if track is not None else None,
+            axis=track.detected_axis.value if track is not None else None,
+            rotation=video.rotation,
             elapsed_ms=round(analysis.elapsed_ms, 1),
         )
         self.finished.emit(request, track, analysis.elapsed_ms)

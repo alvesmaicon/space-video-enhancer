@@ -24,6 +24,18 @@ class VideoOpenError(RuntimeError):
     pass
 
 
+def capture_rotation(capture: cv2.VideoCapture) -> int:
+    """The rotation metadata of an open capture in degrees (0 when absent or unsupported by the backend)."""
+    prop = getattr(cv2, "CAP_PROP_ORIENTATION_META", None)
+    if prop is None:
+        return 0
+    try:
+        degrees = round(float(capture.get(prop)))
+    except (TypeError, ValueError):
+        return 0
+    return degrees % 360 if degrees > 0 else 0
+
+
 class VideoSource:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -35,6 +47,7 @@ class VideoSource:
         self.width = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.codec = self._fourcc()
+        self.rotation = self._rotation()
         self._next_index: int | None = 0  # decoder position right after opening
         self.sequential_reads = 0
         self.seeks = 0
@@ -75,6 +88,11 @@ class VideoSource:
 
     def release(self) -> None:
         self._capture.release()
+
+    def _rotation(self) -> int:
+        """Rotation the container asks for (0, 90, 180 or 270). OpenCV applies it, so frames of a 90/270 file
+        come out upright — which puts the sensor's readout along the frame's columns."""
+        return capture_rotation(self._capture)
 
     def _fourcc(self) -> str:
         code = int(self._capture.get(cv2.CAP_PROP_FOURCC))

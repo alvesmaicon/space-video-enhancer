@@ -19,6 +19,7 @@ from space_video_enhancer.settings import (
     CaptureSettings,
     DeinterlaceMode,
     NormalizedRect,
+    ReadoutAxis,
     StabilizationMode,
     StabilizationSettings,
     clamp_unit,
@@ -79,6 +80,22 @@ DEINTERLACE_DESCRIPTIONS: dict[DeinterlaceMode, str] = {
     DeinterlaceMode.FIELD: (
         "Descarta o campo ímpar em todo o frame e o reconstrói a partir do par: elimina qualquer pente, mas "
         "reduz o detalhe vertical à metade."
+    ),
+}
+READOUT_AXIS_OPTIONS: list[tuple[str, ReadoutAxis]] = [
+    ("Automático", ReadoutAxis.AUTO),
+    ("Linhas (topo → base)", ReadoutAxis.ROWS),
+    ("Colunas (esquerda → direita)", ReadoutAxis.COLUMNS),
+]
+READOUT_AXIS_DESCRIPTIONS: dict[ReadoutAxis, str] = {
+    ReadoutAxis.AUTO: (
+        "A análise da oscilação descobre em que direção o sensor leu o quadro (a rotação gravada no arquivo "
+        "desempata); até ela terminar, linhas."
+    ),
+    ReadoutAxis.ROWS: "O sensor leu de cima para baixo: gravação na horizontal (paisagem).",
+    ReadoutAxis.COLUMNS: (
+        "O sensor leu da esquerda para a direita no quadro: celular em pé — as linhas do sensor são as colunas "
+        "do vídeo."
     ),
 }
 WOBBLE_TOOLTIP = (
@@ -153,12 +170,16 @@ class StabilizationTab(TabPage):
         self.rolling_shutter_slider.setToolTip(ROLLING_SHUTTER_TOOLTIP)
         self.wobble_checkbox = QCheckBox("Compensar a oscilação do rolling shutter (jello) automaticamente")
         self.wobble_checkbox.setToolTip(WOBBLE_TOOLTIP)
+        self.readout_axis_combo = enum_combo(READOUT_AXIS_OPTIONS)
+        for index, (_label, axis) in enumerate(READOUT_AXIS_OPTIONS):
+            self.readout_axis_combo.setItemData(index, READOUT_AXIS_DESCRIPTIONS[axis], Qt.ItemDataRole.ToolTipRole)
         self.capture_info_label = QLabel()
         self.capture_info_label.setObjectName("hintLabel")
         self.capture_info_label.setWordWrap(True)
         self.deinterlace_combo.currentIndexChanged.connect(self._handle_deinterlace_changed)
         self.rolling_shutter_slider.valueChanged.connect(lambda _value: self.captureChanged.emit())
         self.wobble_checkbox.toggled.connect(lambda _checked: self.captureChanged.emit())
+        self.readout_axis_combo.currentIndexChanged.connect(self._handle_readout_axis_changed)
 
         self.mode_combo.currentIndexChanged.connect(self._handle_mode_changed)
         self.intensity_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
@@ -188,11 +209,13 @@ class StabilizationTab(TabPage):
                 form_rows(("Desentrelaçar", self.deinterlace_combo)),
                 self.rolling_shutter_slider,
                 self.wobble_checkbox,
+                form_rows(("Leitura do sensor", self.readout_axis_combo)),
                 self.capture_info_label,
             ),
         )
         self._update_hint()
         self._update_deinterlace_tooltip()
+        self._update_readout_axis_tooltip()
 
     def mode(self) -> StabilizationMode:
         return combo_enum(self.mode_combo, StabilizationMode, StabilizationMode.OFF)
@@ -207,7 +230,11 @@ class StabilizationTab(TabPage):
             zoom_out=self.zoom_out_checkbox.isChecked(),
             rolling_shutter=clamp_unit(self.rolling_shutter_slider.value() / 100.0),
             rolling_shutter_auto=self.wobble_checkbox.isChecked(),
+            readout_axis=self.readout_axis(),
         )
+
+    def readout_axis(self) -> ReadoutAxis:
+        return combo_enum(self.readout_axis_combo, ReadoutAxis, ReadoutAxis.AUTO)
 
     def deinterlace_mode(self) -> DeinterlaceMode:
         return combo_enum(self.deinterlace_combo, DeinterlaceMode, DeinterlaceMode.OFF)
@@ -234,11 +261,13 @@ class StabilizationTab(TabPage):
             self.zoom_out_checkbox,
             self.rolling_shutter_slider,
             self.wobble_checkbox,
+            self.readout_axis_combo,
         )
         for widget in widgets:
             widget.blockSignals(True)
         try:
             select_combo_data(self.mode_combo, settings.mode.value)
+            select_combo_data(self.readout_axis_combo, settings.readout_axis.value)
             self.intensity_slider.slider.setValue(round(settings.intensity * 100))
             self.smoothing_slider.slider.setValue(round(settings.temporal_smoothing * 100))
             self.rolling_shutter_slider.slider.setValue(round(settings.rolling_shutter * 100))
@@ -249,6 +278,7 @@ class StabilizationTab(TabPage):
             for widget in widgets:
                 widget.blockSignals(False)
         self._update_hint()
+        self._update_readout_axis_tooltip()
 
     def update_controls_state(self, has_video: bool) -> None:
         """Enable only what the current mode uses."""
@@ -265,6 +295,7 @@ class StabilizationTab(TabPage):
         self.deinterlace_combo.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.rolling_shutter_slider.setEnabled(controls_enabled)
         self.wobble_checkbox.setEnabled(controls_enabled)
+        self.readout_axis_combo.setEnabled(controls_enabled)
 
     def set_info(self, text: str) -> None:
         self.info_label.setText(text)
@@ -284,6 +315,7 @@ class StabilizationTab(TabPage):
             self.deinterlace_combo,
             self.rolling_shutter_slider,
             self.wobble_checkbox,
+            self.readout_axis_combo,
         ):
             widget.setEnabled(enabled)
 
@@ -293,6 +325,13 @@ class StabilizationTab(TabPage):
 
     def _update_deinterlace_tooltip(self) -> None:
         self.deinterlace_combo.setToolTip(DEINTERLACE_DESCRIPTIONS[self.deinterlace_mode()])
+
+    def _handle_readout_axis_changed(self, _index: int) -> None:
+        self._update_readout_axis_tooltip()
+        self.captureChanged.emit()
+
+    def _update_readout_axis_tooltip(self) -> None:
+        self.readout_axis_combo.setToolTip(READOUT_AXIS_DESCRIPTIONS[self.readout_axis()])
 
     def _handle_mode_changed(self, _index: int) -> None:
         self._update_hint()
