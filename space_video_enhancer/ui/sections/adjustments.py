@@ -362,8 +362,10 @@ class AdjustmentsSection(WindowState):
             shift = trace.get("rolling_shutter.shift_px")
             if isinstance(shift, (list, tuple)) and len(shift) == 2:
                 facts.append(f"rolling shutter: movimento {shift[0]:+.1f}, {shift[1]:+.1f} px/frame")
+            elif trace.get("rolling_shutter.result") == "no_motion":
+                facts.append("rolling shutter: sem movimento mensurável neste frame (primeiro frame ou sem textura)")
             else:
-                facts.append("rolling shutter: aguardando o movimento entre frames (reproduza ou avance um frame)")
+                facts.append("rolling shutter: aguardando o render")
         self.stabilization_tab.set_capture_info(" · ".join(facts) + ("." if facts else ""))
 
     def _sync_stabilization_preview(self) -> None:

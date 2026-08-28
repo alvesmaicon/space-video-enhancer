@@ -28,9 +28,11 @@ import cv2
 import numpy as np
 
 from space_video_enhancer.export.ffmpeg import AudioSegment, EncoderChoice, build_export_command, source_has_audio
+from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend, ProcessingContext
 from space_video_enhancer.pipeline.geometry import ensure_even_size, fit_to_canvas
 from space_video_enhancer.pipeline.render import build_context, render_frame
+from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.sequence import Clip, ClipSource, ExportSegment, Sequence
 from space_video_enhancer.settings import RenderSettings
@@ -389,6 +391,21 @@ def _run_export(
             renderers[clip_index] = renderer
         return renderer
 
+    def prepare(clip_index: int, frame_index: int, frame: np.ndarray) -> None:
+        """On the export thread, before dispatch: the clip's renderer, and the frame before a segment's first one.
+
+        The rolling-shutter unskew measures motion against the previous frame; at the start of a segment
+        (a cut, a clip boundary, the export range) that frame is outside the run, so it is read here on
+        purpose — the readers are not thread-safe, which is why this cannot happen inside ``process``.
+        """
+        renderer = renderer_for(clip_index, frame)
+        settings = renderer.settings
+        if settings.stabilization.corrects_rolling_shutter and needs_previous_frame(renderer.state, frame_index):
+            previous = readers.read(sequence.clips[clip_index].source.path, frame_index - 1)
+            if previous is not None:
+                previous_prepared, _comb = prepare_source(previous, settings.capture.deinterlace)
+                prime_with_previous(previous_prepared, frame_index - 1, renderer.state)
+
     def process(frame: np.ndarray, clip_index: int, frame_index: int, sequential: bool) -> np.ndarray:
         renderer = renderers[clip_index]
         trace = RenderTrace()
@@ -406,7 +423,7 @@ def _run_export(
         metrics.record(trace.finish())
         return np.ascontiguousarray(ensure_even_size(rendered))
 
-    renderer_for(first_clip, first_frame)
+    prepare(first_clip, first_index, first_frame)
     first_processed = process(first_frame, first_clip, first_index, True)
     height, width = first_processed.shape[:2]
     sources = sequence.source_paths
@@ -475,7 +492,7 @@ def _run_export(
                 renderer_for(clip_index, frame)
                 write(process(frame, clip_index, frame_index, True))
         else:
-            _run_parallel(frames, renderer_for, process, write, worker_count)
+            _run_parallel(frames, prepare, process, write, worker_count)
         read_failed = processed_frames < total
 
         report(processed_frames, force=True)
@@ -533,7 +550,7 @@ def _iter_frames(readers: _SourceReaders, request: ExportRequest) -> Iterator[tu
 
 def _run_parallel(
     frames: Iterator[tuple[int, int, np.ndarray]],
-    prepare: Callable[[int, np.ndarray], object],
+    prepare: Callable[[int, int, np.ndarray], object],
     process: Callable[[np.ndarray, int, int, bool], np.ndarray],
     write: Callable[[np.ndarray], None],
     worker_count: int,
@@ -550,7 +567,7 @@ def _run_parallel(
                     exhausted = True
                     break
                 clip_index, frame_index, frame = item
-                prepare(clip_index, frame)
+                prepare(clip_index, frame_index, frame)
                 pending.append(executor.submit(process, frame, clip_index, frame_index, False))
             if not pending:
                 break

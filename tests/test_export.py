@@ -32,6 +32,7 @@ from space_video_enhancer.settings import (
     NormalizedRect,
     RenderSettings,
     RotationMode,
+    StabilizationSettings,
 )
 from space_video_enhancer.timeline import FrameRange
 from tests.conftest import make_textured_frame
@@ -407,3 +408,18 @@ def test_sequences_with_different_fps_are_refused_before_ffmpeg_starts(tmp_path:
         cancel=threading.Event(),
     )
     assert not result.success and "mesmo fps" in result.message
+
+
+@requires_ffmpeg
+def test_rolling_shutter_export_measures_motion_at_every_segment_start(tmp_path: Path) -> None:
+    """Cuts split the run; the unskew still gets a previous frame at each restart (read on purpose)."""
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source)
+    settings = RenderSettings(stabilization=StabilizationSettings(rolling_shutter=0.7))
+    request = _request(source, output, settings, 3, cuts=((4, 6),))
+    assert request.effective_worker_count == 1, "the unskew is sequential"
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event())
+    assert result.success, result.message
+    assert result.processed_frames == 9 and int(_probe_video(output)["nb_read_frames"]) == 9
+    assert "stabilize" in result.metrics["render"]["stages"]

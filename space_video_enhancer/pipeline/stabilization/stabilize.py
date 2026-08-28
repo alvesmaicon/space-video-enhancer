@@ -136,6 +136,31 @@ def unskew_rolling_shutter(
     return corrected
 
 
+def needs_previous_frame(state: StabilizationState | None, frame_index: int | None) -> bool:
+    """True when the rolling-shutter unskew of ``frame_index`` has no previous frame to measure motion against.
+
+    That is the case on a fresh state (the memory restarts whenever a stabilization setting changes),
+    after a jump on the timeline, or when this very frame was already measured and found no motion.
+    """
+    if state is None or frame_index is None or frame_index <= 0:
+        return False
+    if state.last_transform_index == frame_index:
+        return state.last_transform is None
+    return state.prev_gray is None or state.breaks_sequence(frame_index)
+
+
+def prime_with_previous(previous_frame: np.ndarray, previous_index: int, state: StabilizationState) -> None:
+    """Remember ``previous_frame`` as the frame before the one about to be rendered, so its motion can be measured.
+
+    Callers decode it on purpose (the preview when paused on a frame, the export at the start of a
+    segment); any "no motion" cached for the current frame is forgotten so the estimate runs again.
+    """
+    gray, _scale = estimators.analysis_gray(previous_frame)
+    state.remember_gray(gray, previous_index)
+    state.remember_transform(None, None)
+    state.cell_memory = None
+
+
 def estimate_correction(
     frame: np.ndarray,
     settings: StabilizationSettings,

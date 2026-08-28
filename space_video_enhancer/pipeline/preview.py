@@ -21,6 +21,7 @@ from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect, normalized_through_geometry
 from space_video_enhancer.pipeline.render import render_frame
+from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import GeometrySettings, ImageFilterSelection, RenderSettings, StabilizationSettings
 from space_video_enhancer.telemetry.trace import RenderTrace
@@ -190,6 +191,20 @@ def render_preview(
     trace.note("deinterlace.mode", request.settings.capture.deinterlace.value)
     trace.note("deinterlace.comb", round(comb, 4))
     source = downscale_to_limit(prepared, request.size_limit)
+    if (
+        request.settings.stabilization.corrects_rolling_shutter
+        and video is not None
+        and needs_previous_frame(state, request.frame_index)
+    ):
+        # Paused on a frame (or after a jump) there is nothing to measure motion against: fetch the frame before.
+        assert state is not None
+        with trace.stage("previous"):
+            previous = video.read_frame(request.frame_index - 1)
+        if previous is not None:
+            previous_prepared, _comb = prepare_source(previous, request.settings.capture.deinterlace)
+            prime_with_previous(
+                downscale_to_limit(previous_prepared, request.size_limit), request.frame_index - 1, state
+            )
     reference = request.stabilization_reference
     if reference is not None:
         reference = downscale_to_limit(reference, request.size_limit)

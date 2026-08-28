@@ -140,3 +140,27 @@ def test_render_preview_carries_the_stabilizer_motion_overlay(textured_frame: np
     assert np.all((second.motion.current >= -0.05) & (second.motion.current <= 1.05)), "normalized coordinates"
     off = render_preview(_preview_request(textured_frame, 3, frame_index=3), state, None)
     assert off.motion is None, "no overlay without stabilization"
+
+
+def test_render_preview_fetches_the_previous_frame_for_the_rolling_shutter_when_paused(ui_video: Path) -> None:
+    """Paused on frame 5 with a fresh memory there is nothing to measure motion against: the worker reads frame 4."""
+    settings = RenderSettings(stabilization=StabilizationSettings(rolling_shutter=0.8))
+    video = VideoSource(ui_video)
+    try:
+        state = StabilizationState()
+        result = render_preview(_preview_request(None, 1, frame_index=5, settings=settings), state, None, video=video)
+        assert "previous" in result.trace.stages, "the frame before was decoded on purpose"
+        assert result.trace.notes["rolling_shutter.result"] in ("applied", "negligible")
+        assert "rolling_shutter.shift_px" in result.trace.notes
+        again = render_preview(_preview_request(None, 2, frame_index=5, settings=settings), state, None, video=video)
+        assert "previous" not in again.trace.stages, "the same frame again: the motion is remembered"
+        assert again.trace.notes["rolling_shutter.result"] == result.trace.notes["rolling_shutter.result"]
+
+        first = render_preview(
+            _preview_request(None, 3, frame_index=0, settings=settings), StabilizationState(), None, video=video
+        )
+        assert first.trace.notes["rolling_shutter.result"] == "no_motion", "frame 0 has no frame before it"
+        plain = render_preview(_preview_request(None, 4, frame_index=5), StabilizationState(), None, video=video)
+        assert "previous" not in plain.trace.stages, "without the unskew nothing extra is decoded"
+    finally:
+        video.release()
