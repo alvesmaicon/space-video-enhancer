@@ -18,6 +18,7 @@ from space_video_enhancer.settings import (
 )
 from space_video_enhancer.telemetry.diff import diff as diff_settings
 from space_video_enhancer.telemetry.log import get_logger, log_event
+from space_video_enhancer.ui.images import device_pixel_ratio
 from space_video_enhancer.ui.preview_worker import PreviewImages, ThumbnailImages
 from space_video_enhancer.ui.sections.state import WindowState
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, select_combo_data
@@ -308,7 +309,7 @@ class PreviewSection(WindowState):
 
         settings = self._current_render_settings()
         settings = replace(settings, filters=replace(settings.filters, scale_factor=1.0))
-        ratio = self.devicePixelRatioF()  # render thumbnails in device pixels so Retina shows them crisp
+        ratio = device_pixel_ratio(self)  # device pixels so Retina shows them crisp (never self.devicePixelRatioF())
         icon_size = (round(THUMBNAIL_SIZE.width() * ratio), round(THUMBNAIL_SIZE.height() * ratio))
         reference = None
         if self.stabilization_reference_frame is not None:

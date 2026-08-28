@@ -37,6 +37,7 @@ from PySide6.QtWidgets import QMenu, QScrollBar, QSizePolicy, QWidget
 
 from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.ui.format import format_timecode
+from space_video_enhancer.ui.images import device_pixel_ratio
 
 RULER_HEIGHT = 22
 TRACK_GAP = 4
@@ -638,7 +639,7 @@ class TimelineWidget(QWidget):
         self._thumbnail_timer.stop()
         if self.frame_count <= 0:
             return
-        ratio = self.devicePixelRatioF()
+        ratio = device_pixel_ratio(self)
         _width, height = self.thumbnail_size()
         key = (round(height * ratio), ratio)
         if self._thumbnail_key != key:

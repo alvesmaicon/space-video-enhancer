@@ -17,6 +17,7 @@ from space_video_enhancer.pipeline import denoise as denoise_module
 from space_video_enhancer.pipeline import filters as filters_module
 from space_video_enhancer.pipeline.preview import PreviewRequest
 from space_video_enhancer.settings import DenoiseMode, RenderSettings
+from space_video_enhancer.ui.images import device_pixel_ratio
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages
 from space_video_enhancer.ui.tabs.base import select_combo_data
@@ -83,6 +84,34 @@ def test_denoise_estimate_is_read_from_the_render_trace(
     wait_until(app, lambda: "luminância" in window.noise_tab.info_label.text(), what="denoise estimate label")
     assert estimate_threads, "the pipeline still estimates (on the worker)"
     assert threading.main_thread().name not in estimate_threads
+
+
+def test_opening_the_filters_tab_renders_thumbnails_without_crashing(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    """Regression: reading the device pixel ratio for the thumbnails must not abort the process.
+
+    ``QWidget.devicePixelRatioF()`` on the main window aborts under PySide6 6.10 (a QThread-still-running
+    fatal); the section reads it from the widget's screen instead. Before the fix this switch crashed the
+    interpreter the moment the Filtros tab asked for its preset thumbnails.
+    """
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    window.settings_tabs.setCurrentIndex(window._filters_tab_index)
+    wait_until(
+        app,
+        lambda: (
+            window._applied_thumbnail_generation == window._thumbnail_generation and window._thumbnail_generation > 0
+        ),
+        what="preset thumbnails",
+    )
+    assert any(not button.icon().isNull() for button in window.filters_tab.buttons.values()), "thumbnails were applied"
+
+
+def test_reading_the_device_pixel_ratio_off_the_main_window_is_safe(app: QApplication, window: MainWindow) -> None:
+    """The helper the thumbnails use must never call the aborting ``QMainWindow.devicePixelRatioF()``."""
+    ratio = device_pixel_ratio(window)
+    assert ratio > 0.0
 
 
 def test_thumbnails_are_requested_in_device_pixels(app: QApplication) -> None:
