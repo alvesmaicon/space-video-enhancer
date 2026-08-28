@@ -10,11 +10,12 @@ Everything here is pure and immutable; editing operations return a new :class:`S
 from __future__ import annotations
 
 import bisect
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from space_video_enhancer.settings import RenderSettings
+from space_video_enhancer.settings import RenderSettings, RetimingMode
 from space_video_enhancer.timeline import (
     FrameRange,
     RangeLike,
@@ -60,6 +61,41 @@ def timeline_offset(local_source: int, source_fps: float, timeline_fps: float) -
     if _rates_match(source_fps, timeline_fps):
         return local_source
     return round(local_source * timeline_fps / source_fps)
+
+
+@dataclass(frozen=True)
+class RetimeSample:
+    """Which source frame(s) an output frame is built from when a clip is retimed to the timeline.
+
+    ``a`` and ``b`` are absolute source frame indices; the output is ``(1 - weight)·a + weight·b`` (blended
+    or motion-interpolated per ``mode``). ``a == b`` (or a zero weight, or ``NEAREST``) means a single frame.
+    """
+
+    a: int
+    b: int
+    weight: float
+    mode: RetimingMode = RetimingMode.NEAREST
+
+    @property
+    def is_single(self) -> bool:
+        return self.mode is RetimingMode.NEAREST or self.b == self.a or self.weight <= 0.0
+
+
+def _retime_sample(first: int, last: int, position: float, mode: RetimingMode) -> RetimeSample:
+    """The sample for an output frame ``position`` source frames past ``first`` (clamped to ``[first, last]``)."""
+    exact = first + position
+    if mode is RetimingMode.NEAREST:
+        frame = min(last, max(first, round(exact)))
+        return RetimeSample(frame, frame, 0.0, mode)
+    low = math.floor(exact)
+    a = min(last, max(first, low))
+    b = min(last, a + 1)
+    weight = 0.0 if b == a else min(1.0, max(0.0, exact - low))
+    if weight <= 1e-6:  # an exact hit (or the clamped edge): a single frame, no in-between
+        return RetimeSample(a, a, 0.0, mode)
+    if weight >= 1.0 - 1e-6:
+        return RetimeSample(b, b, 0.0, mode)
+    return RetimeSample(a, b, weight, mode)
 
 
 @dataclass(frozen=True)
@@ -257,6 +293,28 @@ class Sequence:
         if length == segment.frames.count:
             return tuple(range(start, end + 1))
         return tuple(min(end, start + source_offset(j, clip.fps, self.fps)) for j in range(length))
+
+    def export_samples(self, segment: ExportSegment) -> tuple[RetimeSample, ...]:
+        """One :class:`RetimeSample` per output frame of ``segment``, honouring the clip's retiming mode."""
+        clip = segment.clip
+        first, last = segment.frames.start, segment.frames.end
+        mode = clip.settings.capture.retiming
+        if _rates_match(clip.fps, self.fps):
+            return tuple(RetimeSample(frame, frame, 0.0, mode) for frame in range(first, last + 1))
+        ratio = clip.fps / self.fps
+        length = self.export_segment_length(segment)
+        return tuple(_retime_sample(first, last, index * ratio, mode) for index in range(length))
+
+    def preview_sample(self, timeline_frame: int) -> tuple[int, RetimeSample]:
+        """Clip index and the sample the preview should show at ``timeline_frame`` (its ``a`` is :meth:`locate`)."""
+        index = self.clip_at(timeline_frame)
+        clip = self.clips[index]
+        local = max(0, min(timeline_frame - self.clip_offsets()[index], self._clip_length(clip) - 1))
+        mode = clip.settings.capture.retiming
+        if _rates_match(clip.fps, self.fps):
+            source = min(clip.range.start + local, clip.range.end)
+            return index, RetimeSample(source, source, 0.0, mode)
+        return index, _retime_sample(clip.range.start, clip.range.end, local * clip.fps / self.fps, mode)
 
     @property
     def timeline_count(self) -> int:

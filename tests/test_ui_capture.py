@@ -14,7 +14,13 @@ from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.project import load_project
 from space_video_enhancer.sequence import Clip, ClipSource
-from space_video_enhancer.settings import DeinterlaceMode, ReadoutAxis, RenderSettings, StabilizationSettings
+from space_video_enhancer.settings import (
+    DeinterlaceMode,
+    ReadoutAxis,
+    RenderSettings,
+    RetimingMode,
+    StabilizationSettings,
+)
 from space_video_enhancer.timeline import FrameRange
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
@@ -41,6 +47,9 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     wait_for_preview(app, window)
     clip = window.sequence.clips[0]
     assert clip.settings.capture.deinterlace is DeinterlaceMode.FIELD
+    select_combo_data(tab.retiming_combo, RetimingMode.BLEND.value)
+    wait_for_preview(app, window)
+    assert window.sequence.clips[0].settings.capture.retiming is RetimingMode.BLEND
     trace = window._last_preview.trace
     assert trace["deinterlace.mode"] == "field" and "capture" in trace["stages"]
     assert window.undo_action.text().endswith("captura"), window.undo_action.text()
@@ -74,17 +83,20 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     loaded = load_project(project_path).sequence.clips[0].settings
     assert loaded.capture.deinterlace is DeinterlaceMode.FIELD and loaded.stabilization.rolling_shutter == 0.7
     assert loaded.stabilization.rolling_shutter_auto and loaded.stabilization.readout_axis is ReadoutAxis.COLUMNS
+    assert loaded.capture.retiming is RetimingMode.BLEND
 
     select_combo_data(tab.deinterlace_combo, DeinterlaceMode.OFF.value)
     tab.rolling_shutter_slider.setValue(0)
     tab.wobble_checkbox.setChecked(False)
     select_combo_data(tab.readout_axis_combo, ReadoutAxis.AUTO.value)
+    select_combo_data(tab.retiming_combo, RetimingMode.NEAREST.value)
     wait_for_preview(app, window)
     _open(app, window, ui_video)
     assert window._open_project(project_path)
     wait_for_preview(app, window)
     assert tab.deinterlace_combo.currentData() == "field" and tab.rolling_shutter_slider.value() == 70
     assert tab.wobble_checkbox.isChecked() and tab.readout_axis_combo.currentData() == "columns"
+    assert tab.retiming_combo.currentData() == "blend"
 
 
 def _drag(widget: object, start: QPointF, end: QPointF, button: Qt.MouseButton) -> None:

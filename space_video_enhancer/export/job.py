@@ -17,7 +17,7 @@ import logging
 import subprocess
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -28,6 +28,7 @@ import cv2
 import numpy as np
 
 from space_video_enhancer.export.ffmpeg import AudioSegment, EncoderChoice, build_export_command, source_has_audio
+from space_video_enhancer.pipeline import retime
 from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend, ProcessingContext
 from space_video_enhancer.pipeline.geometry import ensure_even_size, fit_to_canvas
@@ -653,27 +654,48 @@ def _run_export(
     return finish(ExportResult(True, "", processed_frames, total), "export.finish")
 
 
+class _SegmentReader:
+    """Decode source frames for one segment, keeping the last few so a blend reuses a neighbour, not a re-seek."""
+
+    def __init__(self, readers: _SourceReaders, path: Path, window: int = 3) -> None:
+        self._readers = readers
+        self._path = path
+        self._window = window
+        self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
+
+    def __call__(self, index: int) -> np.ndarray | None:
+        frame = self._cache.get(index)
+        if frame is None:
+            frame = self._readers.read(self._path, index)
+            if frame is not None:
+                self._cache[index] = frame
+                while len(self._cache) > self._window:
+                    self._cache.popitem(last=False)
+        return frame
+
+
 def _iter_frames(readers: _SourceReaders, request: ExportRequest) -> Iterator[tuple[int, int, np.ndarray]]:
     """``(clip index, source frame index, frame)`` for every output frame in order; a short stream skips ahead.
 
-    A clip whose fps differs from the timeline is nearest-frame resampled: a source frame repeats when the
-    clip is slower than the timeline and is skipped when it is faster. A repeat is served from a copy of the
-    frame already decoded, so it is never seeked and decoded twice.
+    A clip whose fps differs from the timeline is retimed per its :class:`RetimingMode`: nearest-frame (whole
+    frames repeat or drop), a blend, or a motion-interpolated in-between. The reported source index is the
+    nearer of a blend's two frames, so the wobble track and the stabilizer's continuity still line up.
     """
     sequence = request.sequence
     for segment in request.segments:
-        path = segment.clip.source.path
-        last_index: int | None = None
-        last_frame: np.ndarray | None = None
-        for frame_index in sequence.resampled_export_frames(segment):
-            if frame_index == last_index and last_frame is not None:
-                yield segment.clip_index, frame_index, last_frame.copy()
-                continue
-            frame = readers.read(path, frame_index)
-            if frame is None:
+        read = _SegmentReader(readers, segment.clip.source.path)
+        previous_single: int | None = None
+        for sample in sequence.export_samples(segment):
+            composed = retime.compose(sample, read)
+            if composed is None:
                 break
-            last_index, last_frame = frame_index, frame
-            yield segment.clip_index, frame_index, frame
+            if sample.is_single:
+                if sample.a == previous_single:
+                    composed = composed.copy()  # a repeated nearest frame: a distinct array per output frame
+                previous_single = sample.a
+            else:
+                previous_single = None
+            yield segment.clip_index, (sample.a if sample.weight < 0.5 else sample.b), composed
 
 
 def _run_parallel(

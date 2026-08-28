@@ -21,13 +21,22 @@ from space_video_enhancer.settings import (
     DenoiseMode,
     PreviewRenderMode,
     ReadoutAxis,
+    RetimingMode,
     RotationMode,
     StabilizationMode,
 )
 from space_video_enhancer.ui.widgets.compare_preview import CompareMode
 
 E = TypeVar(
-    "E", DenoiseMode, StabilizationMode, RotationMode, PreviewRenderMode, DeinterlaceMode, CompareMode, ReadoutAxis
+    "E",
+    DenoiseMode,
+    StabilizationMode,
+    RotationMode,
+    PreviewRenderMode,
+    DeinterlaceMode,
+    CompareMode,
+    ReadoutAxis,
+    RetimingMode,
 )
 Section = Union[QWidget, QLayout]
 

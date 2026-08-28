@@ -17,6 +17,7 @@ from typing import Union
 import cv2
 import numpy as np
 
+from space_video_enhancer.pipeline import retime
 from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect, normalized_through_geometry
@@ -24,6 +25,7 @@ from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
+from space_video_enhancer.sequence import RetimeSample
 from space_video_enhancer.settings import GeometrySettings, ImageFilterSelection, RenderSettings, StabilizationSettings
 from space_video_enhancer.telemetry.trace import RenderTrace
 from space_video_enhancer.video import VideoSource
@@ -57,6 +59,8 @@ class PreviewRequest:
     """Width/height of the sequence's export canvas: the result is letterboxed to it like the export does."""
     wobble_track: WobbleTrack | None = None
     """The clip's rolling-shutter wobble analysis (``None`` until it is done, or when not asked for)."""
+    retime: RetimeSample | None = None
+    """How to build the frame when the clip is retimed to the timeline fps; ``None`` or single = plain decode."""
 
 
 @dataclass(frozen=True)
@@ -181,7 +185,12 @@ def render_preview(
         if video is None:
             raise FrameUnavailableError("nenhum vídeo aberto para decodificar o frame")
         with trace.stage("decode"):
-            frame = video.read_frame(request.frame_index)
+            if request.retime is not None and not request.retime.is_single:
+                # Retimed to the timeline fps: blend the two straddling frames (flow is export-only, too slow to scrub).
+                frame = retime.compose(request.retime, video.read_frame, allow_optical_flow=False)
+                trace.note("retime.mode", request.retime.mode.value)
+            else:
+                frame = video.read_frame(request.frame_index)
         if frame is None:
             raise FrameUnavailableError(f"o frame {request.frame_index + 1} não pôde ser decodificado")
         decode_ms = video.last_decode_ms

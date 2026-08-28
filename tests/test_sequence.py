@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from space_video_enhancer.sequence import Clip, ClipSource, Location, Sequence
-from space_video_enhancer.settings import FilterSettings, RenderSettings
+from space_video_enhancer.sequence import Clip, ClipSource, Location, RetimeSample, Sequence
+from space_video_enhancer.settings import CaptureSettings, FilterSettings, RenderSettings, RetimingMode
 from space_video_enhancer.timeline import FrameRange
 
 A = ClipSource(Path("a.mp4"), 100, 30.0, 1920, 1080)
@@ -199,3 +199,44 @@ def test_single_fps_export_frames_are_untouched() -> None:
     for segment in sequence.export_segments():
         frames = sequence.resampled_export_frames(segment)
         assert frames == tuple(range(segment.frames.start, segment.frames.end + 1))
+
+
+def _retimed(source: ClipSource, mode: RetimingMode) -> Clip:
+    return Clip.whole(source, settings=RenderSettings(capture=CaptureSettings(retiming=mode)))
+
+
+def test_export_samples_blend_straddles_the_two_neighbouring_frames() -> None:
+    sequence = Sequence((Clip.whole(A), _retimed(D24, RetimingMode.BLEND)))  # 24 fps clip on a 30 fps timeline
+    samples = sequence.export_samples(sequence.export_segments()[1])
+    assert len(samples) == 30 and sequence.export_segment_length(sequence.export_segments()[1]) == 30
+    assert samples[0] == RetimeSample(0, 0, 0.0, RetimingMode.BLEND) and samples[0].is_single  # exact hit on frame 0
+    assert samples[1].a == 0 and samples[1].b == 1 and samples[1].weight == pytest.approx(0.8)
+    assert samples[2].a == 1 and samples[2].b == 2 and samples[2].weight == pytest.approx(0.6)
+    assert samples[5].weight == pytest.approx(0.0) and samples[5].is_single  # 5 * 0.8 = 4.0, an exact hit
+    assert samples[-1].b <= D24.last_frame  # never straddles past the end of the clip
+
+
+def test_export_samples_on_an_integer_downsample_never_blend() -> None:
+    sequence = Sequence((Clip.whole(A), _retimed(C60, RetimingMode.OPTICAL_FLOW)))  # 60 -> 30 fps, exactly 2:1
+    samples = sequence.export_samples(sequence.export_segments()[1])
+    assert [s.a for s in samples] == list(range(0, 60, 2))
+    assert all(s.is_single for s in samples), "landing on real frames needs no in-between"
+
+
+def test_preview_sample_matches_locate_on_the_nearest_frame() -> None:
+    first = Clip(A, FrameRange(0, 29))  # 30 frames -> the 24 fps clip starts at timeline frame 30
+    blend = RenderSettings(capture=CaptureSettings(retiming=RetimingMode.BLEND))
+    sequence = Sequence((first, Clip(D24, FrameRange(0, 23), settings=blend)))
+    for frame in (0, 15, 29, 30, 59):
+        index, sample = sequence.preview_sample(frame)
+        location = sequence.locate(frame)
+        assert index == location.clip_index and sample.a == location.source_frame  # `a` is the nearest source frame
+    index, sample = sequence.preview_sample(31)  # one frame into the 24 fps clip
+    assert index == 1 and sample.mode is RetimingMode.BLEND and sample.a == 0 and sample.b == 1
+    assert sample.weight == pytest.approx(0.8)
+
+
+def test_a_single_fps_clip_never_retimes_even_in_blend_mode() -> None:
+    sequence = Sequence((_retimed(A, RetimingMode.OPTICAL_FLOW),))  # one 30 fps clip, timeline 30 fps
+    samples = sequence.export_samples(sequence.export_segments()[0])
+    assert all(s.is_single and s.a == s.b for s in samples)  # rates match -> nothing to interpolate

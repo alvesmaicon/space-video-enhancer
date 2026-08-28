@@ -205,6 +205,7 @@ class PreviewSection(WindowState):
         if interactive:
             size_limit = min(size_limit or INTERACTIVE_DENOISE_SIZE_LIMIT, INTERACTIVE_DENOISE_SIZE_LIMIT)
         location = self.sequence.locate(self.current_frame_index)
+        _clip_index, retime_sample = self.sequence.preview_sample(self.current_frame_index)
         clip = self.sequence.clips[location.clip_index]
         source_path = clip.source.path
         if source_path in self._missing_sources:
@@ -230,6 +231,7 @@ class PreviewSection(WindowState):
                 source_path=source_path,
                 canvas_aspect=self._canvas_aspect(),
                 wobble_track=wobble_track,
+                retime=retime_sample,
             )
         )
         self._pending_preview_reason = "settings"

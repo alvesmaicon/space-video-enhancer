@@ -44,6 +44,17 @@ class DeinterlaceMode(str, Enum):
     """Keep one field and interpolate the other everywhere: removes all combing at half the vertical detail."""
 
 
+class RetimingMode(str, Enum):
+    """How a clip whose fps differs from the timeline is resampled onto it (see ``pipeline.retime``)."""
+
+    NEAREST = "nearest"
+    """Show the source frame closest in time; whole frames repeat or drop. Cheapest, can judder."""
+    BLEND = "blend"
+    """Cross-dissolve the two frames straddling each output time. Smoother, ghosts on fast motion."""
+    OPTICAL_FLOW = "optical_flow"
+    """Synthesise the in-between frame along the motion. Best, slowest — export only; the preview blends."""
+
+
 class ReadoutAxis(str, Enum):
     """Which way the sensor's readout runs across the *stored* frame — the axis of the rolling-shutter distortion."""
 
@@ -282,6 +293,8 @@ class CaptureSettings:
     """Artefacts of how the frame was captured, undone before anything else looks at it."""
 
     deinterlace: DeinterlaceMode = DeinterlaceMode.OFF
+    retiming: RetimingMode = RetimingMode.NEAREST
+    """How this clip is resampled when its fps differs from the timeline's (no effect when they match)."""
 
 
 HUE_BAND_NAMES = ("red", "orange", "yellow", "green", "cyan", "blue", "purple", "magenta")

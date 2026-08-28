@@ -28,11 +28,13 @@ from space_video_enhancer.export.job import ExportRequest, _validation_problem, 
 from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble, wobble_window_frames
 from space_video_enhancer.sequence import Clip, ClipSource, Sequence
 from space_video_enhancer.settings import (
+    CaptureSettings,
     CropSettings,
     FilterSettings,
     GeometrySettings,
     NormalizedRect,
     RenderSettings,
+    RetimingMode,
     RotationMode,
     StabilizationSettings,
 )
@@ -490,4 +492,26 @@ def test_mixed_frame_rate_clips_are_retimed_to_one_timeline(tmp_path: Path, work
 
     assert result.success, result.message
     assert result.processed_frames == 36 and result.expected_frames == 36
+    assert int(_probe_video(output)["nb_read_frames"]) == 36
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("mode", [RetimingMode.NEAREST, RetimingMode.BLEND, RetimingMode.OPTICAL_FLOW])
+def test_retiming_modes_all_export_the_same_retimed_frame_count(tmp_path: Path, mode: RetimingMode) -> None:
+    fast, slow, output = tmp_path / "fast.mp4", tmp_path / "slow.mp4", tmp_path / "out.mp4"
+    _write_source_video_at(fast, 24.0, 12)
+    _write_source_video_at(slow, 12.0, 12)
+    a = ClipSource(fast, 12, 24.0, 64, 64)
+    b = ClipSource(slow, 12, 12.0, 64, 64)
+    retimed = RenderSettings(capture=CaptureSettings(retiming=mode))
+    sequence = Sequence((Clip.whole(a), Clip.whole(b, settings=retimed)))
+
+    result = run_export(
+        ExportRequest(sequence, output, 1, FFMPEG or "ffmpeg", LIBX264),
+        progress=lambda *_: None,
+        cancel=threading.Event(),
+    )
+
+    assert result.success, result.message
+    assert result.processed_frames == 36  # 12 (1:1) + 12 doubled to 24; the mode only changes the pixels
     assert int(_probe_video(output)["nb_read_frames"]) == 36
