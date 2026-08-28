@@ -24,7 +24,7 @@ from space_video_enhancer.export.ffmpeg import (
     resolve_encoder,
     source_has_audio,
 )
-from space_video_enhancer.export.job import ExportRequest, run_export
+from space_video_enhancer.export.job import ExportRequest, _validation_problem, run_export
 from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble, wobble_window_frames
 from space_video_enhancer.sequence import Clip, ClipSource, Sequence
 from space_video_enhancer.settings import (
@@ -398,19 +398,16 @@ def test_sequence_export_concatenates_audio_and_fills_silence_for_sources_withou
     assert duration is not None and duration == pytest.approx(26 / 24.0, abs=0.15)
 
 
-def test_sequences_with_different_fps_are_refused_before_ffmpeg_starts(tmp_path: Path) -> None:
+def test_mixed_fps_sequences_pass_validation_and_count_retimed_frames(tmp_path: Path) -> None:
     sequence = Sequence(
         (
-            Clip(ClipSource(tmp_path / "a.mp4", 10, 24.0), FrameRange(0, 9)),
-            Clip(ClipSource(tmp_path / "b.mp4", 10, 29.97), FrameRange(0, 9)),
+            Clip(ClipSource(tmp_path / "a.mp4", 10, 24.0), FrameRange(0, 9)),  # 24 fps -> 10 timeline frames (1:1)
+            Clip(ClipSource(tmp_path / "b.mp4", 20, 48.0), FrameRange(0, 19)),  # 48 fps, 20 source -> 10 frames
         )
     )
-    result = run_export(
-        ExportRequest(sequence, tmp_path / "out.mp4", 1, "ffmpeg", LIBX264),
-        progress=lambda *_: None,
-        cancel=threading.Event(),
-    )
-    assert not result.success and "mesmo fps" in result.message
+    request = ExportRequest(sequence, tmp_path / "out.mp4", 1, "ffmpeg", LIBX264)
+    assert _validation_problem(request) is None  # a different fps no longer refuses the export
+    assert sequence.fps == 24.0 and request.expected_frames == 20
 
 
 @requires_ffmpeg
@@ -463,3 +460,34 @@ def test_wobble_export_analyses_the_clip_first_and_renders_in_parallel(tmp_path:
     cancelled_output = tmp_path / "cancelled.mp4"
     cancelled = run_export(_request(source, cancelled_output, settings, 2), progress=lambda *_: None, cancel=cancel)
     assert cancelled.cancelled and not cancelled.success and not cancelled_output.exists(), "cancelled during the pass"
+
+
+def _write_source_video_at(path: Path, fps: float, frames: int = 12, size: tuple[int, int] = (64, 64)) -> None:
+    width, height = size
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    assert writer.isOpened(), "OpenCV could not open a VideoWriter (mp4v)"
+    base = cv2.resize(make_textured_frame(), (width, height))
+    for index in range(frames):
+        writer.write(np.roll(base, index, axis=1))
+    writer.release()
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("workers", [1, 3])
+def test_mixed_frame_rate_clips_are_retimed_to_one_timeline(tmp_path: Path, workers: int) -> None:
+    fast, slow, output = tmp_path / "fast.mp4", tmp_path / "slow.mp4", tmp_path / "out.mp4"
+    _write_source_video_at(fast, 24.0, 12)
+    _write_source_video_at(slow, 12.0, 12)
+    a = ClipSource(fast, 12, 24.0, 64, 64)
+    b = ClipSource(slow, 12, 12.0, 64, 64)  # half the timeline rate -> every source frame is doubled
+    sequence = Sequence((Clip.whole(a), Clip.whole(b)))
+
+    assert sequence.fps == 24.0  # the first clip sets the timeline rate
+    assert sequence.export_count == 36  # 12 frames 1:1 + 12 frames doubled to 24
+
+    request = ExportRequest(sequence, output, workers, FFMPEG or "ffmpeg", LIBX264)
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event())
+
+    assert result.success, result.message
+    assert result.processed_frames == 36 and result.expected_frames == 36
+    assert int(_probe_video(output)["nb_read_frames"]) == 36

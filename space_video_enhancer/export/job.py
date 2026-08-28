@@ -419,9 +419,6 @@ def _validation_problem(request: ExportRequest) -> str | None:
     sequence = request.sequence
     if sequence.is_empty:
         return "Nenhum clipe na sequencia."
-    mismatch = sequence.fps_mismatch()
-    if mismatch is not None:
-        return mismatch
     if not request.segments:
         return "Os cortes removem o video inteiro: nada a exportar."
     return None
@@ -657,13 +654,25 @@ def _run_export(
 
 
 def _iter_frames(readers: _SourceReaders, request: ExportRequest) -> Iterator[tuple[int, int, np.ndarray]]:
-    """``(clip index, source frame index, frame)`` for every kept run in order; a short stream skips to the next run."""
+    """``(clip index, source frame index, frame)`` for every output frame in order; a short stream skips ahead.
+
+    A clip whose fps differs from the timeline is nearest-frame resampled: a source frame repeats when the
+    clip is slower than the timeline and is skipped when it is faster. A repeat is served from a copy of the
+    frame already decoded, so it is never seeked and decoded twice.
+    """
+    sequence = request.sequence
     for segment in request.segments:
         path = segment.clip.source.path
-        for frame_index in range(segment.frames.start, segment.frames.end + 1):
+        last_index: int | None = None
+        last_frame: np.ndarray | None = None
+        for frame_index in sequence.resampled_export_frames(segment):
+            if frame_index == last_index and last_frame is not None:
+                yield segment.clip_index, frame_index, last_frame.copy()
+                continue
             frame = readers.read(path, frame_index)
             if frame is None:
                 break
+            last_index, last_frame = frame_index, frame
             yield segment.clip_index, frame_index, frame
 
 
