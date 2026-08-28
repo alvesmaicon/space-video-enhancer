@@ -230,6 +230,8 @@ class StabilizationSettings:
     zoom_out: bool = False
     rolling_shutter: float = 0.0
     """Rolling-shutter skew to undo, as the sensor readout time over the frame period (0 = off, 1 = a full frame)."""
+    rolling_shutter_auto: bool = False
+    """Also undo the *wobble* (jello) measured from how the motion varies down the frame; needs no readout time."""
 
     @property
     def enabled(self) -> bool:
@@ -237,7 +239,7 @@ class StabilizationSettings:
 
     @property
     def corrects_rolling_shutter(self) -> bool:
-        return self.rolling_shutter > 0.0
+        return self.rolling_shutter > 0.0 or self.rolling_shutter_auto
 
     @property
     def requires_sequential_processing(self) -> bool:

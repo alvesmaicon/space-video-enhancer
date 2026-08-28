@@ -81,6 +81,12 @@ DEINTERLACE_DESCRIPTIONS: dict[DeinterlaceMode, str] = {
         "reduz o detalhe vertical à metade."
     ),
 }
+WOBBLE_TOOLTIP = (
+    "Com tremor forte, a velocidade da câmera muda enquanto o sensor lê o frame e cada frame sai esticado ou "
+    "inclinado de um jeito diferente (jello). Isso é medido comparando o movimento do topo e da base do quadro "
+    "entre frames e desfeito sem precisar do percentual de leitura. Não corrige a inclinação constante de uma "
+    "panorâmica — para essa, use o slider."
+)
 ROLLING_SHUTTER_TOOLTIP = (
     "Desfaz a inclinação que o sensor deixa quando a câmera se move (postes que tombam, imagem que estica): "
     "cada linha é reposicionada pelo movimento medido entre frames. O valor é quanto do intervalo entre "
@@ -143,11 +149,14 @@ class StabilizationTab(TabPage):
             )
         self.rolling_shutter_slider = LabeledSlider("Correção de rolling shutter", 0, 100, 0, display=format_percent)
         self.rolling_shutter_slider.setToolTip(ROLLING_SHUTTER_TOOLTIP)
+        self.wobble_checkbox = QCheckBox("Compensar a oscilação do rolling shutter (jello) automaticamente")
+        self.wobble_checkbox.setToolTip(WOBBLE_TOOLTIP)
         self.capture_info_label = QLabel()
         self.capture_info_label.setObjectName("hintLabel")
         self.capture_info_label.setWordWrap(True)
         self.deinterlace_combo.currentIndexChanged.connect(self._handle_deinterlace_changed)
         self.rolling_shutter_slider.valueChanged.connect(lambda _value: self.captureChanged.emit())
+        self.wobble_checkbox.toggled.connect(lambda _checked: self.captureChanged.emit())
 
         self.mode_combo.currentIndexChanged.connect(self._handle_mode_changed)
         self.intensity_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
@@ -176,6 +185,7 @@ class StabilizationTab(TabPage):
                 "Artefatos de captura",
                 form_rows(("Desentrelaçar", self.deinterlace_combo)),
                 self.rolling_shutter_slider,
+                self.wobble_checkbox,
                 self.capture_info_label,
             ),
         )
@@ -194,6 +204,7 @@ class StabilizationTab(TabPage):
             auto_crop=self.auto_crop_checkbox.isChecked(),
             zoom_out=self.zoom_out_checkbox.isChecked(),
             rolling_shutter=clamp_unit(self.rolling_shutter_slider.value() / 100.0),
+            rolling_shutter_auto=self.wobble_checkbox.isChecked(),
         )
 
     def deinterlace_mode(self) -> DeinterlaceMode:
@@ -220,6 +231,7 @@ class StabilizationTab(TabPage):
             self.auto_crop_checkbox,
             self.zoom_out_checkbox,
             self.rolling_shutter_slider,
+            self.wobble_checkbox,
         )
         for widget in widgets:
             widget.blockSignals(True)
@@ -228,6 +240,7 @@ class StabilizationTab(TabPage):
             self.intensity_slider.slider.setValue(round(settings.intensity * 100))
             self.smoothing_slider.slider.setValue(round(settings.temporal_smoothing * 100))
             self.rolling_shutter_slider.slider.setValue(round(settings.rolling_shutter * 100))
+            set_checked_silently(self.wobble_checkbox, settings.rolling_shutter_auto)
             set_checked_silently(self.zoom_out_checkbox, settings.zoom_out)
             set_checked_silently(self.auto_crop_checkbox, settings.auto_crop and not settings.zoom_out)
         finally:
@@ -249,6 +262,7 @@ class StabilizationTab(TabPage):
         self.reference_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
         self.deinterlace_combo.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.rolling_shutter_slider.setEnabled(controls_enabled)
+        self.wobble_checkbox.setEnabled(controls_enabled)
 
     def set_info(self, text: str) -> None:
         self.info_label.setText(text)
@@ -267,6 +281,7 @@ class StabilizationTab(TabPage):
             self.zoom_out_checkbox,
             self.deinterlace_combo,
             self.rolling_shutter_slider,
+            self.wobble_checkbox,
         ):
             widget.setEnabled(enabled)
 

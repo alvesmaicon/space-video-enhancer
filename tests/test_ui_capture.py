@@ -43,9 +43,11 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     assert window.undo_action.text().endswith("captura"), window.undo_action.text()
 
     tab.rolling_shutter_slider.setValue(70)
+    tab.wobble_checkbox.setChecked(True)
     wait_for_preview(app, window)
     settings = window.sequence.clips[0].settings.stabilization
     assert settings.rolling_shutter == pytest.approx(0.7) and settings.requires_sequential_processing
+    assert settings.rolling_shutter_auto
     assert "exportação sequencial" not in tab.info_label.text(), "the stabilization mode itself is still off"
     assert "rolling shutter" in tab.capture_info_label.text()
     window.transport.set_value(1)  # a second consecutive frame gives the unskew its motion estimate
@@ -56,14 +58,17 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     assert window._write_project(project_path)
     loaded = load_project(project_path).sequence.clips[0].settings
     assert loaded.capture.deinterlace is DeinterlaceMode.FIELD and loaded.stabilization.rolling_shutter == 0.7
+    assert loaded.stabilization.rolling_shutter_auto
 
     select_combo_data(tab.deinterlace_combo, DeinterlaceMode.OFF.value)
     tab.rolling_shutter_slider.setValue(0)
+    tab.wobble_checkbox.setChecked(False)
     wait_for_preview(app, window)
     _open(app, window, ui_video)
     assert window._open_project(project_path)
     wait_for_preview(app, window)
     assert tab.deinterlace_combo.currentData() == "field" and tab.rolling_shutter_slider.value() == 70
+    assert tab.wobble_checkbox.isChecked()
 
 
 def _drag(widget: object, start: QPointF, end: QPointF, button: Qt.MouseButton) -> None:

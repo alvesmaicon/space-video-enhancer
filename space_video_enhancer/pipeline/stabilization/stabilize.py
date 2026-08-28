@@ -131,7 +131,17 @@ def unskew_rolling_shutter(
         return frame
     displacement = rolling_shutter.center_displacement(delta, frame.shape)
     note("rolling_shutter.shift_px", [round(displacement[0], 2), round(displacement[1], 2)])
-    corrected = rolling_shutter.correct(frame, displacement, settings.rolling_shutter)
+    gradient = (displacement[0] * settings.rolling_shutter, displacement[1] * settings.rolling_shutter)
+    if settings.rolling_shutter_auto:
+        height = int(frame.shape[0])
+        if state.wobble_index != frame_index or frame_index is None:  # once per frame, re-renders reuse it
+            measured = rolling_shutter.row_motion_gradient(state.last_vectors, height) if state.last_vectors else None
+            note("rolling_shutter.gradient_px", None if measured is None else [round(g, 2) for g in measured])
+            state.wobble = rolling_shutter.accumulate_wobble(state.wobble, measured, height)
+            state.wobble_index = frame_index
+        note("rolling_shutter.wobble_px", [round(state.wobble[0], 2), round(state.wobble[1], 2)])
+        gradient = (gradient[0] + state.wobble[0], gradient[1] + state.wobble[1])
+    corrected = rolling_shutter.correct(frame, gradient)
     note("rolling_shutter.result", "applied" if corrected is not frame else "negligible")
     return corrected
 
@@ -159,6 +169,8 @@ def prime_with_previous(previous_frame: np.ndarray, previous_index: int, state: 
     state.remember_gray(gray, previous_index)
     state.remember_transform(None, None)
     state.cell_memory = None
+    state.wobble = (0.0, 0.0)  # unknown at a restart; the accumulation picks it up from here
+    state.wobble_index = None
 
 
 def estimate_correction(

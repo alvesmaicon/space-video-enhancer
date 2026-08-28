@@ -362,6 +362,9 @@ class AdjustmentsSection(WindowState):
             shift = trace.get("rolling_shutter.shift_px")
             if isinstance(shift, (list, tuple)) and len(shift) == 2:
                 facts.append(f"rolling shutter: movimento {shift[0]:+.1f}, {shift[1]:+.1f} px/frame")
+                wobble = trace.get("rolling_shutter.wobble_px")
+                if isinstance(wobble, (list, tuple)) and len(wobble) == 2:
+                    facts.append(f"oscilação compensada {wobble[0]:+.1f}, {wobble[1]:+.1f} px (topo→base)")
             elif trace.get("rolling_shutter.result") == "no_motion":
                 facts.append("rolling shutter: sem movimento mensurável neste frame (primeiro frame ou sem textura)")
             else:

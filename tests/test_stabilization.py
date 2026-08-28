@@ -11,6 +11,7 @@ from space_video_enhancer.pipeline.stabilization.estimators import (
     estimate_translation_shift,
     reference_cache_stats,
 )
+from space_video_enhancer.pipeline.stabilization.global_motion import MotionVectors
 from space_video_enhancer.pipeline.stabilization.stabilize import (
     CORRECTION_BUDGET_FRACTION,
     apply_stabilization,
@@ -385,10 +386,10 @@ def test_rolling_shutter_correction_straightens_a_skewed_frame() -> None:
     skewed = rolling_shutter.skew(scene, (16.0, 0.0), 1.0)  # the scene moved 16 px/frame during a full readout
     top, bottom = _edge_columns(skewed, 2), _edge_columns(skewed, 177)
     assert bottom[0] - top[0] >= 14, "the simulated shutter leans the bars"
-    fixed = rolling_shutter.correct(skewed, (16.0, 0.0), 1.0)
+    fixed = rolling_shutter.correct(skewed, (16.0, 0.0))  # gradient = displacement x readout fraction
     top, bottom = _edge_columns(fixed, 2), _edge_columns(fixed, 177)
     assert abs(bottom[0] - top[0]) <= 1 and abs(top[0] - 60) <= 1, "after correction the bars stand upright"
-    assert rolling_shutter.correct(scene, (0.4, 0.0), 1.0) is scene, "sub-pixel skew is left alone"
+    assert rolling_shutter.correct(scene, (0.4, 0.0)) is scene, "sub-pixel skew is left alone"
 
 
 def test_center_displacement_is_the_opposite_of_where_delta_sends_the_centre() -> None:
@@ -413,3 +414,55 @@ def test_apply_stabilization_unskews_with_the_mode_off_and_needs_the_previous_fr
     top, bottom = _edge_columns(fixed, 2), _edge_columns(fixed, 177)
     assert abs(bottom[0] - top[0]) <= 2, f"bars should be upright after the unskew, got {top} / {bottom}"
     assert apply_stabilization(scene, StabilizationSettings(), frame_index=2, state=state) is scene
+
+
+def _wobbly_sequence(scene: np.ndarray, count: int, amplitude: float) -> tuple[list[np.ndarray], list[float]]:
+    """A static scene seen through a rolling shutter whose vertical stretch oscillates frame to frame (jello)."""
+    gradients = [amplitude * np.sin(2.0 * np.pi * k / 6.0) for k in range(count)]
+    return [rolling_shutter.wobble(scene, (0.0, g)) for g in gradients], gradients
+
+
+def test_row_motion_gradient_reads_the_change_of_wobble_between_frames(textured_frame: np.ndarray) -> None:
+    frames, gradients = _wobbly_sequence(textured_frame, 4, 14.0)
+    state = StabilizationState()
+    assert estimate_inter_frame_transform(frames[0], 0, state, StabilizationMode.AUTO) is None, "primes"
+    estimate_inter_frame_transform(frames[1], 1, state, StabilizationMode.AUTO)
+    measured = rolling_shutter.row_motion_gradient(state.last_vectors, textured_frame.shape[0])
+    assert measured is not None
+    expected = gradients[1] - gradients[0]  # how much the intra-frame distortion changed
+    assert abs(measured[1] - expected) < 2.5 and abs(measured[0]) < 2.5, (measured, expected)
+    few = MotionVectors(
+        state.last_vectors.previous[:6], state.last_vectors.current[:6], np.ones(6, bool), state.last_vectors.size, 0, 1
+    )
+    assert rolling_shutter.row_motion_gradient(few, textured_frame.shape[0]) is None, "too few points: no gradient"
+
+
+def _band_shift(image: np.ndarray, reference: np.ndarray, rows: slice) -> float:
+    """Vertical offset of ``image`` against ``reference`` inside a horizontal band (phase correlation)."""
+    to_gray = lambda frame: cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)[rows, 20:-20]  # noqa: E731
+    (_dx, dy), _response = cv2.phaseCorrelate(to_gray(reference), to_gray(image))
+    return float(dy)
+
+
+def _residual_gradient(image: np.ndarray, reference: np.ndarray) -> float:
+    """How much more the bottom band is displaced than the top one: the wobble left in ``image``."""
+    return _band_shift(image, reference, slice(15, 95)) - _band_shift(image, reference, slice(175, 255))
+
+
+def test_automatic_wobble_compensation_flattens_a_jello_sequence(textured_frame: np.ndarray) -> None:
+    frames, gradients = _wobbly_sequence(textured_frame, 25, 14.0)
+    settings = StabilizationSettings(rolling_shutter_auto=True)
+    assert settings.corrects_rolling_shutter and settings.requires_sequential_processing
+    state = StabilizationState()
+    before: list[float] = []
+    after: list[float] = []
+    for index, frame in enumerate(frames):
+        corrected = apply_stabilization(frame, settings, frame_index=index, state=state)
+        if index >= 3:  # after the first frames the accumulated wobble has caught up
+            before.append(abs(_residual_gradient(frame, textured_frame)))
+            after.append(abs(_residual_gradient(corrected, textured_frame)))
+    assert np.mean(before) > 3.0, "the synthetic jello is visible to the metric"
+    assert np.mean(after) < 0.25 * np.mean(before), (
+        f"residual wobble {np.mean(after):.2f} px vs {np.mean(before):.2f} px"
+    )
+    assert abs(state.wobble[1] - gradients[-1]) < 3.0, (state.wobble, gradients[-1])

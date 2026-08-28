@@ -29,7 +29,7 @@ Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windo
 - **Ruído**: NLMeans desligado, manual, automático pelo frame ou por uma amostra escolhida no preview.
 - **Cor**: contraste, brilho, gama, saturação, temperatura e nitidez com presets de *look*; balanço de branco por região cinza ou *gray world*, tint, ajuste de matiz/saturação/luminância por oito faixas de matiz; trava de exposição para câmeras em auto-exposição.
 - **Geometria**: crop interativo com proporções, rotação 90°/180°/270° e espelhamento.
-- **Artefatos de captura**: desentrelaçamento (detector de "pente" que avisa se o arquivo parece entrelaçado; modo adaptativo refaz só as linhas em movimento, modo campo único remove tudo) e correção de *rolling shutter* a partir do movimento medido entre frames — verticais que tombam em panorâmicas voltam a ficar retas.
+- **Artefatos de captura**: desentrelaçamento (detector de "pente" que avisa se o arquivo parece entrelaçado; modo adaptativo refaz só as linhas em movimento, modo campo único remove tudo) e correção de *rolling shutter*: a inclinação constante de uma panorâmica (slider com o tempo de leitura do sensor) e, automaticamente, a **oscilação** (*jello*) do tremor forte — cada frame esticado ou inclinado de um jeito — medida pela diferença de movimento entre o topo e a base do quadro, sem calibração.
 
 **Exportação**
 - FFmpeg só para encode e mux do áudio original; tenta NVENC/VAAPI e cai para `libx264` sozinho. MP4 `yuv420p` com `+faststart`, pronto para QuickTime, iOS e decoders de hardware.

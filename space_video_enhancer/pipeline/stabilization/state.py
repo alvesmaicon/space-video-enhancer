@@ -41,6 +41,10 @@ class StabilizationState:
     """Which grid cells have been moving with the camera (see ``global_motion``); reset with the sequence."""
     last_vectors: Any = None
     """:class:`global_motion.MotionVectors` of the last inter-frame estimate, for the diagnostic overlay."""
+    wobble: tuple[float, float] = (0.0, 0.0)
+    """Accumulated rolling-shutter wobble of the last frame: how far the bottom of the frame is displaced
+    relative to the top (full-res px, x and y), see :mod:`rolling_shutter`."""
+    wobble_index: int | None = None
 
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
