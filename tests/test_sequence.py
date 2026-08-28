@@ -138,3 +138,64 @@ def test_exposure_reference_and_name_follow_the_clip_through_a_split() -> None:
     assert (left.exposure_reference_frame, right.exposure_reference_frame) == (7, 7)
     assert (left.stabilization_reference_frame, right.stabilization_reference_frame) == (3, 3)
     assert left.with_exposure_reference(None).exposure_reference_frame is None
+
+
+C60 = ClipSource(Path("c.mp4"), 60, 60.0, 1920, 1080)
+D24 = ClipSource(Path("d.mp4"), 24, 24.0, 1920, 1080)
+
+
+def _mixed_sequence() -> Sequence:
+    """A 30 fps timeline: a 30 fps clip, then a 60 fps one (halved) and a 24 fps one (stretched)."""
+    return Sequence(
+        (
+            Clip(A, FrameRange(0, 29)),  # 30 fps -> 30 timeline frames (1:1)
+            Clip(C60, FrameRange(0, 59)),  # 60 fps, 60 source -> 30 timeline frames
+            Clip(D24, FrameRange(0, 23)),  # 24 fps, 24 source -> 30 timeline frames
+        )
+    )
+
+
+def test_timeline_fps_defaults_to_the_first_clip() -> None:
+    sequence = _mixed_sequence()
+    assert sequence.fps == 30.0  # from the first clip, no resampling of it
+    assert sequence.clip_offsets() == (0, 30, 60)
+    assert sequence.timeline_count == 90  # 30 + 30 + 30, all retimed to 30 fps
+
+
+def test_locate_retimes_each_clip_to_the_timeline_rate() -> None:
+    sequence = _mixed_sequence()
+    # The 60 fps clip: timeline frame 30 -> source 0, 59 -> source ~58 (every other source frame).
+    assert sequence.locate(30) == Location(1, 0)
+    assert sequence.locate(45) == Location(1, 30)
+    assert sequence.locate(59) == Location(1, 58)
+    # The 24 fps clip: timeline frame 60 -> source 0, 89 -> source 23 (some source frames repeat).
+    assert sequence.locate(60) == Location(2, 0)
+    assert sequence.locate(89) == Location(2, 23)
+    # Round-trips land back on the timeline frame the source frame first appears at.
+    for frame in (0, 15, 30, 45, 60, 75, 89):
+        location = sequence.locate(frame)
+        assert sequence.locate(sequence.timeline_frame(location.clip_index, location.source_frame)) == location
+
+
+def test_export_resamples_each_clip_and_preserves_duration() -> None:
+    sequence = _mixed_sequence()
+    segments = sequence.export_segments()
+    # 30 fps clip: 1:1. 60 fps clip: halved. 24 fps clip: stretched. Each ends at 30 output frames.
+    assert [sequence.export_segment_length(s) for s in segments] == [30, 30, 30]
+    assert sequence.export_count == 90
+    halved = sequence.resampled_export_frames(segments[1])
+    assert halved == tuple(range(0, 60, 2))  # every other source frame of the 60 fps clip
+    stretched = sequence.resampled_export_frames(segments[2])
+    assert len(stretched) == 30 and stretched[0] == 0 and stretched[-1] == 23
+    assert stretched == tuple(sorted(stretched))  # monotonic; some source frames repeat
+    assert max(stretched.count(f) for f in set(stretched)) == 2  # a frame is shown at most twice
+    # Duration is preserved: each clip keeps its own length in seconds.
+    assert segments[1].seconds == (0.0, 60 / 60.0)  # 1 s of 60 fps footage
+    assert segments[2].seconds == (0.0, 24 / 24.0)  # 1 s of 24 fps footage
+
+
+def test_single_fps_export_frames_are_untouched() -> None:
+    sequence = _sequence()  # all 30 fps
+    for segment in sequence.export_segments():
+        frames = sequence.resampled_export_frames(segment)
+        assert frames == tuple(range(segment.frames.start, segment.frames.end + 1))

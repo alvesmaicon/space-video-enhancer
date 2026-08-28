@@ -30,6 +30,38 @@ FPS_TOLERANCE = 0.01
 DEFAULT_ASPECT_RATIO = 16 / 9
 
 
+def _rates_match(source_fps: float, timeline_fps: float) -> bool:
+    """True when no resampling is needed: same rate (or a rate we cannot use), so timeline == source frames 1:1."""
+    return source_fps <= 0 or timeline_fps <= 0 or abs(source_fps - timeline_fps) <= FPS_TOLERANCE
+
+
+def timeline_length(source_count: int, source_fps: float, timeline_fps: float) -> int:
+    """How many timeline frames a run of ``source_count`` source frames occupies at ``timeline_fps``.
+
+    Nearest-frame resampling preserves the run's *duration*: a 24 fps second (24 frames) becomes 30 on a
+    30 fps timeline. A non-empty run never vanishes (at least one frame), so a kept frame is always shown.
+    """
+    if source_count <= 0:
+        return 0
+    if _rates_match(source_fps, timeline_fps):
+        return source_count
+    return max(1, round(source_count * timeline_fps / source_fps))
+
+
+def source_offset(local_timeline: int, source_fps: float, timeline_fps: float) -> int:
+    """The clip-local source frame nearest ``local_timeline`` timeline frames in (nearest-frame resample)."""
+    if _rates_match(source_fps, timeline_fps):
+        return local_timeline
+    return round(local_timeline * source_fps / timeline_fps)
+
+
+def timeline_offset(local_source: int, source_fps: float, timeline_fps: float) -> int:
+    """Inverse of :func:`source_offset`: the timeline frame nearest ``local_source`` source frames in."""
+    if _rates_match(source_fps, timeline_fps):
+        return local_source
+    return round(local_source * timeline_fps / source_fps)
+
+
 @dataclass(frozen=True)
 class ClipSource:
     """Facts about one video file."""
@@ -173,6 +205,8 @@ class PlaybackRun:
 @dataclass(frozen=True)
 class Sequence:
     clips: tuple[Clip, ...] = ()
+    timeline_fps: float | None = None
+    """The master timeline rate; clips of another fps are retimed to it. ``None`` = the first clip's fps."""
 
     @classmethod
     def single(
@@ -203,11 +237,30 @@ class Sequence:
 
     @property
     def fps(self) -> float:
+        if self.timeline_fps and self.timeline_fps > 0:
+            return self.timeline_fps
         return self.clips[0].fps if self.clips else 30.0
+
+    def _clip_length(self, clip: Clip) -> int:
+        """Timeline frames clip ``clip`` occupies (its whole trimmed range, cuts included), retimed to the timeline."""
+        return timeline_length(clip.timeline_count, clip.fps, self.fps)
+
+    def export_segment_length(self, segment: ExportSegment) -> int:
+        """Output frames a kept run yields after retiming — what the export writes and the encoder receives."""
+        return timeline_length(segment.frames.count, segment.clip.fps, self.fps)
+
+    def resampled_export_frames(self, segment: ExportSegment) -> tuple[int, ...]:
+        """The source frame index behind each output frame of ``segment`` (nearest-frame; may repeat or skip)."""
+        clip = segment.clip
+        start, end = segment.frames.start, segment.frames.end
+        length = self.export_segment_length(segment)
+        if length == segment.frames.count:
+            return tuple(range(start, end + 1))
+        return tuple(min(end, start + source_offset(j, clip.fps, self.fps)) for j in range(length))
 
     @property
     def timeline_count(self) -> int:
-        return sum(clip.timeline_count for clip in self.clips)
+        return sum(self._clip_length(clip) for clip in self.clips)
 
     @property
     def last_timeline_frame(self) -> int:
@@ -215,7 +268,7 @@ class Sequence:
 
     @property
     def export_count(self) -> int:
-        return sum(clip.export_count for clip in self.clips)
+        return sum(self.export_segment_length(segment) for segment in self.export_segments())
 
     @property
     def duration_seconds(self) -> float:
@@ -239,13 +292,13 @@ class Sequence:
         total = 0
         for clip in self.clips:
             offsets.append(total)
-            total += clip.timeline_count
+            total += self._clip_length(clip)
         return tuple(offsets)
 
     def clip_span(self, index: int) -> FrameRange:
         """Timeline frames covered by clip ``index``."""
         offset = self.clip_offsets()[index]
-        return FrameRange(offset, offset + self.clips[index].timeline_count - 1)
+        return FrameRange(offset, offset + self._clip_length(self.clips[index]) - 1)
 
     def clip_at(self, timeline_frame: int) -> int:
         if not self.clips:
@@ -257,20 +310,26 @@ class Sequence:
     def locate(self, timeline_frame: int) -> Location:
         index = self.clip_at(timeline_frame)
         clip = self.clips[index]
-        local = max(0, min(timeline_frame - self.clip_offsets()[index], clip.timeline_count - 1))
-        return Location(index, clip.range.start + local)
+        local = max(0, min(timeline_frame - self.clip_offsets()[index], self._clip_length(clip) - 1))
+        source_local = min(source_offset(local, clip.fps, self.fps), clip.timeline_count - 1)
+        return Location(index, clip.range.start + source_local)
 
     def timeline_frame(self, clip_index: int, source_frame: int) -> int:
         clip = self.clips[clip_index]
-        local = max(0, min(source_frame - clip.range.start, clip.timeline_count - 1))
+        source_local = max(0, min(source_frame - clip.range.start, clip.timeline_count - 1))
+        local = min(timeline_offset(source_local, clip.fps, self.fps), self._clip_length(clip) - 1)
         return self.clip_offsets()[clip_index] + local
 
     def timeline_cuts(self) -> tuple[FrameRange, ...]:
         """Every clip's cuts expressed in timeline frames (adjacent ones across a boundary merge)."""
+        offsets = self.clip_offsets()
         shifted: list[FrameRange] = []
         for index, clip in enumerate(self.clips):
-            offset = self.clip_offsets()[index] - clip.range.start
-            shifted.extend(FrameRange(cut.start + offset, cut.end + offset) for cut in clip.cuts)
+            base = offsets[index]
+            for cut in clip.cuts:
+                start = base + timeline_offset(cut.start - clip.range.start, clip.fps, self.fps)
+                end = base + timeline_offset(cut.end - clip.range.start, clip.fps, self.fps)
+                shifted.append(FrameRange(start, end))
         return normalize_cuts(shifted)
 
     def is_kept(self, timeline_frame: int) -> bool:
@@ -291,11 +350,16 @@ class Sequence:
         offsets = self.clip_offsets()
         runs = []
         for segment in self.export_segments():
-            offset = offsets[segment.clip_index] - segment.clip.range.start
-            span = FrameRange(segment.frames.start + offset, segment.frames.end + offset).clamped(window)
+            clip = segment.clip
+            base = offsets[segment.clip_index]
+            tl_start = base + timeline_offset(segment.frames.start - clip.range.start, clip.fps, self.fps)
+            tl_end = base + timeline_offset(segment.frames.end - clip.range.start, clip.fps, self.fps)
+            span = FrameRange(tl_start, tl_end).clamped(window)
             if span is not None:
-                frames = FrameRange(span.start - offset, span.end - offset)
-                runs.append(PlaybackRun(segment.clip_index, segment.clip, span, frames))
+                src_start = clip.range.start + source_offset(span.start - base, clip.fps, self.fps)
+                src_end = clip.range.start + source_offset(span.end - base, clip.fps, self.fps)
+                frames = FrameRange(min(src_start, src_end), max(src_start, src_end))
+                runs.append(PlaybackRun(segment.clip_index, clip, span, frames))
         return tuple(runs)
 
     # --- editing ----------------------------------------------------------------------------
@@ -308,42 +372,44 @@ class Sequence:
         clips = []
         for index, clip in enumerate(self.clips):
             span = self.clip_span(index)
-            shift = clip.range.start - offsets[index]
+            base = offsets[index]
             local = []
             for cut in normalized:
                 part = cut.clamped(span)
                 if part is not None:
-                    local.append(FrameRange(part.start + shift, part.end + shift))
+                    src_start = clip.range.start + source_offset(part.start - base, clip.fps, self.fps)
+                    src_end = clip.range.start + source_offset(part.end - base, clip.fps, self.fps)
+                    local.append(FrameRange(min(src_start, src_end), max(src_start, src_end)))
             clips.append(clip.with_cuts(local))
-        return Sequence(tuple(clips))
+        return replace(self, clips=tuple(clips))
 
     def add(self, clip: Clip, index: int | None = None) -> Sequence:
         clips = list(self.clips)
         clips.insert(len(clips) if index is None else index, clip)
-        return Sequence(tuple(clips))
+        return replace(self, clips=tuple(clips))
 
     def remove(self, index: int) -> Sequence:
         clips = list(self.clips)
         del clips[index]
-        return Sequence(tuple(clips))
+        return replace(self, clips=tuple(clips))
 
     def move(self, index: int, new_index: int) -> Sequence:
         clips = list(self.clips)
         clip = clips.pop(index)
         clips.insert(max(0, min(new_index, len(clips))), clip)
-        return Sequence(tuple(clips))
+        return replace(self, clips=tuple(clips))
 
     def replace_clip(self, index: int, clip: Clip) -> Sequence:
         clips = list(self.clips)
         clips[index] = clip
-        return Sequence(tuple(clips))
+        return replace(self, clips=tuple(clips))
 
     def with_clip_settings(self, index: int, settings: RenderSettings) -> Sequence:
         return self.replace_clip(index, self.clips[index].with_settings(settings))
 
     def without_empty_clips(self) -> Sequence:
         """Drop clips whose cuts remove every frame (they contribute nothing to the export)."""
-        return Sequence(tuple(clip for clip in self.clips if clip.export_count > 0))
+        return replace(self, clips=tuple(clip for clip in self.clips if clip.export_count > 0))
 
     def for_export(self, start: int | None = None, end: int | None = None) -> Sequence:
         """What leaves the app: the timeline outside ``[start, end]`` becomes cuts, empty clips are dropped."""
@@ -369,4 +435,4 @@ class Sequence:
             return None
         clips = list(self.clips)
         clips[location.clip_index : location.clip_index + 1] = list(halves)
-        return Sequence(tuple(clips))
+        return replace(self, clips=tuple(clips))
