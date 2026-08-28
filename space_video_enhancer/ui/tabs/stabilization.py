@@ -83,9 +83,11 @@ DEINTERLACE_DESCRIPTIONS: dict[DeinterlaceMode, str] = {
 }
 WOBBLE_TOOLTIP = (
     "Com tremor forte, a velocidade da câmera muda enquanto o sensor lê o frame e cada frame sai esticado ou "
-    "inclinado de um jeito diferente (jello). Isso é medido comparando o movimento do topo e da base do quadro "
-    "entre frames e desfeito sem precisar do percentual de leitura. Não corrige a inclinação constante de uma "
-    "panorâmica — para essa, use o slider."
+    "inclinado de um jeito diferente (jello). O trecho do clipe é analisado uma vez, em segundo plano (o progresso "
+    "aparece aqui embaixo): o movimento do topo e da base do quadro é comparado entre frames e a oscilação de "
+    "cada frame é medida contra a média dos vizinhos — meio segundo antes e depois —, então só o tremor rápido é "
+    "corrigido, sem precisar do percentual de leitura. Não corrige a inclinação constante de uma panorâmica — "
+    "para essa, use o slider."
 )
 ROLLING_SHUTTER_TOOLTIP = (
     "Desfaz a inclinação que o sensor deixa quando a câmera se move (postes que tombam, imagem que estica): "

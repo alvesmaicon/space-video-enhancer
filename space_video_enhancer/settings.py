@@ -231,7 +231,8 @@ class StabilizationSettings:
     rolling_shutter: float = 0.0
     """Rolling-shutter skew to undo, as the sensor readout time over the frame period (0 = off, 1 = a full frame)."""
     rolling_shutter_auto: bool = False
-    """Also undo the *wobble* (jello) measured from how the motion varies down the frame; needs no readout time."""
+    """Also undo the *wobble* (jello): the clip is analysed once (see :mod:`pipeline.stabilization.wobble`) and
+    each frame gets the distortion measured for it; needs no readout time."""
 
     @property
     def enabled(self) -> bool:
@@ -242,9 +243,14 @@ class StabilizationSettings:
         return self.rolling_shutter > 0.0 or self.rolling_shutter_auto
 
     @property
+    def corrects_rolling_shutter_skew(self) -> bool:
+        """The slider part: needs the motion since the previous frame (the wobble comes from the clip's analysis)."""
+        return self.rolling_shutter > 0.0
+
+    @property
     def requires_sequential_processing(self) -> bool:
-        """True when frame N depends on frame N-1 (inter-frame motion, temporal smoothing, rolling shutter)."""
-        if self.corrects_rolling_shutter:
+        """True when frame N depends on frame N-1 (inter-frame motion, temporal smoothing, rolling-shutter skew)."""
+        if self.corrects_rolling_shutter_skew:
             return True
         return self.enabled and (
             self.mode.uses_auto_motion or self.mode is StabilizationMode.HYBRID or self.temporal_smoothing > 0.0

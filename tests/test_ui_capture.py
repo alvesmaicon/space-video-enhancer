@@ -16,7 +16,7 @@ from space_video_enhancer.project import load_project
 from space_video_enhancer.settings import DeinterlaceMode
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
-from tests.qt_helpers import pump, wait_for_preview
+from tests.qt_helpers import pump, wait_for_preview, wait_until
 
 
 def _open(app: QApplication, window: MainWindow, ui_video: Path) -> None:
@@ -50,9 +50,18 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     assert settings.rolling_shutter_auto
     assert "exportação sequencial" not in tab.info_label.text(), "the stabilization mode itself is still off"
     assert "rolling shutter" in tab.capture_info_label.text()
+    # The wobble checkbox started an analysis of the clip on its own thread; the preview follows once it lands.
+    wait_until(app, lambda: window._wobble_pending is None and bool(window._wobble_tracks), what="wobble analysis")
+    wait_for_preview(app, window)
+    track = window._wobble_tracks[0]
+    assert track.source == ui_video and track.covers(0, 11) and track.count == 12
+    assert "oscilação compensada" in tab.capture_info_label.text(), tab.capture_info_label.text()
     window.transport.set_value(1)  # a second consecutive frame gives the unskew its motion estimate
     wait_for_preview(app, window)
-    assert window._last_preview.trace.get("rolling_shutter.result") in ("applied", "negligible", "no_motion")
+    trace = window._last_preview.trace
+    assert trace.get("rolling_shutter.result") in ("applied", "negligible", "no_motion")
+    assert "rolling_shutter.wobble_px" in trace, "the analysed wobble reaches the render"
+    assert window._wobble_track_for(window.sequence.clips[0]) is track, "the same range is not analysed twice"
 
     project_path = tmp_path / "capture.svep"
     assert window._write_project(project_path)

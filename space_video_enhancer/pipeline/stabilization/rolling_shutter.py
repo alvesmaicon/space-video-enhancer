@@ -13,8 +13,8 @@ the top. Two things follow, and each has its own fix here:
   frames, tracked points at the top and at the bottom move by different amounts, and the gradient
   of that displacement down the frame is exactly how much the intra-frame distortion changed from
   one frame to the next (Grundmann et al., "Calibration-free rolling shutter removal", 2012). The
-  gradient is fitted robustly over all tracked points and accumulated with a slow decay into the
-  current wobble, which is then undone.
+  gradient is fitted robustly over all tracked points here; summing it over a whole range of frames
+  and pinning the sum down is :mod:`wobble`'s job.
 
 Both corrections are one per-row shift, linear in the row: one ``cv2.remap`` samples row ``y`` at
 ``q + G·(y/h - ½)`` with ``G`` the total gradient (skew plus wobble), in pixels across the height.
@@ -31,11 +31,6 @@ from space_video_enhancer.pipeline.stabilization import transforms
 
 NEGLIGIBLE_SKEW_PX = 0.5
 """Below this much displacement at the top or bottom edge the remap would move nothing visible."""
-WOBBLE_DECAY = 0.97
-"""Per-frame factor on the accumulated wobble. The wobble itself is a sum of measured changes; the decay only
-keeps measurement noise from drifting (it fades in ~30 frames) — a shake oscillates around zero anyway."""
-MAX_WOBBLE_FRACTION = 0.08
-"""Cap on the accumulated wobble, as a fraction of the frame height (a phone's jello stays well below)."""
 GRADIENT_MIN_POINTS = 12
 GRADIENT_MIN_SPREAD = 0.4
 """Tracked points must span this fraction of the height for a gradient down the frame to mean anything."""
@@ -98,17 +93,6 @@ def row_motion_gradient(vectors: Any, frame_height: int) -> tuple[float, float] 
     params, *_rest = np.linalg.lstsq(design[best_inliers], displacement[best_inliers], rcond=None)
     to_full = frame_height / analysis_height
     return float(params[1, 0] * to_full), float(params[1, 1] * to_full)
-
-
-def accumulate_wobble(
-    previous: tuple[float, float], gradient: tuple[float, float] | None, frame_height: int
-) -> tuple[float, float]:
-    """The wobble of this frame from the last one's: decays, then adds how much the distortion changed."""
-    limit = frame_height * MAX_WOBBLE_FRACTION
-    gx, gy = gradient if gradient is not None else (0.0, 0.0)
-    wobble_x = float(np.clip(previous[0] * WOBBLE_DECAY + gx, -limit, limit))
-    wobble_y = float(np.clip(previous[1] * WOBBLE_DECAY + gy, -limit, limit))
-    return wobble_x, wobble_y
 
 
 def skew_maps(frame_shape: tuple[int, ...], gradient: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:

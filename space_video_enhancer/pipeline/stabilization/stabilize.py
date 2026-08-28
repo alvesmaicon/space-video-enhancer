@@ -28,6 +28,7 @@ import numpy as np
 
 from space_video_enhancer.pipeline.stabilization import estimators, rolling_shutter, transforms
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.settings import StabilizationMode, StabilizationSettings, clamp_unit
 from space_video_enhancer.telemetry.trace import note
 
@@ -66,11 +67,13 @@ def apply_stabilization(
     frame_index: int | None = None,
     state: StabilizationState | None = None,
     reference_frame: np.ndarray | None = None,
+    wobble_track: WobbleTrack | None = None,
 ) -> np.ndarray:
     """Return ``frame`` stabilized according to ``settings`` (or unchanged when nothing applies).
 
     ``state`` carries the inter-frame memory (previous frame, accumulated correction);
-    ``reference_frame`` is the locked reference for camera lock / hybrid.
+    ``reference_frame`` is the locked reference for camera lock / hybrid; ``wobble_track`` is the
+    clip's rolling-shutter wobble analysis (see :mod:`wobble`).
     """
     stabilizing = settings.enabled and settings.intensity > 0.0
     if not stabilizing and not settings.corrects_rolling_shutter:
@@ -82,7 +85,7 @@ def apply_stabilization(
         correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
     if settings.corrects_rolling_shutter:
         # Uses the inter-frame motion estimated just above (or estimates a translation when no mode did).
-        frame = unskew_rolling_shutter(frame, settings, frame_index, state)
+        frame = unskew_rolling_shutter(frame, settings, frame_index, state, wobble_track)
     if not stabilizing:
         return frame
 
@@ -112,38 +115,57 @@ def unskew_rolling_shutter(
     settings: StabilizationSettings,
     frame_index: int | None,
     state: StabilizationState | None,
+    wobble_track: WobbleTrack | None = None,
 ) -> np.ndarray:
-    """``frame`` with the rolling-shutter skew of this frame period undone (see :mod:`rolling_shutter`).
+    """``frame`` with its rolling-shutter distortion undone (see :mod:`rolling_shutter`): one remap for both parts.
 
-    The scene displacement comes from the inter-frame transform already estimated for this frame
-    when an automatic mode (or hybrid) ran; camera lock and "off" estimate a plain translation here.
-    Without a previous frame there is no motion to speak of and the frame passes unchanged.
+    The skew (slider) needs the scene displacement since the previous frame: the inter-frame transform
+    already estimated for this frame when an automatic mode (or hybrid) ran, else a plain translation
+    estimated here — without a previous frame in ``state`` there is no motion to speak of. The wobble
+    comes from ``wobble_track`` (the clip's analysis, see :mod:`wobble`) and needs no memory at all.
     """
-    if state is None:
-        note("rolling_shutter.result", "no_state")
+    gradient_x = gradient_y = 0.0
+    contributions = 0
+    if settings.corrects_rolling_shutter_skew:
+        displacement = _scene_displacement(frame, frame_index, state)
+        if displacement is not None:
+            note("rolling_shutter.shift_px", [round(displacement[0], 2), round(displacement[1], 2)])
+            gradient_x += displacement[0] * settings.rolling_shutter
+            gradient_y += displacement[1] * settings.rolling_shutter
+            contributions += 1
+    if settings.rolling_shutter_auto:
+        wobble = None
+        if wobble_track is not None and frame_index is not None:
+            wobble = wobble_track.wobble_at(frame_index, settings.rolling_shutter)
+        if wobble is None:
+            note("rolling_shutter.wobble", "unanalysed")
+        else:
+            height = float(frame.shape[0])
+            note("rolling_shutter.wobble_px", [round(wobble[0] * height, 2), round(wobble[1] * height, 2)])
+            gradient_x += wobble[0] * height
+            gradient_y += wobble[1] * height
+            contributions += 1
+    if contributions == 0:
+        note("rolling_shutter.result", "no_motion" if settings.corrects_rolling_shutter_skew else "unanalysed")
         return frame
+    corrected = rolling_shutter.correct(frame, (gradient_x, gradient_y))
+    note("rolling_shutter.result", "applied" if corrected is not frame else "negligible")
+    return corrected
+
+
+def _scene_displacement(
+    frame: np.ndarray, frame_index: int | None, state: StabilizationState | None
+) -> tuple[float, float] | None:
+    """How far the scene moved at the centre since the previous frame (px), or ``None`` when unknown."""
+    if state is None:
+        return None
     if frame_index is not None and state.last_transform_index == frame_index:
         delta = state.last_transform  # None when that estimate failed: nothing to gain by trying again
     else:
         delta = estimators.estimate_inter_frame_transform(frame, frame_index, state, StabilizationMode.AUTO)
     if delta is None:
-        note("rolling_shutter.result", "no_motion")
-        return frame
-    displacement = rolling_shutter.center_displacement(delta, frame.shape)
-    note("rolling_shutter.shift_px", [round(displacement[0], 2), round(displacement[1], 2)])
-    gradient = (displacement[0] * settings.rolling_shutter, displacement[1] * settings.rolling_shutter)
-    if settings.rolling_shutter_auto:
-        height = int(frame.shape[0])
-        if state.wobble_index != frame_index or frame_index is None:  # once per frame, re-renders reuse it
-            measured = rolling_shutter.row_motion_gradient(state.last_vectors, height) if state.last_vectors else None
-            note("rolling_shutter.gradient_px", None if measured is None else [round(g, 2) for g in measured])
-            state.wobble = rolling_shutter.accumulate_wobble(state.wobble, measured, height)
-            state.wobble_index = frame_index
-        note("rolling_shutter.wobble_px", [round(state.wobble[0], 2), round(state.wobble[1], 2)])
-        gradient = (gradient[0] + state.wobble[0], gradient[1] + state.wobble[1])
-    corrected = rolling_shutter.correct(frame, gradient)
-    note("rolling_shutter.result", "applied" if corrected is not frame else "negligible")
-    return corrected
+        return None
+    return rolling_shutter.center_displacement(delta, frame.shape)
 
 
 def needs_previous_frame(state: StabilizationState | None, frame_index: int | None) -> bool:
@@ -169,8 +191,6 @@ def prime_with_previous(previous_frame: np.ndarray, previous_index: int, state: 
     state.remember_gray(gray, previous_index)
     state.remember_transform(None, None)
     state.cell_memory = None
-    state.wobble = (0.0, 0.0)  # unknown at a restart; the accumulation picks it up from here
-    state.wobble_index = None
 
 
 def estimate_correction(

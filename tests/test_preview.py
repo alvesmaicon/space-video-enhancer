@@ -17,6 +17,7 @@ from space_video_enhancer.pipeline.preview import (
 )
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble, wobble_window_frames
 from space_video_enhancer.settings import (
     FilterSettings,
     GeometrySettings,
@@ -162,5 +163,26 @@ def test_render_preview_fetches_the_previous_frame_for_the_rolling_shutter_when_
         assert first.trace.notes["rolling_shutter.result"] == "no_motion", "frame 0 has no frame before it"
         plain = render_preview(_preview_request(None, 4, frame_index=5), StabilizationState(), None, video=video)
         assert "previous" not in plain.trace.stages, "without the unskew nothing extra is decoded"
+    finally:
+        video.release()
+
+
+def test_render_preview_undoes_the_wobble_from_the_clip_track_without_the_previous_frame(ui_video: Path) -> None:
+    settings = RenderSettings(stabilization=StabilizationSettings(rolling_shutter_auto=True))
+    video = VideoSource(ui_video)
+    try:
+        track = analyze_wobble(video.read_frame, ui_video, 0, 11, wobble_window_frames(24.0)).track
+        assert track is not None and track.count == 12
+        request = _preview_request(None, 1, frame_index=5, settings=settings, wobble_track=track)
+        result = render_preview(request, StabilizationState(), None, video=video)
+        assert "previous" not in result.trace.stages, "the wobble needs no motion estimate of its own"
+        assert "rolling_shutter.wobble_px" in result.trace.notes
+        assert result.trace.notes["rolling_shutter.result"] in ("applied", "negligible")
+
+        bare = render_preview(
+            _preview_request(None, 2, frame_index=5, settings=settings), StabilizationState(), None, video=video
+        )
+        assert bare.trace.notes["rolling_shutter.result"] == "unanalysed", "no track yet: the frame passes as is"
+        assert bare.trace.notes["rolling_shutter.wobble"] == "unanalysed" and "previous" not in bare.trace.stages
     finally:
         video.release()

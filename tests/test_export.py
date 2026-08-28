@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -24,6 +25,7 @@ from space_video_enhancer.export.ffmpeg import (
     source_has_audio,
 )
 from space_video_enhancer.export.job import ExportRequest, run_export
+from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble, wobble_window_frames
 from space_video_enhancer.sequence import Clip, ClipSource, Sequence
 from space_video_enhancer.settings import (
     CropSettings,
@@ -35,6 +37,7 @@ from space_video_enhancer.settings import (
     StabilizationSettings,
 )
 from space_video_enhancer.timeline import FrameRange
+from space_video_enhancer.video import VideoSource
 from tests.conftest import make_textured_frame
 
 FFMPEG = shutil.which("ffmpeg")
@@ -423,3 +426,39 @@ def test_rolling_shutter_export_measures_motion_at_every_segment_start(tmp_path:
     assert result.success, result.message
     assert result.processed_frames == 9 and int(_probe_video(output)["nb_read_frames"]) == 9
     assert "stabilize" in result.metrics["render"]["stages"]
+
+
+def test_wobble_export_analyses_the_clip_first_and_renders_in_parallel(tmp_path: Path) -> None:
+    """Every frame knows its own wobble from the analysis pass, so the frames need no order; the pass reports status."""
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source)
+    settings = RenderSettings(stabilization=StabilizationSettings(rolling_shutter_auto=True))
+    request = _request(source, output, settings, 2)
+    assert request.effective_worker_count == 2, "the wobble alone is not sequential"
+    statuses: list[str] = []
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event(), status=statuses.append)
+    assert result.success, result.message
+    assert result.processed_frames == 12 and int(_probe_video(output)["nb_read_frames"]) == 12
+    [analysis] = result.metrics["wobble_analysis"]
+    assert analysis["clip"] == 0 and analysis["frames"] == 12 and (analysis["first"], analysis["last"]) == (0, 11)
+    assert statuses and "oscilação" in statuses[-1] and "100%" in statuses[-1], statuses
+
+    video = VideoSource(source)
+    try:
+        track = analyze_wobble(video.read_frame, source, 0, 11, wobble_window_frames(24.0)).track
+    finally:
+        video.release()
+    assert track is not None
+    provided = replace(request, wobble_tracks=(track,))
+    statuses.clear()
+    result = run_export(provided, progress=lambda *_: None, cancel=threading.Event(), status=statuses.append)
+    assert result.success and "wobble_analysis" not in result.metrics and not statuses, (
+        "the preview's track spares the pass"
+    )
+
+    cancel = threading.Event()
+    cancel.set()
+    cancelled_output = tmp_path / "cancelled.mp4"
+    cancelled = run_export(_request(source, cancelled_output, settings, 2), progress=lambda *_: None, cancel=cancel)
+    assert cancelled.cancelled and not cancelled.success and not cancelled_output.exists(), "cancelled during the pass"

@@ -23,6 +23,7 @@ from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect
 from space_video_enhancer.pipeline.render import render_frame
 from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.settings import GeometrySettings, ImageFilterSelection, RenderSettings, StabilizationSettings
 from space_video_enhancer.telemetry.trace import RenderTrace
 from space_video_enhancer.video import VideoSource
@@ -54,6 +55,8 @@ class PreviewRequest:
     """Which open video to decode from (a sequence has several); ``None`` means the only one."""
     canvas_aspect: float | None = None
     """Width/height of the sequence's export canvas: the result is letterboxed to it like the export does."""
+    wobble_track: WobbleTrack | None = None
+    """The clip's rolling-shutter wobble analysis (``None`` until it is done, or when not asked for)."""
 
 
 @dataclass(frozen=True)
@@ -192,7 +195,7 @@ def render_preview(
     trace.note("deinterlace.comb", round(comb, 4))
     source = downscale_to_limit(prepared, request.size_limit)
     if (
-        request.settings.stabilization.corrects_rolling_shutter
+        request.settings.stabilization.corrects_rolling_shutter_skew
         and video is not None
         and needs_previous_frame(state, request.frame_index)
     ):
@@ -220,6 +223,7 @@ def render_preview(
         backend=backend,
         trace=trace,
         source_prepared=True,
+        wobble_track=request.wobble_track,
     )
     if request.canvas_aspect is not None:
         with trace.stage("letterbox"):

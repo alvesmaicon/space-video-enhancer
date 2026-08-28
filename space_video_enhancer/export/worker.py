@@ -12,6 +12,7 @@ from space_video_enhancer.pipeline.filters import OpenCLBackend
 
 class ExportWorker(QObject):
     progress = Signal(int, int)
+    status = Signal(str)  # phases before the first frame (wobble analysis)
     finished = Signal(object)  # ExportResult
 
     def __init__(self, request: ExportRequest, backend: OpenCLBackend | None) -> None:
@@ -22,7 +23,13 @@ class ExportWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        result = run_export(self._request, progress=self.progress.emit, cancel=self._cancel, backend=self._backend)
+        result = run_export(
+            self._request,
+            progress=self.progress.emit,
+            cancel=self._cancel,
+            backend=self._backend,
+            status=self.status.emit,
+        )
         self.finished.emit(result)
 
     def request_cancel(self) -> None:
@@ -33,6 +40,7 @@ class ExportController(QObject):
     """Owns the thread/worker pair for one export and tears it down when done."""
 
     progress = Signal(int, int)
+    status = Signal(str)
     finished = Signal(object)  # ExportResult
 
     def __init__(self, request: ExportRequest, backend: OpenCLBackend | None, parent: QObject | None = None) -> None:
@@ -42,6 +50,7 @@ class ExportController(QObject):
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.progress)
+        self._worker.status.connect(self.status)
         self._worker.finished.connect(self._on_finished)
 
     def start(self) -> None:

@@ -194,7 +194,8 @@ class PreviewSection(WindowState):
         if interactive:
             size_limit = min(size_limit or INTERACTIVE_DENOISE_SIZE_LIMIT, INTERACTIVE_DENOISE_SIZE_LIMIT)
         location = self.sequence.locate(self.current_frame_index)
-        source_path = self.sequence.clips[location.clip_index].source.path
+        clip = self.sequence.clips[location.clip_index]
+        source_path = clip.source.path
         if source_path in self._missing_sources:
             self._pending_preview_reason = "settings"
             self.status.set_render_busy(False)
@@ -202,6 +203,7 @@ class PreviewSection(WindowState):
                 f"Mídia não encontrada: {source_path.name} — coloque o arquivo de volta no lugar e reabra o projeto."
             )
             return
+        wobble_track = self._wobble_track_for(clip) if preview_settings.stabilization.rolling_shutter_auto else None
         self._preview_generation += 1
         self.status.set_render_busy(True)
         self._preview_controller.submit_preview(
@@ -214,8 +216,9 @@ class PreviewSection(WindowState):
                 stabilization_reference=self.stabilization_reference_frame,
                 stabilization_epoch=self._stabilization_epoch,
                 reason=self._pending_preview_reason,
-                source_path=self.sequence.clips[location.clip_index].source.path,
+                source_path=source_path,
                 canvas_aspect=self._canvas_aspect(),
+                wobble_track=wobble_track,
             )
         )
         self._pending_preview_reason = "settings"

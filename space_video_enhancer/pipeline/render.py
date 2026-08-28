@@ -26,6 +26,7 @@ from space_video_enhancer.pipeline.geometry import apply_crop, apply_geometry
 from space_video_enhancer.pipeline.presets import apply_image_filter_preset
 from space_video_enhancer.pipeline.stabilization.stabilize import apply_stabilization
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.settings import ImageFilterSelection, RenderSettings, clamp_unit
 from space_video_enhancer.telemetry import trace as tracing
 from space_video_enhancer.telemetry.trace import RenderTrace
@@ -49,6 +50,7 @@ def render_frame(
     backend: OpenCLBackend | None = None,
     trace: RenderTrace | None = None,
     source_prepared: bool = False,
+    wobble_track: WobbleTrack | None = None,
 ) -> np.ndarray:
     """Run the full pipeline on one frame.
 
@@ -59,6 +61,7 @@ def render_frame(
     - ``trace``: collect stage timings and pipeline decisions for this render.
     - ``source_prepared``: the caller already ran the capture stage on the full-size frame (the
       preview does, before downscaling — deinterlacing must see the native rows).
+    - ``wobble_track``: the clip's rolling-shutter wobble analysis, when the settings ask for that correction.
     """
     with tracing.active(trace):
         tracing.note("input_shape", list(frame.shape[:2]))
@@ -80,6 +83,7 @@ def render_frame(
                 frame_index=frame_index,
                 state=stabilization_state,
                 reference_frame=stabilization_reference,
+                wobble_track=wobble_track,
             )
 
         with tracing.stage("context"):

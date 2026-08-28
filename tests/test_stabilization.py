@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -21,6 +24,7 @@ from space_video_enhancer.pipeline.stabilization.stabilize import (
     smoothing_time_constant,
 )
 from space_video_enhancer.pipeline.stabilization.state import MAX_FRAME_GAP, StabilizationState, frame_gap
+from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble, filter_wobble, wobble_window_frames
 from space_video_enhancer.settings import NormalizedRect, StabilizationMode, StabilizationSettings
 
 SHIFT_DOWN, SHIFT_LEFT = 5, 7
@@ -449,20 +453,84 @@ def _residual_gradient(image: np.ndarray, reference: np.ndarray) -> float:
     return _band_shift(image, reference, slice(15, 95)) - _band_shift(image, reference, slice(175, 255))
 
 
-def test_automatic_wobble_compensation_flattens_a_jello_sequence(textured_frame: np.ndarray) -> None:
-    frames, gradients = _wobbly_sequence(textured_frame, 25, 14.0)
+def _read_from(frames: list[np.ndarray]) -> Callable[[int], np.ndarray | None]:
+    return lambda index: frames[index] if 0 <= index < len(frames) else None
+
+
+def test_wobble_analysis_measures_each_frame_and_the_correction_flattens_the_jello(textured_frame: np.ndarray) -> None:
+    frames, gradients = _wobbly_sequence(textured_frame, 40, 14.0)
+    window = wobble_window_frames(30.0)
+    progress: list[tuple[int, int]] = []
+    analysis = analyze_wobble(
+        _read_from(frames),
+        Path("jello.mp4"),
+        0,
+        39,
+        window,
+        progress=lambda done, total: progress.append((done, total)),
+    )
+    track = analysis.track
+    assert track is not None and analysis.frames_read == 40 and not analysis.cancelled
+    assert track.count == 40 and track.covers(0, 39) and not track.covers(0, 40) and progress[-1] == (40, 40)
+    assert track.measured_fraction > 0.9, "nearly every consecutive pair yields a gradient on this texture"
+
     settings = StabilizationSettings(rolling_shutter_auto=True)
-    assert settings.corrects_rolling_shutter and settings.requires_sequential_processing
-    state = StabilizationState()
+    assert settings.corrects_rolling_shutter and not settings.requires_sequential_processing, (
+        "the wobble alone needs no previous frame: each frame knows its own distortion"
+    )
+    height = textured_frame.shape[0]
     before: list[float] = []
     after: list[float] = []
-    for index, frame in enumerate(frames):
-        corrected = apply_stabilization(frame, settings, frame_index=index, state=state)
-        if index >= 3:  # after the first frames the accumulated wobble has caught up
-            before.append(abs(_residual_gradient(frame, textured_frame)))
-            after.append(abs(_residual_gradient(corrected, textured_frame)))
+    for index in range(window, 40 - window):  # the interior, where the zero-mean window is two-sided
+        wobble = track.wobble_at(index)
+        assert wobble is not None
+        assert abs(wobble[1] * height - gradients[index]) < 3.0, (index, wobble[1] * height, gradients[index])
+        corrected = apply_stabilization(frames[index], settings, frame_index=index, state=None, wobble_track=track)
+        before.append(abs(_residual_gradient(frames[index], textured_frame)))
+        after.append(abs(_residual_gradient(corrected, textured_frame)))
     assert np.mean(before) > 3.0, "the synthetic jello is visible to the metric"
     assert np.mean(after) < 0.25 * np.mean(before), (
         f"residual wobble {np.mean(after):.2f} px vs {np.mean(before):.2f} px"
     )
-    assert abs(state.wobble[1] - gradients[-1]) < 3.0, (state.wobble, gradients[-1])
+    assert track.wobble_at(40) is None and track.wobble_at(-1) is None
+    assert apply_stabilization(frames[5], settings, frame_index=5, state=None) is frames[5], "no track yet: untouched"
+
+    cancelled = analyze_wobble(_read_from(frames), Path("jello.mp4"), 0, 39, window, cancelled=lambda: True)
+    assert cancelled.cancelled and cancelled.track is None
+    assert analyze_wobble(_read_from([]), Path("empty.mp4"), 0, 9, window).track is None
+
+
+def _leaky_sum(changes: np.ndarray, decay: float) -> np.ndarray:
+    """The first version of the wobble: ``W_k = decay * W_{k-1} + g_k`` (kept here as the yardstick)."""
+    out = np.zeros_like(changes)
+    for index in range(1, len(changes)):
+        out[index] = decay * out[index - 1] + changes[index]
+    return out
+
+
+def test_filter_wobble_keeps_the_fast_jello_and_drops_drift_and_slow_skew() -> None:
+    rng = np.random.default_rng(3)
+    count = 600
+    frames = np.arange(count)
+    fast = 0.02 * np.sin(2.0 * np.pi * frames / 6.0)  # jello at 5 Hz (30 fps), 2% of the height
+    slow = 0.05 * np.sin(2.0 * np.pi * frames / 240.0)  # a pan speeding up and slowing down over 8 s
+    truth = fast + slow
+    noise = rng.normal(0.0, 0.002, count)  # what the tracker gets wrong per pair
+    changes = np.column_stack([np.zeros(count), np.diff(truth, prepend=0.0) + noise])
+    displacements = np.zeros((count, 2))
+
+    wobble = filter_wobble(changes, displacements, 0.0, wobble_window_frames(30.0))[:, 1]
+    interior = slice(40, count - 40)
+    rms = lambda values: float(np.sqrt(np.mean(np.square(values))))  # noqa: E731
+    residual = rms(wobble[interior] - fast[interior])
+    assert residual < 0.4 * rms(fast[interior]), f"residual {residual:.4f} vs jello {rms(fast[interior]):.4f}"
+    assert abs(np.corrcoef(wobble[interior], slow[interior])[0, 1]) < 0.2, "the slow skew is not part of the wobble"
+
+    raw = np.cumsum(changes[:, 1])
+    assert np.abs(raw - truth).max() > 0.02, "the plain sum wanders by more than the jello itself"
+    leaky = _leaky_sum(changes[:, 1], 0.97)
+    assert rms(leaky[interior] - fast[interior]) > 2.0 * residual, "the leaky sum kept the drift (the slow jello)"
+
+    with_skew = filter_wobble(changes, np.column_stack([np.zeros(count), slow / 0.7]), 0.7, wobble_window_frames(30.0))
+    assert rms(with_skew[interior, 1] - fast[interior]) < 0.4 * rms(fast[interior]), "the slider part is taken out"
+    assert filter_wobble(np.zeros((0, 2)), np.zeros((0, 2)), 0.0, 5).shape == (0, 2)

@@ -34,6 +34,7 @@ from space_video_enhancer.pipeline.geometry import ensure_even_size, fit_to_canv
 from space_video_enhancer.pipeline.render import build_context, render_frame
 from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, analyze_wobble, wobble_window_frames
 from space_video_enhancer.sequence import Clip, ClipSource, ExportSegment, Sequence
 from space_video_enhancer.settings import RenderSettings
 from space_video_enhancer.telemetry.log import get_logger, log_event
@@ -43,6 +44,7 @@ from space_video_enhancer.timeline import FrameRange
 
 LOG = get_logger("export")
 ProgressCallback = Callable[[int, int], None]
+StatusCallback = Callable[[str], None]
 
 PROGRESS_INTERVAL_SECONDS = 0.1
 PROGRESS_LOG_STEP_PERCENT = 10
@@ -58,6 +60,8 @@ class ExportRequest:
     worker_count: int
     ffmpeg_path: str
     encoder: EncoderChoice
+    wobble_tracks: tuple[WobbleTrack, ...] = ()
+    """Rolling-shutter wobble analyses already done (the preview's); a clip none of them covers is analysed here."""
 
     @classmethod
     def single(
@@ -170,6 +174,8 @@ class _ExportMetrics:
         self.workers = request.effective_worker_count
         self.encoder = request.encoder.label
         self.backend = backend.label if backend is not None else "CPU"
+        self.wobble_analysis: list[dict[str, Any]] = []
+        """One entry per clip whose wobble was analysed by this job (none when the preview's tracks served)."""
         self._lock = threading.Lock()
 
     def record(self, trace: RenderTrace) -> None:
@@ -200,6 +206,8 @@ class _ExportMetrics:
                     "estimators": self.estimators.as_dict(),
                     "outcomes": self.outcomes.as_dict(),
                 }
+            if self.wobble_analysis:
+                summary["wobble_analysis"] = list(self.wobble_analysis)
         if output_path.exists():
             summary["output_bytes"] = output_path.stat().st_size
         return summary
@@ -234,6 +242,22 @@ class _Throttle:
         if force or (now - self._last) >= PROGRESS_INTERVAL_SECONDS:
             self._last = now
             self._callback(processed, self._total)
+
+
+class _StatusThrottle:
+    """Free-text progress for the phases before frames flow (the wobble analysis), at most a few times a second."""
+
+    def __init__(self, callback: StatusCallback | None) -> None:
+        self._callback = callback
+        self._last = 0.0
+
+    def __call__(self, message: str, *, force: bool = False) -> None:
+        if self._callback is None:
+            return
+        now = time.monotonic()
+        if force or (now - self._last) >= PROGRESS_INTERVAL_SECONDS:
+            self._last = now
+            self._callback(message)
 
 
 def _clip_summary(clip: Clip) -> dict[str, Any]:
@@ -300,14 +324,84 @@ class _SourceReaders:
 
 
 class _ClipRenderer:
-    """Per-clip processing state: settings, the denoise context (resolved once) and the stabilization path."""
+    """Per-clip processing state: settings, the denoise context (resolved once), the stabilization path, the wobble."""
 
-    def __init__(self, clip: Clip, first_frame: np.ndarray, reference: np.ndarray | None) -> None:
+    def __init__(
+        self, clip: Clip, first_frame: np.ndarray, reference: np.ndarray | None, wobble_track: WobbleTrack | None
+    ) -> None:
         self.settings = clip.settings
         # Denoise strength is resolved once, from the clip's first frame, so it stays constant across the clip.
         self.context: ProcessingContext = build_context(clip.settings, first_frame)
         self.state = StabilizationState()
         self.reference = reference
+        self.wobble_track = wobble_track
+
+
+def _analyze_clip_wobble(
+    readers: _SourceReaders, index: int, clip: Clip, cancel: threading.Event, status: _StatusThrottle
+) -> tuple[WobbleTrack | None, dict[str, Any] | None]:
+    """Track the clip's range (plus the filter window on each side) on the export thread; ``None`` when cancelled."""
+    path = clip.source.path
+    window = wobble_window_frames(clip.fps)
+    first = max(0, clip.range.start - window)
+    last = min(clip.source.last_frame, clip.range.end + window)
+
+    def read(frame_index: int) -> np.ndarray | None:
+        return readers.read(path, frame_index)
+
+    def report(done: int, total: int) -> None:
+        status(
+            f"Analisando a oscilação do rolling shutter de {clip.name}: {done * 100 // max(1, total)}% "
+            f"({done}/{total} frames)",
+            force=done == total,
+        )
+
+    analysis = analyze_wobble(read, path, first, last, window, progress=report, cancelled=cancel.is_set)
+    if analysis.cancelled:
+        return None, None
+    summary: dict[str, Any] = {
+        "clip": index,
+        "name": clip.name,
+        "first": first,
+        "last": last,
+        "frames": analysis.frames_read,
+        "measured": round(analysis.track.measured_fraction, 3) if analysis.track is not None else None,
+        "elapsed_ms": round(analysis.elapsed_ms, 1),
+    }
+    log_event(LOG, "export.wobble_analysis", **summary)
+    return analysis.track, summary
+
+
+def _wobble_tracks(
+    readers: _SourceReaders, request: ExportRequest, cancel: threading.Event, status: _StatusThrottle
+) -> tuple[dict[int, WobbleTrack], list[dict[str, Any]]] | None:
+    """A wobble track per clip that undoes the wobble: the one handed in when it covers the clip, else analysed now.
+
+    ``None`` when the export was cancelled during an analysis.
+    """
+    tracks: dict[int, WobbleTrack] = {}
+    summaries: list[dict[str, Any]] = []
+    for index, clip in enumerate(request.sequence.clips):
+        if not clip.settings.stabilization.rolling_shutter_auto:
+            continue
+        provided = next(
+            (
+                track
+                for track in request.wobble_tracks
+                if track.source == clip.source.path and track.covers(clip.range.start, clip.range.end)
+            ),
+            None,
+        )
+        if provided is not None:
+            tracks[index] = provided
+            continue
+        track, summary = _analyze_clip_wobble(readers, index, clip, cancel, status)
+        if summary is None:
+            return None
+        summaries.append(summary)
+        if track is not None:
+            tracks[index] = track
+    return tracks, summaries
 
 
 def _validation_problem(request: ExportRequest) -> str | None:
@@ -329,8 +423,13 @@ def run_export(
     progress: ProgressCallback,
     cancel: threading.Event,
     backend: OpenCLBackend | None = None,
+    status: StatusCallback | None = None,
 ) -> ExportResult:
-    """Blocking export. Safe to call from any thread; touches no Qt objects."""
+    """Blocking export. Safe to call from any thread; touches no Qt objects.
+
+    ``progress(processed, total)`` counts written frames; ``status(message)`` narrates the phases before
+    the first frame (the rolling-shutter wobble analysis of each clip).
+    """
     log_event(LOG, "export.start", **_request_summary(request))
     problem = _validation_problem(request)
     if problem is not None:
@@ -344,7 +443,7 @@ def run_export(
         return ExportResult(False, message, 0, request.expected_frames)
 
     try:
-        return _run_export(readers, request, progress, cancel, backend)
+        return _run_export(readers, request, progress, cancel, backend, _StatusThrottle(status))
     finally:
         readers.release_all()
 
@@ -355,6 +454,7 @@ def _run_export(
     progress: ProgressCallback,
     cancel: threading.Event,
     backend: OpenCLBackend | None,
+    status: _StatusThrottle,
 ) -> ExportResult:
     total = request.expected_frames
     report = _Throttle(progress, total)
@@ -374,6 +474,13 @@ def _run_export(
         for index, clip in enumerate(sequence.clips)
         if clip.stabilization_reference_frame is not None
     }
+    # The wobble of a clip is measured over its whole range before any of it is rendered (or the preview's
+    # track is reused): every frame then knows its own distortion, and the clip can render in parallel.
+    analysed = _wobble_tracks(readers, request, cancel, status)
+    if analysed is None:
+        return finish(ExportResult(False, CANCELLED_MESSAGE, 0, total, cancelled=True), "export.cancelled")
+    wobble_tracks, metrics.wobble_analysis = analysed
+
     frames = _iter_frames(readers, request)
     first = next(frames, None)
     if first is None:
@@ -387,7 +494,8 @@ def _run_export(
         """Created on the clip's first frame, on the export thread, before any worker sees it."""
         renderer = renderers.get(clip_index)
         if renderer is None:
-            renderer = _ClipRenderer(sequence.clips[clip_index], frame, references.get(clip_index))
+            clip = sequence.clips[clip_index]
+            renderer = _ClipRenderer(clip, frame, references.get(clip_index), wobble_tracks.get(clip_index))
             renderers[clip_index] = renderer
         return renderer
 
@@ -400,7 +508,7 @@ def _run_export(
         """
         renderer = renderer_for(clip_index, frame)
         settings = renderer.settings
-        if settings.stabilization.corrects_rolling_shutter and needs_previous_frame(renderer.state, frame_index):
+        if settings.stabilization.corrects_rolling_shutter_skew and needs_previous_frame(renderer.state, frame_index):
             previous = readers.read(sequence.clips[clip_index].source.path, frame_index - 1)
             if previous is not None:
                 previous_prepared, _comb = prepare_source(previous, settings.capture.deinterlace)
@@ -419,6 +527,7 @@ def _run_export(
             crop=True,
             backend=backend,
             trace=trace,
+            wobble_track=renderer.wobble_track,
         )
         metrics.record(trace.finish())
         return np.ascontiguousarray(ensure_even_size(rendered))

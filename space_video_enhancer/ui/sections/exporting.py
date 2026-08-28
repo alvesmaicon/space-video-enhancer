@@ -98,7 +98,12 @@ class ExportSection(WindowState):
         self._backend.reset()
 
         request = ExportRequest(
-            export_sequence, Path(output_path), self.export_tab.worker_count(), ffmpeg_path, encoder
+            export_sequence,
+            Path(output_path),
+            self.export_tab.worker_count(),
+            ffmpeg_path,
+            encoder,
+            wobble_tracks=tuple(self._wobble_tracks),  # clips these do not cover are analysed by the job itself
         )
         self._export_backend_label = f"{self._backend.label} + {encoder.label}"
         self._export_output_path = Path(output_path)
@@ -109,6 +114,7 @@ class ExportSection(WindowState):
 
         controller = ExportController(request, self._backend, self)
         controller.progress.connect(self._on_export_progress)
+        controller.status.connect(self._on_export_status)
         controller.finished.connect(self._on_export_finished)
         self._export_controller = controller
         self._begin_export_ui(
@@ -142,6 +148,11 @@ class ExportSection(WindowState):
             f"Exportando {percent}% · frame {processed_frames}/{total_frames} · {fps:.0f} fps{remaining} · "
             f"{self._export_backend_label}",
         )
+
+    @Slot(str)
+    def _on_export_status(self, message: str) -> None:
+        """A phase before the first frame is written (the wobble analysis of a clip)."""
+        self.status.set_export_progress(0, f"{message} · {self._export_backend_label}")
 
     @Slot(object)
     def _on_export_finished(self, result: ExportResult) -> None:

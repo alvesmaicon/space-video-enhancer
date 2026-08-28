@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from space_video_enhancer.export.ffmpeg import FfmpegProbe
 from space_video_enhancer.export.worker import ExportController
 from space_video_enhancer.pipeline.filters import OpenCLBackend
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.project import RecentProjects
 from space_video_enhancer.sequence import Clip, ClipSource
 from space_video_enhancer.sequence import Sequence as ClipSequence
@@ -65,6 +66,7 @@ from space_video_enhancer.ui.timeline_media import FilmstripController, Waveform
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
 from space_video_enhancer.ui.widgets.status_panel import StatusPanel
 from space_video_enhancer.ui.widgets.transport_bar import TransportBar
+from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisController, WobbleAnalysisRequest
 from space_video_enhancer.video import VideoSource
 
 if TYPE_CHECKING:
@@ -106,6 +108,11 @@ class WindowState(QMainWindow):
     _filmstrip: FilmstripController
     _waveform: WaveformController
     _reference_loader: ReferenceFrameController
+    _wobble_analysis: WobbleAnalysisController
+    _wobble_tracks: list[WobbleTrack]
+    """Rolling-shutter wobble analyses done so far (one per source range); see ``_wobble_track_for``."""
+    _wobble_pending: WobbleAnalysisRequest | None
+    _wobble_progress: tuple[int, int]
     _preview_generation: int
     _applied_preview_generation: int
     _thumbnail_generation: int
@@ -262,6 +269,15 @@ class WindowState(QMainWindow):
     # --- methods one section calls on another; each is implemented by the section named in its body ---
 
     # implemented by adjustments.py
+    def _wobble_track_for(self, clip: Clip) -> WobbleTrack | None:
+        raise NotImplementedError  # adjustments
+
+    def _on_wobble_progress(self, request: object, done: int, total: int) -> None:
+        raise NotImplementedError  # adjustments
+
+    def _on_wobble_finished(self, request: object, track: object, elapsed_ms: float) -> None:
+        raise NotImplementedError  # adjustments
+
     def _update_capture_info(self) -> None:
         raise NotImplementedError  # adjustments
 

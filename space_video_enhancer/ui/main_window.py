@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 from space_video_enhancer.export.ffmpeg import FfmpegProbe, find_ffmpeg
 from space_video_enhancer.export.worker import ExportController
 from space_video_enhancer.pipeline.filters import OpenCLBackend
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.project import (
     RecentProjects,
 )
@@ -113,6 +114,7 @@ from space_video_enhancer.ui.timeline_media import FilmstripController, Waveform
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
 from space_video_enhancer.ui.widgets.status_panel import StatusPanel
 from space_video_enhancer.ui.widgets.transport_bar import TransportBar
+from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisController, WobbleAnalysisRequest
 from space_video_enhancer.video import VideoSource
 
 LOG = get_logger("ui")
@@ -190,6 +192,12 @@ class MainWindow(
         self._waveform.peaksReady.connect(self._on_waveform_ready)
         self._reference_loader = ReferenceFrameController(self)  # re-decodes camera-lock references of a project
         self._reference_loader.frameReady.connect(self._on_reference_frame_ready)
+        self._wobble_analysis = WobbleAnalysisController(self)  # tracks a clip's frames once for the wobble correction
+        self._wobble_analysis.progress.connect(self._on_wobble_progress)
+        self._wobble_analysis.finished.connect(self._on_wobble_finished)
+        self._wobble_tracks: list[WobbleTrack] = []
+        self._wobble_pending: WobbleAnalysisRequest | None = None
+        self._wobble_progress = (0, 0)
         self._preview_controller.renderFailed.connect(self._on_render_failed)
         self._preview_generation = 0
         self._applied_preview_generation = -1
@@ -844,6 +852,7 @@ class MainWindow(
         self._filmstrip.stop()
         self._waveform.stop()
         self._reference_loader.stop()
+        self._wobble_analysis.stop()
         self._audio_player.stop()
         self._pcm_loader.stop()
         self._preview_controller.stop()  # also releases the decoders it owns

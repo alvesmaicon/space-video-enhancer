@@ -135,6 +135,9 @@ class MediaSection(WindowState):
         self._missing_sources = set(missing)
         self.project_path = project_path
         self._reference_frames.clear()
+        self._wobble_analysis.cancel()
+        self._wobble_pending = None
+        self._wobble_tracks.clear()
         self._waveforms_requested.clear()
         self._pcm_requested.clear()
         self._audio_player.keep_only(())

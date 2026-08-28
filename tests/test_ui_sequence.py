@@ -152,6 +152,7 @@ def test_a_video_with_another_fps_is_refused(
 
 class _FakeExportController(QObject):
     progress = Signal(int, int)
+    status = Signal(str)
     finished = Signal(object)
     created: list[_FakeExportController] = []
 

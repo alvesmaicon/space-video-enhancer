@@ -10,6 +10,8 @@ from space_video_enhancer.pipeline.deinterlace import likely_interlaced
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.grade import neutral_gains
 from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, wobble_window_frames
+from space_video_enhancer.sequence import Clip
 from space_video_enhancer.settings import (
     DEFAULT_DENOISE_SAMPLE_RECT,
     DEFAULT_FILTER_SETTINGS,
@@ -23,8 +25,11 @@ from space_video_enhancer.settings import (
 )
 from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.ui.sections.state import WindowState
+from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisRequest
 
 LOG = get_logger("ui")
+WOBBLE_ANALYSIS_MARGIN_SECONDS = 2.0
+"""The wobble analysis covers this much beyond the clip's range, so trimming the in/out points a little reuses it."""
 
 
 def qrect_to_norm(rect: QRectF) -> NormalizedRect:
@@ -358,18 +363,99 @@ class AdjustmentsSection(WindowState):
                     facts.append("ative o desentrelaçamento")
             else:
                 facts.append(f"Entrelaçamento improvável ({comb:.2%} com pente)")
-        if self._current_stabilization().corrects_rolling_shutter:
+        stabilization = self._current_stabilization()
+        if stabilization.corrects_rolling_shutter_skew:
             shift = trace.get("rolling_shutter.shift_px")
             if isinstance(shift, (list, tuple)) and len(shift) == 2:
                 facts.append(f"rolling shutter: movimento {shift[0]:+.1f}, {shift[1]:+.1f} px/frame")
-                wobble = trace.get("rolling_shutter.wobble_px")
-                if isinstance(wobble, (list, tuple)) and len(wobble) == 2:
-                    facts.append(f"oscilação compensada {wobble[0]:+.1f}, {wobble[1]:+.1f} px (topo→base)")
             elif trace.get("rolling_shutter.result") == "no_motion":
                 facts.append("rolling shutter: sem movimento mensurável neste frame (primeiro frame ou sem textura)")
             else:
                 facts.append("rolling shutter: aguardando o render")
+        if stabilization.rolling_shutter_auto:
+            facts.append(self._wobble_status_text(trace))
         self.stabilization_tab.set_capture_info(" · ".join(facts) + ("." if facts else ""))
+
+    def _wobble_status_text(self, trace: dict[str, object]) -> str:
+        if self._wobble_pending is not None:
+            done, total = self._wobble_progress
+            return f"analisando a oscilação: {done * 100 // max(1, total)}% ({done}/{total} frames)"
+        wobble = trace.get("rolling_shutter.wobble_px")
+        if isinstance(wobble, (list, tuple)) and len(wobble) == 2:
+            return f"oscilação compensada {wobble[0]:+.1f}, {wobble[1]:+.1f} px (topo→base)"
+        return "oscilação: aguardando o render"
+
+    def _wobble_track_for(self, clip: Clip) -> WobbleTrack | None:
+        """The clip's wobble analysis when it is done; otherwise starts it (once) and returns ``None`` for now.
+
+        The analysis runs on its own thread over the clip's range plus a margin; the preview renders
+        without the wobble until ``_on_wobble_finished`` stores the track and asks for a refresh.
+        """
+        first, last = clip.range.start, clip.range.end
+        for track in self._wobble_tracks:
+            if track.source == clip.source.path and track.covers(first, last):
+                return track
+        pending = self._wobble_pending
+        if pending is not None and pending.covers(clip.source.path, first, last):
+            return None
+        if clip.source.path in self._missing_sources:
+            return None
+        window = wobble_window_frames(clip.fps)
+        margin = max(window, round(WOBBLE_ANALYSIS_MARGIN_SECONDS * clip.fps))
+        start = max(0, first - margin)
+        end = min(clip.source.last_frame, last + margin)
+        self._wobble_pending = self._wobble_analysis.analyze(clip.source.path, start, end, window)
+        self._wobble_progress = (0, end - start + 1)
+        log_event(LOG, "ui.wobble_analysis_start", clip=clip.name, first=start, last=end, window=window)
+        self.status.show_message(
+            f"Analisando a oscilação do rolling shutter de {clip.name} ({end - start + 1} frames) em segundo plano…"
+        )
+        self._update_capture_info()
+        return None
+
+    def _answers_pending_analysis(self, request: object) -> bool:
+        pending = self._wobble_pending
+        return (
+            isinstance(request, WobbleAnalysisRequest)
+            and pending is not None
+            and request.generation == pending.generation
+        )
+
+    def _on_wobble_progress(self, request: object, done: int, total: int) -> None:
+        if self._answers_pending_analysis(request):
+            self._wobble_progress = (done, total)
+            self._update_capture_info()
+
+    def _on_wobble_finished(self, request: object, track: object, elapsed_ms: float) -> None:
+        if not isinstance(request, WobbleAnalysisRequest) or not self._answers_pending_analysis(request):
+            return  # answers a request that was replaced meanwhile
+        self._wobble_pending = None
+        if not isinstance(track, WobbleTrack):
+            log_event(LOG, "ui.wobble_analysis_failed", name=request.source.name)
+            self.status.show_message(f"Não foi possível analisar a oscilação de {request.source.name}.")
+            self._update_capture_info()
+            return
+        sources = set(self.sequence.source_paths)
+        self._wobble_tracks = [
+            kept
+            for kept in self._wobble_tracks
+            if kept.source in sources
+            and not (kept.source == track.source and track.covers(kept.first_frame, kept.last_frame))
+        ]
+        self._wobble_tracks.append(track)
+        log_event(
+            LOG,
+            "ui.wobble_analysis_finish",
+            name=track.source.name,
+            frames=track.count,
+            measured=round(track.measured_fraction, 3),
+            elapsed_ms=round(elapsed_ms, 1),
+        )
+        self.status.show_message(
+            f"Oscilação do rolling shutter analisada: {track.count} frames em {elapsed_ms / 1000.0:.1f} s."
+        )
+        self._update_capture_info()
+        self._schedule_preview_refresh(immediate=True)
 
     def _sync_stabilization_preview(self) -> None:
         enabled = (
