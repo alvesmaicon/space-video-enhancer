@@ -47,6 +47,32 @@ class CompareMode(str, Enum):
 
 
 PANEL_GAP = 10
+
+
+@dataclass(frozen=True)
+class PanelLayout:
+    """Where the two frames go: the panel each one is clipped to, and the rectangle its whole image is drawn in.
+
+    In the split modes all four are the same rectangle. With two panels at a fixed zoom the image
+    rectangles are larger than the panels and sit at the same offset in both, so the panels show the
+    same region and pan together.
+    """
+
+    before_panel: QRectF
+    after_panel: QRectF
+    before_image: QRectF
+    after_image: QRectF
+
+
+def _axis_offset(panel_start: float, panel_length: float, image_length: float, center: float) -> float:
+    """Start of an image of ``image_length`` inside a panel: centred when it fits, else placed so the normalized
+    ``center`` of the image sits mid-panel, clamped so the panel is always covered."""
+    if image_length <= panel_length:
+        return panel_start + (panel_length - image_length) / 2.0
+    start = panel_start + panel_length / 2.0 - center * image_length
+    return min(panel_start, max(panel_start + panel_length - image_length, start))
+
+
 """Pixels between the two panels in side-by-side / stacked modes."""
 HANDLE_SIZE = 10.0
 MIN_SELECTION_SIZE = 0.08
@@ -377,6 +403,10 @@ class ComparePreview(QWidget):
         self._pan_mode = False
         self._pan_anchor: QPointF | None = None
         """Global position of the last pan event (global: the widget moves under the mouse while it scrolls)."""
+        self._view_center = QPointF(0.5, 0.5)
+        """Two panels at a fixed zoom: the point of the frame (normalized) shown at the centre of each panel."""
+        self._panels: PanelLayout | None = None
+        """What the last paint laid out."""
 
         self.crop = SelectionOverlay(CROP_STYLE, QRectF(0.1, 0.1, 0.8, 0.8), self.cropChanged.emit)
         self.sample = SelectionOverlay(SAMPLE_STYLE, QRectF(0.33, 0.33, 0.34, 0.34), self.sampleChanged.emit)
@@ -400,16 +430,10 @@ class ComparePreview(QWidget):
 
     # --- sizing -------------------------------------------------------------------------
     def sizeHint(self) -> QSize:
-        if self._fit_mode:
+        if self.expands_to_viewport():
             return QSize(MIN_WIDGET_SIZE)
-        panel_width = int(self._reference_size.width() * self._zoom_factor)
-        panel_height = int(self._reference_size.height() * self._zoom_factor)
-        width = panel_width + (2 * IMAGE_MARGIN)
-        height = panel_height + (2 * IMAGE_MARGIN)
-        if self._compare_mode is CompareMode.SIDE_BY_SIDE:
-            width += panel_width + PANEL_GAP
-        elif self._compare_mode is CompareMode.STACKED:
-            height += panel_height + PANEL_GAP
+        width = int(self._reference_size.width() * self._zoom_factor) + (2 * IMAGE_MARGIN)
+        height = int(self._reference_size.height() * self._zoom_factor) + (2 * IMAGE_MARGIN)
         return QSize(
             max(MIN_WIDGET_SIZE.width(), min(MAX_WIDGET_SIDE, width)),
             max(MIN_WIDGET_SIZE.height(), min(MAX_WIDGET_SIDE, height)),
@@ -417,6 +441,14 @@ class ComparePreview(QWidget):
 
     def minimumSizeHint(self) -> QSize:
         return QSize(MIN_WIDGET_SIZE)
+
+    def expands_to_viewport(self) -> bool:
+        """True when the widget should fill the scroll area: fit mode, or a two-panel mode at any zoom.
+
+        With two panels the zoom scales the frames *inside* the panels — both stay on screen and pan
+        together — instead of growing the widget; a split mode at a fixed zoom does grow, and scrolls.
+        """
+        return self._fit_mode or not self._compare_mode.is_split
 
     @property
     def fit_mode(self) -> bool:
@@ -450,19 +482,19 @@ class ComparePreview(QWidget):
             return 1.0
         if self._image_rect.width() > 0:
             return self._image_rect.width() / reference_width
-        return self._layout_rects(self._reference_size)[1].width() / reference_width
+        return self._layout(self._reference_size).after_image.width() / reference_width
 
     def set_render_quality(self, smooth_transform_enabled: bool) -> None:
         self._smooth_transform_enabled = smooth_transform_enabled
         self.update()
 
     def _apply_size_policy(self) -> None:
-        policy = QSizePolicy.Policy.Expanding if self._fit_mode else QSizePolicy.Policy.Fixed
+        policy = QSizePolicy.Policy.Expanding if self.expands_to_viewport() else QSizePolicy.Policy.Fixed
         self.setSizePolicy(policy, policy)
 
     def _relayout(self) -> None:
         self.updateGeometry()
-        if not self._fit_mode:
+        if not self.expands_to_viewport():
             self.resize(self.sizeHint())
         self.update()
 
@@ -476,14 +508,22 @@ class ComparePreview(QWidget):
             return
         self._compare_mode = mode
         self.setCursor(self._idle_cursor())
+        self._apply_size_policy()
         self._relayout()
 
     def before_rect(self) -> QRectF:
-        """Where the last paint put the *before* frame (equal to :meth:`after_rect` in the split modes)."""
+        """Where the last paint drew the whole *before* frame (equal to :meth:`after_rect` in the split modes)."""
         return QRectF(self._before_rect)
 
     def after_rect(self) -> QRectF:
         return QRectF(self._image_rect)
+
+    def before_panel_rect(self) -> QRectF:
+        """The area the *before* frame is clipped to (the frame itself when it fits; see :class:`PanelLayout`)."""
+        return QRectF(self._panels.before_panel) if self._panels is not None else self.before_rect()
+
+    def after_panel_rect(self) -> QRectF:
+        return QRectF(self._panels.after_panel) if self._panels is not None else self.after_rect()
 
     @property
     def pan_mode(self) -> bool:
@@ -562,18 +602,24 @@ class ComparePreview(QWidget):
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, PLACEHOLDER_TEXT)
             return
 
-        self._before_rect, self._image_rect = self._layout_rects(self._after.size())
+        layout = self._layout(self._after.size())
+        self._panels = layout
+        self._before_rect, self._image_rect = layout.before_image, layout.after_image
         if self._compare_mode.is_split:
             self._paint_split(painter)
         else:
-            self._paint_panels(painter)
+            self._paint_panels(painter, layout)
 
+        painter.save()
+        if not self._compare_mode.is_split:
+            painter.setClipRect(layout.after_panel)  # the zoomed frame may extend past its panel
         for overlay in (self.crop, self.sample, self.focus, self.white_balance):
             if overlay.enabled:
                 overlay.paint(painter, self._image_rect)
+        painter.restore()
 
         if self._hud_visible and self._hud_lines:
-            self._draw_hud(painter)
+            self._draw_hud(painter, layout.after_panel)
 
     def _paint_split(self, painter: QPainter) -> None:
         """One image: the before frame shows on one side of a draggable divider, the after frame on the other."""
@@ -608,15 +654,21 @@ class ComparePreview(QWidget):
             after_at = QPointF(rect.left() + 10, rect.bottom() - 10 - after_size.height())
         draw_pill(painter, after_at, "Depois", CAPTION_BACKGROUND)
 
-    def _paint_panels(self, painter: QPainter) -> None:
-        """Two panels (side by side or stacked): the whole before frame and the whole after frame."""
+    def _paint_panels(self, painter: QPainter, layout: PanelLayout) -> None:
+        """Two panels (side by side or stacked), each clipped to its panel: the same region of before and after."""
         assert self._before is not None and self._after is not None
-        painter.drawImage(self._before_rect, self._before)
-        painter.drawImage(self._image_rect, self._after)
-        if self._motion is not None:
-            self._draw_motion(painter, self._before_rect)
-        draw_pill(painter, self._before_rect.topLeft() + QPointF(10, 10), "Antes", CAPTION_BACKGROUND)
-        draw_pill(painter, self._image_rect.topLeft() + QPointF(10, 10), "Depois", CAPTION_BACKGROUND)
+        panels = (
+            (layout.before_panel, layout.before_image, self._before, "Antes"),
+            (layout.after_panel, layout.after_image, self._after, "Depois"),
+        )
+        for panel, image_rect, image, label in panels:
+            painter.save()
+            painter.setClipRect(panel)
+            painter.drawImage(image_rect, image)
+            if label == "Antes" and self._motion is not None:
+                self._draw_motion(painter, image_rect)
+            painter.restore()
+            draw_pill(painter, panel.topLeft() + QPointF(10, 10), label, CAPTION_BACKGROUND)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -632,7 +684,7 @@ class ComparePreview(QWidget):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        if self._image_rect.contains(event.position()):
+        if self._image_rect.contains(event.position()) and self.after_panel_rect().contains(event.position()):
             for overlay in self._overlays:
                 if not overlay.interactive:
                     continue
@@ -647,7 +699,10 @@ class ComparePreview(QWidget):
             if event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton):
                 delta = self._pan_anchor - event.globalPosition()
                 self._pan_anchor = event.globalPosition()
-                self.panRequested.emit(round(delta.x()), round(delta.y()))
+                if self._pans_in_place():
+                    self._pan_view(delta)
+                else:
+                    self.panRequested.emit(round(delta.x()), round(delta.y()))
             return
         if self._pan_mode:
             return  # nothing else to hover or drag with the hand tool
@@ -679,23 +734,66 @@ class ComparePreview(QWidget):
             self.setCursor(self._idle_cursor())
 
     # --- helpers -------------------------------------------------------------------------
-    def _layout_rects(self, size: QSize) -> tuple[QRectF, QRectF]:
-        """``(before rect, after rect)`` for a frame of ``size`` in the current compare mode (same rect when split)."""
+    def _layout(self, size: QSize) -> PanelLayout:
+        """Where a frame of ``size`` goes in the current compare mode (see :class:`PanelLayout`).
+
+        Two panels sit next to each other (``PANEL_GAP`` apart) and the pair is centred. In fit mode each
+        frame is fitted into half of the area; at a fixed zoom the frame is drawn at that zoom and each
+        panel is at most half of the area, showing the region around ``_view_center`` — the same in both.
+        """
         available = QRectF(self.rect().adjusted(IMAGE_MARGIN, IMAGE_MARGIN, -IMAGE_MARGIN, -IMAGE_MARGIN))
         if size.width() <= 0 or size.height() <= 0:
-            return available, available
+            return PanelLayout(available, available, available, available)
         if self._compare_mode.is_split:
             rect = fit_rect(size, available)
-            return rect, rect
-        if self._compare_mode is CompareMode.SIDE_BY_SIDE:
-            half = max(1.0, (available.width() - PANEL_GAP) / 2.0)
-            first = QRectF(available.left(), available.top(), half, available.height())
-            second = QRectF(available.left() + half + PANEL_GAP, available.top(), half, available.height())
+            return PanelLayout(rect, rect, rect, rect)
+        side_by_side = self._compare_mode is CompareMode.SIDE_BY_SIDE
+        if side_by_side:
+            half = QRectF(0.0, 0.0, max(1.0, (available.width() - PANEL_GAP) / 2.0), max(1.0, available.height()))
         else:
-            half = max(1.0, (available.height() - PANEL_GAP) / 2.0)
-            first = QRectF(available.left(), available.top(), available.width(), half)
-            second = QRectF(available.left(), available.top() + half + PANEL_GAP, available.width(), half)
-        return fit_rect(size, first), fit_rect(size, second)
+            half = QRectF(0.0, 0.0, max(1.0, available.width()), max(1.0, (available.height() - PANEL_GAP) / 2.0))
+        if self._fit_mode:
+            image_size = fit_rect(size, half).size()
+        else:
+            zoomed = QRectF(
+                0.0,
+                0.0,
+                self._reference_size.width() * self._zoom_factor,
+                self._reference_size.height() * self._zoom_factor,
+            )
+            image_size = fit_rect(size, zoomed).size()
+        panel_size = QSizeF(min(image_size.width(), half.width()), min(image_size.height(), half.height()))
+        if side_by_side:
+            pair = QSizeF(2.0 * panel_size.width() + PANEL_GAP, panel_size.height())
+            step = QPointF(panel_size.width() + PANEL_GAP, 0.0)
+        else:
+            pair = QSizeF(panel_size.width(), 2.0 * panel_size.height() + PANEL_GAP)
+            step = QPointF(0.0, panel_size.height() + PANEL_GAP)
+        origin = available.center() - QPointF(pair.width() / 2.0, pair.height() / 2.0)
+        before_panel = QRectF(origin, panel_size)
+        before_image = QRectF(
+            _axis_offset(before_panel.left(), panel_size.width(), image_size.width(), self._view_center.x()),
+            _axis_offset(before_panel.top(), panel_size.height(), image_size.height(), self._view_center.y()),
+            image_size.width(),
+            image_size.height(),
+        )
+        return PanelLayout(before_panel, before_panel.translated(step), before_image, before_image.translated(step))
+
+    def _pans_in_place(self) -> bool:
+        """Two panels at a fixed zoom move their content; everything else scrolls the widget (``panRequested``)."""
+        return not self._fit_mode and not self._compare_mode.is_split
+
+    def _pan_view(self, delta: QPointF) -> None:
+        """Move the region both panels show by ``delta`` display pixels (the scroll convention: drag left = +x)."""
+        layout = self._panels
+        if layout is None or layout.after_image.width() <= 0 or layout.after_image.height() <= 0:
+            return
+        image, panel = layout.after_image, layout.after_panel
+        # From the centre actually shown (after clamping), so a drag never has to undo an out-of-range value first.
+        center_x = (panel.center().x() - image.left() + delta.x()) / image.width()
+        center_y = (panel.center().y() - image.top() + delta.y()) / image.height()
+        self._view_center = QPointF(min(1.0, max(0.0, center_x)), min(1.0, max(0.0, center_y)))
+        self.update()
 
     def _position_open_button(self) -> None:
         hint = self.open_button.sizeHint()
@@ -752,16 +850,16 @@ class ComparePreview(QWidget):
         below_caption = image_rect.top() + 10 + pill_size(painter, "Antes").height() + 6  # the HUD owns the bottom
         draw_pill(painter, QPointF(left + 10, below_caption), label, HUD_BACKGROUND)
 
-    def _draw_hud(self, painter: QPainter) -> None:
-        """Metrics box (render/decode timings, queue, backend) in the bottom-left corner of the image."""
+    def _draw_hud(self, painter: QPainter, anchor: QRectF) -> None:
+        """Metrics box (render/decode timings, queue, backend) in the bottom-left corner of ``anchor``."""
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(HUD_FONT_SIZE)
         painter.setFont(font)
         metrics = painter.fontMetrics()
         width = max(metrics.horizontalAdvance(line) for line in self._hud_lines) + (HUD_PADDING * 2)
         height = (HUD_LINE_HEIGHT * len(self._hud_lines)) + (HUD_PADDING * 2)
-        left = self._image_rect.left() + 12
-        top = self._image_rect.bottom() - height - 12
+        left = anchor.left() + 12
+        top = anchor.bottom() - height - 12
         box = QRectF(left, top, width, height)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(HUD_BACKGROUND)

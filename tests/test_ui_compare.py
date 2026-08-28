@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtCore import QPointF, QSize, QSizeF, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
@@ -88,24 +88,46 @@ def test_two_panel_modes_show_both_whole_frames(app: QApplication, mode: Compare
     image = preview.grab().toImage()
     before, after = preview.before_rect(), preview.after_rect()
     assert before.size() == after.size() and not before.intersects(after)
+    assert before == preview.before_panel_rect() and after == preview.after_panel_rect(), "fit mode: the whole frame"
     if mode is CompareMode.SIDE_BY_SIDE:
-        assert after.left() - before.right() >= PANEL_GAP - 1 and abs(before.top() - after.top()) < 1
+        assert abs(after.left() - before.right() - PANEL_GAP) < 1 and abs(before.top() - after.top()) < 1, "adjacent"
+        assert abs((before.left() + after.right()) / 2 - preview.width() / 2) < 1.5, "the pair is centred"
     else:
-        assert after.top() - before.bottom() >= PANEL_GAP - 1 and abs(before.left() - after.left()) < 1
+        assert abs(after.top() - before.bottom() - PANEL_GAP) < 1 and abs(before.left() - after.left()) < 1, "adjacent"
+        assert abs((before.top() + after.bottom()) / 2 - preview.height() / 2) < 1.5, "the pair is centred"
     assert abs(after.width() / after.height() - 320 / 180) < 0.02, "each panel keeps the frame's aspect ratio"
     assert image.pixelColor(before.center().toPoint()) == RED and image.pixelColor(after.center().toPoint()) == BLUE
 
     _press_move(preview, after.center(), after.topLeft() + QPointF(5, 5))
     assert image.pixelColor(after.center().toPoint()) == BLUE, "there is no divider to drag"
+
+    # At a fixed zoom the frames grow inside the panels, both stay on screen and the hand pans them together.
+    pans: list[tuple[int, int]] = []
+    preview.panRequested.connect(lambda dx, dy: pans.append((dx, dy)))
     preview.set_fit_mode(False)
     preview.set_display_reference_size(320, 180)
-    preview.set_zoom_factor(1.0)
-    hint = preview.sizeHint()
-    single = QSize(320 + 2 * 18, 180 + 2 * 18)
-    if mode is CompareMode.SIDE_BY_SIDE:
-        assert hint.width() == single.width() + 320 + PANEL_GAP and hint.height() == max(200, single.height())
-    else:
-        assert hint.height() == single.height() + 180 + PANEL_GAP and hint.width() == max(320, single.width())
+    preview.set_zoom_factor(4.0)  # 1280x720 per frame: more than a panel can show
+    assert preview.expands_to_viewport() and preview.sizeHint() == preview.minimumSizeHint()
+    image = preview.grab().toImage()
+    before_panel, after_panel = preview.before_panel_rect(), preview.after_panel_rect()
+    before, after = preview.before_rect(), preview.after_rect()
+    assert not before_panel.intersects(after_panel) and before_panel.size() == after_panel.size()
+    assert before.size() == QSizeF(1280, 720) == after.size(), "drawn at 400%"
+    assert before_panel.width() < 1280 or before_panel.height() < 720, "clipped to the panel"
+    assert before.topLeft() - before_panel.topLeft() == after.topLeft() - after_panel.topLeft(), "same region in both"
+    assert image.pixelColor(before_panel.center().toPoint()) == RED
+    assert image.pixelColor(after_panel.center().toPoint()) == BLUE
+    preview.set_pan_mode(True)
+    _press_move(preview, after_panel.center(), after_panel.center() + QPointF(-60, 0))
+    preview.grab()
+    assert preview.before_rect().left() == pytest.approx(before.left() - 60), "the content followed the hand"
+    assert preview.after_rect().left() == pytest.approx(after.left() - 60), "both panels moved together"
+    assert not pans, "the panels pan in place: nothing for the scroll area to do"
+    preview.set_pan_mode(False)
+
+    preview.set_compare_mode(CompareMode.SPLIT_VERTICAL)
+    assert not preview.expands_to_viewport(), "a split at a fixed zoom grows the widget and scrolls"
+    assert preview.sizeHint() == QSize(1280 + 2 * 18, 720 + 2 * 18)
     preview.close()
 
 
@@ -128,5 +150,11 @@ def test_compare_selector_sits_next_to_the_quality_selector(
     assert window.preview.compare_mode is CompareMode.SIDE_BY_SIDE
     window.preview.grab()
     assert not window.preview.before_rect().intersects(window.preview.after_rect())
+    select_combo_data(window.preview_zoom_combo, 200)
+    pump(app, 0.05)
+    assert window.preview_scroll.widgetResizable(), "two panels at a fixed zoom stay inside the viewport"
     select_combo_data(combo, CompareMode.SPLIT_VERTICAL.value)
     assert window.preview.compare_mode is CompareMode.SPLIT_VERTICAL
+    assert not window.preview_scroll.widgetResizable(), "a split at a fixed zoom scrolls"
+    window.preview_zoom_combo.setCurrentIndex(0)
+    assert window.preview_scroll.widgetResizable()

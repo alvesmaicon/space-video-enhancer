@@ -72,12 +72,21 @@ class PreviewSection(WindowState):
         percent = self.preview_zoom_combo.currentData()
         if percent is None:
             self.preview.set_fit_mode(True)
-            self.preview_scroll.setWidgetResizable(True)
         else:
             self.preview.set_fit_mode(False)
-            self.preview_scroll.setWidgetResizable(False)
             self.preview.set_zoom_factor(int(percent) / 100.0)
+        self._sync_preview_scroll()
         self._update_zoom_buttons()
+
+    def _sync_preview_scroll(self) -> None:
+        """The scroll area sizes the preview to its viewport, unless a split mode at a fixed zoom has to scroll.
+
+        Sized here, after the flag: while the area is still resizable it snaps the widget back to the viewport.
+        """
+        expands = self.preview.expands_to_viewport()
+        self.preview_scroll.setWidgetResizable(expands)
+        if not expands:
+            self.preview.resize(self.preview.sizeHint())
 
     def _update_zoom_buttons(self) -> None:
         current = self.preview.effective_zoom() * 100.0
@@ -104,6 +113,7 @@ class PreviewSection(WindowState):
     def _handle_compare_mode_changed(self, _index: int) -> None:
         mode = combo_enum(self.preview_compare_combo, CompareMode, CompareMode.SPLIT_VERTICAL)
         self.preview.set_compare_mode(mode)
+        self._sync_preview_scroll()
         self._update_zoom_buttons()
         log_event(LOG, "ui.compare_mode", mode=mode.value)
 
