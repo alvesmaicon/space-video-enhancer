@@ -719,6 +719,7 @@ class MainWindow(
         self.noise_tab.resetRequested.connect(self._reset_slider_to_preset)
         self.noise_tab.sampleResetRequested.connect(self._reset_denoise_sample_rect)
         self.export_tab.scaleChanged.connect(self._handle_filter_control_change)
+        self.export_tab.timelineFpsChanged.connect(self._handle_timeline_fps_change)
         self.export_tab.thread_combo.currentIndexChanged.connect(lambda _index: self._update_window_title())
 
     def _filter_sliders(self) -> dict[str, Any]:

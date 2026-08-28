@@ -301,6 +301,8 @@ class MediaSection(WindowState):
         self._sync_active_clip(force=True)
         self._update_timeline_markers()
         self._update_export_summary()
+        if self.sequence.clips:
+            self.export_tab.set_timeline_fps_options([clip.fps for clip in self.sequence.clips], self.sequence.fps)
         self._update_sequence_info()
         self.export_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
         self.remove_clip_action.setEnabled(len(self.sequence) > 1 and self._export_controller is None)
@@ -308,18 +310,36 @@ class MediaSection(WindowState):
         self.save_project_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
         self.save_project_as_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
 
+    def _handle_timeline_fps_change(self) -> None:
+        """The user picked another timeline fps: retime the whole sequence, keeping the playhead on its moment."""
+        new_fps = self.export_tab.timeline_fps()
+        if new_fps <= 0 or self.sequence.is_empty or abs(new_fps - self.sequence.fps) <= FPS_TOLERANCE:
+            return
+        self._stop_playback()
+        ratio = new_fps / self.sequence.fps  # keep each mark on the same instant, not the same frame number
+        self.sequence = replace(self.sequence, timeline_fps=new_fps)
+        self.current_frame_index = round(self.current_frame_index * ratio)
+        self.clip_start_frame = round(self.clip_start_frame * ratio)
+        self.clip_end_frame = round(self.clip_end_frame * ratio)
+        self._sequence_changed()  # clamps the playhead and markers to the new length, refreshes the fps combo
+        self.transport.set_value_silently(self.current_frame_index)
+        self._load_frame(self.current_frame_index)
+        self._commit_edit("fps da linha do tempo")
+        log_event(LOG, "sequence.timeline_fps", fps=round(new_fps, 3), frames=self.frame_count)
+        self.status.show_message(f"fps da linha do tempo: {new_fps:g}.")
+
     def _clip_blocks(self) -> list[ClipBlock]:
-        offsets = self.sequence.clip_offsets()
         return [
             ClipBlock(
-                offset,
-                clip.timeline_count,
+                self.sequence.clip_offsets()[index],
+                self.sequence.clip_span(index).count,  # timeline frames, retimed to the timeline fps
                 clip.name,
                 clip.source.path,
                 clip.range.start,
+                source_fps=clip.fps,
                 missing=clip.source.path in self._missing_sources,
             )
-            for offset, clip in zip(offsets, self.sequence.clips)
+            for index, clip in enumerate(self.sequence.clips)
         ]
 
     def _update_sequence_info(self) -> None:

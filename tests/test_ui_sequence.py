@@ -247,3 +247,26 @@ def test_dragging_a_clip_on_the_strip_reorders_the_sequence(
     assert [clip.name for clip in window.sequence.clips] == [ui_video_b.name, ui_video.name]
     assert window.current_frame_index == UI_VIDEO_B_FRAMES + 3, "the playhead stays on its frame of the moved clip"
     assert [block.name for block in timeline.clips()] == [ui_video_b.name, ui_video.name]
+
+
+def test_changing_the_timeline_fps_retimes_the_sequence_and_undoes(
+    app: QApplication, window: MainWindow, ui_video: Path, ui_video_other_fps: Path
+) -> None:
+    window._open_video(ui_video)  # 24 fps: pins the timeline
+    wait_for_preview(app, window)
+    window._add_video(ui_video_other_fps)  # 30 fps, retimed onto the 24 fps timeline
+    assert window.sequence.timeline_fps == UI_VIDEO_FPS
+    faster = window.sequence.clips[1].fps  # 30 fps, offered in the combo as a clip rate
+    window.transport.set_value(window.frame_count - 1)  # playhead at the end
+    before_seconds = window.current_frame_index / window.sequence.fps
+
+    select_combo_data(window.export_tab.timeline_fps_combo, faster)  # fires timelineFpsChanged
+
+    assert window.sequence.timeline_fps == faster and window.sequence.fps == faster
+    assert window.export_tab.timeline_fps() == faster
+    assert window.current_frame_index / window.sequence.fps == pytest.approx(before_seconds, abs=1 / faster)
+    assert window.undo_action.text().endswith("linha do tempo"), window.undo_action.text()
+
+    window._undo_edit()
+    assert window.sequence.timeline_fps == UI_VIDEO_FPS
+    assert window.export_tab.timeline_fps() == UI_VIDEO_FPS

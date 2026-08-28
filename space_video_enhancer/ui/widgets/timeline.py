@@ -228,10 +228,13 @@ class ClipBlock:
     start: int
     """First timeline frame."""
     count: int
+    """Timeline frames the clip occupies (retimed to the timeline fps: this is not the source frame count)."""
     name: str
     source: Path
     source_start: int = 0
-    """Source frame shown at ``start``; the clip is contiguous, so frame ``start + k`` is ``source_start + k``."""
+    """Source frame shown at ``start`` (the clip's first source frame). The frame-by-frame mapping is retimed."""
+    source_fps: float = 0.0
+    """The clip's own fps; ``0`` means it matches the timeline (no retiming). Used to place the waveform in time."""
     missing: bool = False
     """The file is not where the project says: the block is hatched and marked, nothing of it can be decoded."""
 
@@ -241,6 +244,15 @@ class ClipBlock:
 
     def contains(self, frame: int) -> bool:
         return self.start <= frame <= self.end
+
+    def source_seconds(self, local_timeline: np.ndarray, timeline_fps: float) -> np.ndarray:
+        """Source time (seconds) at ``local_timeline`` timeline frames into the clip (the waveform's time axis).
+
+        The clip keeps its duration when retimed, so ``local_timeline / timeline_fps`` seconds have passed within
+        it; its footage starts ``source_start`` frames in, at the clip's own fps.
+        """
+        fps = self.source_fps if self.source_fps > 0 else timeline_fps
+        return self.source_start / fps + local_timeline / timeline_fps
 
 
 @dataclass(frozen=True)
@@ -736,8 +748,9 @@ class TimelineWidget(QWidget):
                 continue
             found = True
             xs = np.arange(first, last + 1, dtype=np.float64)
-            frames = self.scale.scroll + xs / self.scale.pixels_per_frame - clip.start + clip.source_start
-            raw_edges = np.floor(frames / self._fps * peaks.buckets_per_second).astype(np.int64)
+            local = self.scale.scroll + xs / self.scale.pixels_per_frame - clip.start
+            seconds = clip.source_seconds(local, self._fps)
+            raw_edges = np.floor(seconds * peaks.buckets_per_second).astype(np.int64)
             edges = np.maximum.accumulate(np.clip(raw_edges, 0, peaks.bucket_count - 1))  # reduceat: non-decreasing
             column_minimums = np.minimum.reduceat(peaks.minimums, edges)[:-1]
             column_maximums = np.maximum.reduceat(peaks.maximums, edges)[:-1]

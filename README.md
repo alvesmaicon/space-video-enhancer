@@ -90,7 +90,7 @@ No **macOS**, o nome na barra de menus continua "Python" enquanto o app roda dir
 2. **Arquivo › Adicionar vídeo à sequência…** (Ctrl+Shift+O) para juntar mais arquivos; um clipe com fps diferente é reajustado para o fps da linha do tempo (o do primeiro clipe) — o modo de reajuste é por clipe na aba Estabilizar. Use as ferramentas sob a linha do tempo para marcar início `[` e fim `]`, remover um trecho, dividir, remover ou mover o clipe sob o playhead.
 3. **Estabilizar**: escolha o modo; em *camera lock* arraste o retângulo verde sobre a região que deve ficar parada e use "Usar este frame como referência" para fixar o frame de referência.
 4. **Ruído**: no modo *amostra*, arraste o retângulo azul sobre uma área lisa da imagem.
-5. **Exportar** (Ctrl+E): a aba mostra o resumo (trecho, trechos removidos, tamanho de saída) e o botão. **Arquivo › Salvar projeto** (Ctrl+S) guarda tudo para continuar depois.
+5. **Exportar** (Ctrl+E): a aba mostra o **fps da linha do tempo** (começa no do primeiro clipe; mudar aqui reajusta a sequência inteira e é o fps do arquivo), a escala de saída, as threads, o resumo (trecho, trechos removidos, tamanho de saída) e o botão. **Arquivo › Salvar projeto** (Ctrl+S) guarda tudo para continuar depois.
 
 Para uma segunda tela: **Exibir › Preview em janela separada** (Ctrl+Shift+D), arraste a janela (ou "Outra tela") e F11.
 
