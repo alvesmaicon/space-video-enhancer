@@ -232,6 +232,13 @@ def apply_chain(image: object, context: ProcessingContext, exposure_table: np.nd
     applied after the denoise, whose strength was estimated on the un-gained frame.
     """
     result = image
+    if context.scale_factor < 1.0:
+        # Downscale first so the costly denoise runs on the smaller frame (a 0.5x export at 1080p denoises
+        # ~5x faster than at 4K). Upscaling (>1.0) stays at the end: process at the source resolution.
+        with tracing.stage("filters.scale"):
+            result = cv2.resize(
+                result, None, fx=context.scale_factor, fy=context.scale_factor, interpolation=cv2.INTER_AREA
+            )
     if context.denoise_strength is not None:
         with tracing.stage("filters.denoise"):
             result = cv2.fastNlMeansDenoisingColored(
@@ -255,13 +262,10 @@ def apply_chain(image: object, context: ProcessingContext, exposure_table: np.nd
         blurred = cv2.GaussianBlur(result, (0, 0), sigmaX=SHARPEN_SIGMA)
         result = cv2.addWeighted(result, 1.0 + context.sharpen_amount, blurred, -context.sharpen_amount, 0)
     if context.scale_factor > 1.0:
-        result = cv2.resize(
-            result,
-            None,
-            fx=context.scale_factor,
-            fy=context.scale_factor,
-            interpolation=cv2.INTER_CUBIC,
-        )
+        with tracing.stage("filters.scale"):
+            result = cv2.resize(
+                result, None, fx=context.scale_factor, fy=context.scale_factor, interpolation=cv2.INTER_CUBIC
+            )
     return result
 
 

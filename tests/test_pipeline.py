@@ -112,6 +112,19 @@ def test_scale_factor_resizes_output(textured_frame: np.ndarray) -> None:
     assert result.shape[:2] == (405, 720)
 
 
+def test_scale_factor_below_one_downscales_before_denoise(textured_frame: np.ndarray) -> None:
+    """0.5x must actually halve the output (it used to be a no-op), and the denoise runs on the smaller frame."""
+    settings = RenderSettings(
+        filters=FilterSettings(denoise_mode=DenoiseMode.MANUAL, denoise_strength=20, scale_factor=0.5)
+    )
+    trace = RenderTrace()
+    result = render_frame(textured_frame, settings, trace=trace)
+    height, width = textured_frame.shape[:2]
+    assert result.shape[:2] == (height // 2, width // 2), "the output is half size"
+    order = list(trace.stages)
+    assert order.index("filters.scale") < order.index("filters.denoise"), "downscale happens before the denoise"
+
+
 def test_image_preset_original_and_zero_intensity_are_identity(textured_frame: np.ndarray) -> None:
     assert apply_image_filter_preset(textured_frame, "original", 1.0) is textured_frame
     assert apply_image_filter_preset(textured_frame, "dynamic_balance", 0.0) is textured_frame
