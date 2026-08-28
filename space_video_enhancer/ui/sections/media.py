@@ -136,7 +136,8 @@ class MediaSection(WindowState):
         self.project_path = project_path
         self._reference_frames.clear()
         self._wobble_analysis.cancel()
-        self._wobble_pending = None
+        self._wobble_pending.clear()
+        self._wobble_progress.clear()
         self._wobble_tracks.clear()
         self._waveforms_requested.clear()
         self._pcm_requested.clear()

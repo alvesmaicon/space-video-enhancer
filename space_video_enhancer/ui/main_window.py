@@ -196,8 +196,8 @@ class MainWindow(
         self._wobble_analysis.progress.connect(self._on_wobble_progress)
         self._wobble_analysis.finished.connect(self._on_wobble_finished)
         self._wobble_tracks: list[WobbleTrack] = []
-        self._wobble_pending: WobbleAnalysisRequest | None = None
-        self._wobble_progress = (0, 0)
+        self._wobble_pending: list[WobbleAnalysisRequest] = []
+        self._wobble_progress: dict[int, tuple[int, int]] = {}
         self._preview_controller.renderFailed.connect(self._on_render_failed)
         self._preview_generation = 0
         self._applied_preview_generation = -1

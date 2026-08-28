@@ -111,8 +111,10 @@ class WindowState(QMainWindow):
     _wobble_analysis: WobbleAnalysisController
     _wobble_tracks: list[WobbleTrack]
     """Rolling-shutter wobble analyses done so far (one per source range); see ``_wobble_track_for``."""
-    _wobble_pending: WobbleAnalysisRequest | None
-    _wobble_progress: tuple[int, int]
+    _wobble_pending: list[WobbleAnalysisRequest]
+    """Analyses queued or running (one per source range); a clip covered by one waits instead of re-queuing."""
+    _wobble_progress: dict[int, tuple[int, int]]
+    """``(frames done, total)`` per pending analysis generation, for the progress text."""
     _preview_generation: int
     _applied_preview_generation: int
     _thumbnail_generation: int

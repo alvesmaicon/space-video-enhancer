@@ -389,8 +389,9 @@ class AdjustmentsSection(WindowState):
         return f"leitura do sensor: {name}" + (f" ({source})" if source else "")
 
     def _wobble_status_text(self, trace: dict[str, object]) -> str:
-        if self._wobble_pending is not None:
-            done, total = self._wobble_progress
+        pending = self._pending_analysis_for_active_clip()
+        if pending is not None:
+            done, total = self._wobble_progress.get(pending.generation, (0, pending.count))
             return f"analisando a oscilação: {done * 100 // max(1, total)}% ({done}/{total} frames)"
         wobble = trace.get("rolling_shutter.wobble_px")
         if isinstance(wobble, (list, tuple)) and len(wobble) == 2:
@@ -407,17 +408,17 @@ class AdjustmentsSection(WindowState):
         for track in self._wobble_tracks:
             if track.source == clip.source.path and track.covers(first, last):
                 return track
-        pending = self._wobble_pending
-        if pending is not None and pending.covers(clip.source.path, first, last):
-            return None
+        if any(request.covers(clip.source.path, first, last) for request in self._wobble_pending):
+            return None  # already queued or running: switching away and back does not restart it
         if clip.source.path in self._missing_sources:
             return None
         window = wobble_window_frames(clip.fps)
         margin = max(window, round(WOBBLE_ANALYSIS_MARGIN_SECONDS * clip.fps))
         start = max(0, first - margin)
         end = min(clip.source.last_frame, last + margin)
-        self._wobble_pending = self._wobble_analysis.analyze(clip.source.path, start, end, window)
-        self._wobble_progress = (0, end - start + 1)
+        request = self._wobble_analysis.analyze(clip.source.path, start, end, window)
+        self._wobble_pending.append(request)
+        self._wobble_progress[request.generation] = (0, end - start + 1)
         log_event(LOG, "ui.wobble_analysis_start", clip=clip.name, first=start, last=end, window=window)
         self.status.show_message(
             f"Analisando a oscilação do rolling shutter de {clip.name} ({end - start + 1} frames) em segundo plano…"
@@ -425,23 +426,30 @@ class AdjustmentsSection(WindowState):
         self._update_capture_info()
         return None
 
+    def _pending_analysis_for_active_clip(self) -> WobbleAnalysisRequest | None:
+        clip = self.active_clip
+        if clip is None:
+            return None
+        first, last = clip.range.start, clip.range.end
+        return next(
+            (request for request in self._wobble_pending if request.covers(clip.source.path, first, last)), None
+        )
+
     def _answers_pending_analysis(self, request: object) -> bool:
-        pending = self._wobble_pending
-        return (
-            isinstance(request, WobbleAnalysisRequest)
-            and pending is not None
-            and request.generation == pending.generation
+        return isinstance(request, WobbleAnalysisRequest) and any(
+            request.generation == pending.generation for pending in self._wobble_pending
         )
 
     def _on_wobble_progress(self, request: object, done: int, total: int) -> None:
-        if self._answers_pending_analysis(request):
-            self._wobble_progress = (done, total)
+        if isinstance(request, WobbleAnalysisRequest) and self._answers_pending_analysis(request):
+            self._wobble_progress[request.generation] = (done, total)
             self._update_capture_info()
 
     def _on_wobble_finished(self, request: object, track: object, elapsed_ms: float) -> None:
         if not isinstance(request, WobbleAnalysisRequest) or not self._answers_pending_analysis(request):
-            return  # answers a request that was replaced meanwhile
-        self._wobble_pending = None
+            return  # answers a request from a document that is gone
+        self._wobble_pending = [pending for pending in self._wobble_pending if pending.generation != request.generation]
+        self._wobble_progress.pop(request.generation, None)
         if not isinstance(track, WobbleTrack):
             log_event(LOG, "ui.wobble_analysis_failed", name=request.source.name)
             self.status.show_message(f"Não foi possível analisar a oscilação de {request.source.name}.")

@@ -13,9 +13,12 @@ from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.project import load_project
-from space_video_enhancer.settings import DeinterlaceMode, ReadoutAxis
+from space_video_enhancer.sequence import Clip, ClipSource
+from space_video_enhancer.settings import DeinterlaceMode, ReadoutAxis, RenderSettings, StabilizationSettings
+from space_video_enhancer.timeline import FrameRange
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
+from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisRequest, WobbleAnalysisWorker
 from tests.qt_helpers import pump, wait_for_preview, wait_until
 
 
@@ -52,7 +55,7 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     assert "exportação sequencial" not in tab.info_label.text(), "the stabilization mode itself is still off"
     assert "rolling shutter" in tab.capture_info_label.text()
     # The wobble checkbox started an analysis of the clip on its own thread; the preview follows once it lands.
-    wait_until(app, lambda: window._wobble_pending is None and bool(window._wobble_tracks), what="wobble analysis")
+    wait_until(app, lambda: not window._wobble_pending and bool(window._wobble_tracks), what="wobble analysis")
     wait_for_preview(app, window)
     track = window._wobble_tracks[0]
     assert track.source == ui_video and track.covers(0, 11) and track.count == 12
@@ -132,6 +135,59 @@ def test_hand_tool_pans_the_zoomed_preview_instead_of_moving_the_split(
     window.keyPressEvent(_key_event(Qt.Key.Key_H))
     assert window.pan_action.isChecked(), "H toggles the hand from anywhere the key is not used"
     window.pan_action.setChecked(False)
+
+
+def test_switching_clips_does_not_restart_a_running_wobble_analysis(
+    app: QApplication, window: MainWindow, ui_video: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The complaint: leaving a clip mid-analysis and coming back used to cancel and restart it from zero."""
+    source = ClipSource(ui_video, frame_count=400, fps=30.0, width=320, height=180)
+    settings = RenderSettings(stabilization=StabilizationSettings(rolling_shutter_auto=True))
+    clip_a = Clip(source, FrameRange(50, 90), settings=settings)
+    clip_b = Clip(source, FrameRange(250, 290), settings=settings)
+
+    calls: list[tuple[int, int]] = []
+    generation = [0]
+
+    def record(source_path: Path, first: int, last: int, analysis_window: int) -> WobbleAnalysisRequest:
+        # Record the request instead of starting the real thread (which would need the frames decoded).
+        generation[0] += 1
+        calls.append((first, last))
+        return WobbleAnalysisRequest(generation[0], source_path, first, last, analysis_window)
+
+    monkeypatch.setattr(window._wobble_analysis, "analyze", record)  # the real controller stays alive for teardown
+    window._wobble_pending.clear()
+    window._wobble_tracks.clear()
+
+    assert window._wobble_track_for(clip_a) is None, "clip A has no track yet: it starts one"
+    assert window._wobble_track_for(clip_b) is None, "switching to B queues B without touching A"
+    assert window._wobble_track_for(clip_a) is None, "back on A: still pending, not restarted"
+    assert window._wobble_track_for(clip_b) is None
+    assert len(calls) == 2, f"each clip is analysed once, not restarted on every visit: {calls}"
+    assert {call[0] for call in calls} == {0, 250 - 60}, "one analysis per clip range (2 s margin at 30 fps)"
+
+
+def test_the_analysis_queue_keeps_running_work_and_takes_the_newest_next(app: QApplication) -> None:
+    """The worker never drops the running analysis for a newer one; it just queues, newest first."""
+    worker = WobbleAnalysisWorker()
+    a = WobbleAnalysisRequest(1, Path("v.mp4"), 0, 10, 3)
+    b = WobbleAnalysisRequest(2, Path("v.mp4"), 20, 30, 3)
+    c = WobbleAnalysisRequest(3, Path("v.mp4"), 40, 50, 3)
+    worker.post(a)
+    worker.post(b)
+    worker.post(c)
+    assert worker._next() is c, "the clip the user just moved to is analysed next"
+    assert worker._next() is b
+    assert worker._next() is a
+    assert worker._next() is None
+
+    worker.post(a)
+    worker.post(b)
+    worker.cancel(2)  # a new document: drop everything up to generation 2
+    assert worker._next() is None, "the queue is cleared on a document change"
+    later = WobbleAnalysisRequest(3, Path("w.mp4"), 0, 10, 3)
+    worker.post(later)
+    assert worker._next() is later, "an analysis queued after the change still runs"
 
 
 def _key_event(key: Qt.Key) -> QKeyEvent:

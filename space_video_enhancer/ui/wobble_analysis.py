@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,26 +49,34 @@ class WobbleAnalysisWorker(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._lock = threading.Lock()
-        self._pending: WobbleAnalysisRequest | None = None
-        self._latest_generation = 0
+        self._queue: deque[WobbleAnalysisRequest] = deque()
+        """Waiting analyses, oldest at the left; the newest is taken first so the clip in view is next."""
+        self._cancel_floor = 0
+        """Requests at or below this generation are dropped: set only when the document changes."""
 
     def post(self, request: WobbleAnalysisRequest) -> None:
-        """GUI thread: replace whatever is waiting; the running analysis notices between two frames."""
+        """GUI thread: queue one analysis. Switching clips never cancels the running one — it just adds work."""
         with self._lock:
-            self._pending = request
-            self._latest_generation = request.generation
+            self._queue.append(request)
 
-    def cancel(self, generation: int) -> None:
-        """GUI thread: drop the waiting request and stop the running one (``generation`` is the new floor)."""
+    def cancel(self, floor: int) -> None:
+        """GUI thread: drop every queued analysis and stop the running one (``floor`` = clear up to this generation)."""
         with self._lock:
-            self._pending = None
-            self._latest_generation = generation
+            self._queue.clear()
+            self._cancel_floor = floor
+
+    def _next(self) -> WobbleAnalysisRequest | None:
+        with self._lock:
+            while self._queue:
+                request = self._queue.pop()  # newest first: the clip the user just moved to
+                if request.generation > self._cancel_floor:
+                    return request
+            return None
 
     @Slot()
     def process(self) -> None:
         while True:
-            with self._lock:
-                request, self._pending = self._pending, None
+            request = self._next()
             if request is None:
                 return
             self._analyze(request)
@@ -97,7 +106,7 @@ class WobbleAnalysisWorker(QObject):
                 request.window,
                 rotation=video.rotation,
                 progress=report,
-                cancelled=lambda: self._latest_generation != request.generation,
+                cancelled=lambda: request.generation <= self._cancel_floor,
             )
         finally:
             video.release()
@@ -147,7 +156,7 @@ class WobbleAnalysisController(QObject):
         self._thread.start()
 
     def analyze(self, source: Path, first: int, last: int, window: int) -> WobbleAnalysisRequest:
-        """Queue one range (cancelling any other); returns the request the results will carry."""
+        """Queue one range without disturbing a running analysis; returns the request the results will carry."""
         self._generation += 1
         request = WobbleAnalysisRequest(self._generation, source, first, last, window)
         self._worker.post(request)
