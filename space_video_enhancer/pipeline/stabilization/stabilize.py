@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from space_video_enhancer.pipeline.stabilization import estimators, transforms
+from space_video_enhancer.pipeline.stabilization import estimators, rolling_shutter, transforms
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import StabilizationMode, StabilizationSettings, clamp_unit
 from space_video_enhancer.telemetry.trace import note
@@ -72,11 +72,20 @@ def apply_stabilization(
     ``state`` carries the inter-frame memory (previous frame, accumulated correction);
     ``reference_frame`` is the locked reference for camera lock / hybrid.
     """
-    if not settings.enabled or settings.intensity <= 0.0:
+    stabilizing = settings.enabled and settings.intensity > 0.0
+    if not stabilizing and not settings.corrects_rolling_shutter:
         return frame
-    note("stabilization.mode", settings.mode.value)
 
-    correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
+    correction: np.ndarray | None = None
+    if stabilizing:
+        note("stabilization.mode", settings.mode.value)
+        correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
+    if settings.corrects_rolling_shutter:
+        # Uses the inter-frame motion estimated just above (or estimates a translation when no mode did).
+        frame = unskew_rolling_shutter(frame, settings, frame_index, state)
+    if not stabilizing:
+        return frame
+
     applied: np.ndarray | None = None
     if correction is None:
         note("stabilization.result", "no_transform")
@@ -96,6 +105,35 @@ def apply_stabilization(
         # Always, even without a correction: the zoom must not pop in and out between frames.
         stabilized = transforms.stabilization_crop(stabilized, applied, CORRECTION_BUDGET_FRACTION)
     return stabilized
+
+
+def unskew_rolling_shutter(
+    frame: np.ndarray,
+    settings: StabilizationSettings,
+    frame_index: int | None,
+    state: StabilizationState | None,
+) -> np.ndarray:
+    """``frame`` with the rolling-shutter skew of this frame period undone (see :mod:`rolling_shutter`).
+
+    The scene displacement comes from the inter-frame transform already estimated for this frame
+    when an automatic mode (or hybrid) ran; camera lock and "off" estimate a plain translation here.
+    Without a previous frame there is no motion to speak of and the frame passes unchanged.
+    """
+    if state is None:
+        note("rolling_shutter.result", "no_state")
+        return frame
+    if frame_index is not None and state.last_transform_index == frame_index:
+        delta = state.last_transform  # None when that estimate failed: nothing to gain by trying again
+    else:
+        delta = estimators.estimate_inter_frame_transform(frame, frame_index, state, StabilizationMode.AUTO)
+    if delta is None:
+        note("rolling_shutter.result", "no_motion")
+        return frame
+    displacement = rolling_shutter.center_displacement(delta, frame.shape)
+    note("rolling_shutter.shift_px", [round(displacement[0], 2), round(displacement[1], 2)])
+    corrected = rolling_shutter.correct(frame, displacement, settings.rolling_shutter)
+    note("rolling_shutter.result", "applied" if corrected is not frame else "negligible")
+    return corrected
 
 
 def estimate_correction(

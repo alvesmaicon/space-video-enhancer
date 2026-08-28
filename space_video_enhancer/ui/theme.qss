@@ -172,7 +172,7 @@ QToolButton#previewToggle {
     background: white;
     border: 1px solid #d6d3d1;
     border-radius: 8px;
-    padding: 4px 12px;
+    padding: 4px 9px;
     color: #1f2937;
     font-weight: 600;
 }

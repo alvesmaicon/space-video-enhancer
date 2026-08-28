@@ -405,6 +405,7 @@ class MediaSection(WindowState):
         self.crop_rect_norm = norm_to_qrect(settings.crop.rect)
         self.denoise_sample_rect_norm = norm_to_qrect(settings.denoise_sample_rect)
         self.stabilization_tab.apply(settings.stabilization)
+        self.stabilization_tab.apply_capture(settings.capture)
         self.stabilization_rect_norm = norm_to_qrect(settings.stabilization.focus_rect)
         self.white_balance_gains = settings.grade.white_balance_gains
         self.white_balance_rect_norm = norm_to_qrect(settings.grade.region)

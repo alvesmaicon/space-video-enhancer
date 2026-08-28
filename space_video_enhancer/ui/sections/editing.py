@@ -33,6 +33,7 @@ SETTINGS_SECTION_NAMES = {
     "denoise_sample_rect": "amostra de ruído",
     "grade": "HSL",
     "exposure": "exposição",
+    "capture": "captura",
 }
 """Undo labels for a change confined to one section of ``RenderSettings`` (keys of ``diff_settings``)."""
 

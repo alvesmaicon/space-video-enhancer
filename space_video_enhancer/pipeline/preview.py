@@ -17,6 +17,7 @@ from typing import Union
 import cv2
 import numpy as np
 
+from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect, normalized_through_geometry
 from space_video_enhancer.pipeline.render import render_frame
@@ -184,13 +185,17 @@ def render_preview(
         seeks, sequential_reads = video.seeks, video.sequential_reads
         trace.note("decode.sequential", decode_sequential)
 
-    source = downscale_to_limit(frame, request.size_limit)
+    with trace.stage("capture"):  # on the native rows: a resize would blur the comb away and back
+        prepared, comb = prepare_source(frame, request.settings.capture.deinterlace)
+    trace.note("deinterlace.mode", request.settings.capture.deinterlace.value)
+    trace.note("deinterlace.comb", round(comb, 4))
+    source = downscale_to_limit(prepared, request.size_limit)
     reference = request.stabilization_reference
     if reference is not None:
         reference = downscale_to_limit(reference, request.size_limit)
 
     with trace.stage("before"):
-        before = apply_geometry(source, request.settings.geometry)
+        before = apply_geometry(downscale_to_limit(frame, request.size_limit), request.settings.geometry)
     after = render_frame(
         source,
         request.settings,
@@ -199,6 +204,7 @@ def render_preview(
         stabilization_reference=reference,
         backend=backend,
         trace=trace,
+        source_prepared=True,
     )
     if request.canvas_aspect is not None:
         with trace.stage("letterbox"):

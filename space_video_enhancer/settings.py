@@ -36,6 +36,14 @@ class StabilizationMode(str, Enum):
         return self in (StabilizationMode.AUTO, StabilizationMode.SIMILARITY, StabilizationMode.PERSPECTIVE)
 
 
+class DeinterlaceMode(str, Enum):
+    OFF = "off"
+    ADAPTIVE = "adaptive"
+    """Interpolate only the pixels where the two fields disagree (combing); static areas keep full resolution."""
+    FIELD = "field"
+    """Keep one field and interpolate the other everywhere: removes all combing at half the vertical detail."""
+
+
 class RotationMode(str, Enum):
     NONE = "none"
     CW_90 = "90"
@@ -220,17 +228,32 @@ class StabilizationSettings:
     focus_rect: NormalizedRect = DEFAULT_STABILIZATION_RECT
     auto_crop: bool = True
     zoom_out: bool = False
+    rolling_shutter: float = 0.0
+    """Rolling-shutter skew to undo, as the sensor readout time over the frame period (0 = off, 1 = a full frame)."""
 
     @property
     def enabled(self) -> bool:
         return self.mode is not StabilizationMode.OFF
 
     @property
+    def corrects_rolling_shutter(self) -> bool:
+        return self.rolling_shutter > 0.0
+
+    @property
     def requires_sequential_processing(self) -> bool:
-        """True when frame N depends on frame N-1 (inter-frame motion or temporal smoothing)."""
+        """True when frame N depends on frame N-1 (inter-frame motion, temporal smoothing, rolling shutter)."""
+        if self.corrects_rolling_shutter:
+            return True
         return self.enabled and (
             self.mode.uses_auto_motion or self.mode is StabilizationMode.HYBRID or self.temporal_smoothing > 0.0
         )
+
+
+@dataclass(frozen=True)
+class CaptureSettings:
+    """Artefacts of how the frame was captured, undone before anything else looks at it."""
+
+    deinterlace: DeinterlaceMode = DeinterlaceMode.OFF
 
 
 HUE_BAND_NAMES = ("red", "orange", "yellow", "green", "cyan", "blue", "purple", "magenta")
@@ -325,6 +348,7 @@ class RenderSettings:
     denoise_sample_rect: NormalizedRect = DEFAULT_DENOISE_SAMPLE_RECT
     grade: ColorGradeSettings = field(default_factory=ColorGradeSettings)
     exposure: ExposureLockSettings = field(default_factory=ExposureLockSettings)
+    capture: CaptureSettings = field(default_factory=CaptureSettings)
 
     def output_size(self, width: int, height: int) -> tuple[int, int]:
         """Size of the exported frame for a ``width x height`` source: scale, rotation, then crop.

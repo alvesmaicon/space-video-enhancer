@@ -369,6 +369,17 @@ class MainWindow(
         for action in self._transport_actions():
             action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             self.preview.addAction(action)
+        self.pan_action = QAction("Mão: arrastar o preview", self)
+        self.pan_action.setCheckable(True)
+        self.pan_action.setShortcut("H")
+        self.pan_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.pan_action.setIcon(glyph_icon("hand", QColor("#1f2937")))
+        self.pan_action.setToolTip(
+            "Com o preview maior que a área, arraste a imagem com o botão esquerdo em vez de mover o divisor (H). "
+            "O botão do meio do mouse arrasta sempre."
+        )
+        self.pan_action.toggled.connect(self._toggle_pan)
+        self.preview.addAction(self.pan_action)
         self.zoom_fit_action = self._make_action("Ajustar à janela", self._zoom_to_fit, "Ctrl+0")
         self.zoom_in_action = self._make_action(
             "Aumentar zoom", lambda: self._step_preview_zoom(1), QKeySequence.StandardKey.ZoomIn
@@ -476,8 +487,14 @@ class MainWindow(
         row.addWidget(self.preview_zoom_out_button)
         row.addWidget(self.preview_zoom_combo)
         row.addWidget(self.preview_zoom_in_button)
-        row.addSpacing(12)
         row.addWidget(self.preview_render_mode_combo)
+        self.pan_button = QToolButton()
+        self.pan_button.setDefaultAction(self.pan_action)
+        self.pan_button.setObjectName("previewToggle")
+        self.pan_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.pan_button.setIconSize(QSize(16, 16))
+        self.pan_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        row.addWidget(self.pan_button)
         row.addStretch(1)
         self.hud_button = QToolButton()
         self.hud_button.setDefaultAction(self.hud_action)
@@ -599,6 +616,7 @@ class MainWindow(
         view_menu.addAction(self.zoom_fit_action)
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
+        view_menu.addAction(self.pan_action)
         view_menu.addSeparator()
         view_menu.addAction(self.hud_action)
         view_menu.addAction(self.vectors_action)
@@ -617,6 +635,7 @@ class MainWindow(
         self.preview.stabilizationChanged.connect(self._handle_preview_stabilization_changed)
         self.preview.whiteBalanceChanged.connect(self._handle_preview_white_balance_changed)
         self.preview.openRequested.connect(self._select_video)
+        self.preview.panRequested.connect(self._handle_preview_pan)
 
         self.settings_tabs.currentChanged.connect(self._handle_tab_changed)
         self.preview_zoom_out_button.clicked.connect(lambda: self._step_preview_zoom(-1))
@@ -664,6 +683,7 @@ class MainWindow(
         self.filters_tab.intensityChanged.connect(self._handle_image_filter_changed)
         self.stabilization_tab.modeChanged.connect(self._handle_stabilization_mode_changed)
         self.stabilization_tab.controlChanged.connect(self._handle_stabilization_control_change)
+        self.stabilization_tab.captureChanged.connect(self._handle_stabilization_control_change)
         self.stabilization_tab.resetRequested.connect(self._reset_stabilization_rect)
         self.stabilization_tab.referenceRequested.connect(self._set_stabilization_reference_here)
         self.geometry_tab.geometryChanged.connect(self._handle_geometry_change)
@@ -741,6 +761,7 @@ class MainWindow(
                 self.grade_tab.settings(self.white_balance_gains), region=qrect_to_norm(self.white_balance_rect_norm)
             ),
             exposure=self.grade_tab.exposure_settings(qrect_to_norm(self.white_balance_rect_norm)),
+            capture=self.stabilization_tab.capture_settings(),
         )
 
     def _preview_render_mode(self) -> PreviewRenderMode:
@@ -772,6 +793,7 @@ class MainWindow(
             Qt.Key.Key_I: self._mark_clip_start,
             Qt.Key.Key_O: self._mark_clip_end,
             Qt.Key.Key_X: self._toggle_cut_mark,
+            Qt.Key.Key_H: self.pan_action.toggle,
             Qt.Key.Key_Delete: self._remove_selected_cut,
             Qt.Key.Key_Backspace: self._remove_selected_cut,
         }

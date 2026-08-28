@@ -261,6 +261,9 @@ class WindowState(QMainWindow):
     # --- methods one section calls on another; each is implemented by the section named in its body ---
 
     # implemented by adjustments.py
+    def _update_capture_info(self) -> None:
+        raise NotImplementedError  # adjustments
+
     @staticmethod
     def _default_crop_rect(aspect_ratio: float | None) -> QRectF:
         raise NotImplementedError  # adjustments

@@ -1,7 +1,8 @@
 """The single frame pipeline shared by preview, thumbnails and export.
 
-Order: exposure lock metering (on the source frame) -> stabilize -> basic filters (exposure gains,
-white balance, tonal, hue bands, scale) -> image preset -> geometry -> crop.
+Order: capture fixes (deinterlace, at native size) -> exposure lock metering (on the source frame) ->
+stabilize (with rolling-shutter unskew) -> basic filters (exposure gains, white balance, tonal, hue
+bands, scale) -> image preset -> geometry -> crop.
 Crop is last so the rectangle drawn on the (rotated/flipped) preview means the same
 thing on export.
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.exposure import exposure_lock_table
 from space_video_enhancer.pipeline.filters import (
     OpenCLBackend,
@@ -46,6 +48,7 @@ def render_frame(
     crop: bool = False,
     backend: OpenCLBackend | None = None,
     trace: RenderTrace | None = None,
+    source_prepared: bool = False,
 ) -> np.ndarray:
     """Run the full pipeline on one frame.
 
@@ -54,9 +57,17 @@ def render_frame(
     - ``image_filter``: override the preset selection (used by the thumbnail strip).
     - ``crop``: apply the crop (export); the preview draws it as an overlay instead.
     - ``trace``: collect stage timings and pipeline decisions for this render.
+    - ``source_prepared``: the caller already ran the capture stage on the full-size frame (the
+      preview does, before downscaling — deinterlacing must see the native rows).
     """
     with tracing.active(trace):
         tracing.note("input_shape", list(frame.shape[:2]))
+
+        if not source_prepared:
+            with tracing.stage("capture"):
+                frame, comb = prepare_source(frame, settings.capture.deinterlace)
+            tracing.note("deinterlace.mode", settings.capture.deinterlace.value)
+            tracing.note("deinterlace.comb", round(comb, 4))
 
         with tracing.stage("exposure"):
             # Metered on the source frame so the region matches the rectangle on the "before" preview.

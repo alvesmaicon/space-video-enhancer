@@ -88,6 +88,17 @@ class PreviewSection(WindowState):
         if target is not None:
             select_combo_data(self.preview_zoom_combo, target)
 
+    def _toggle_pan(self, checked: bool) -> None:
+        self.preview.set_pan_mode(checked)
+        log_event(LOG, "ui.pan_tool", enabled=checked)
+
+    def _handle_preview_pan(self, dx: int, dy: int) -> None:
+        """Scroll the zoomed preview by the drag delta (nothing happens in fit mode: there is nothing to scroll)."""
+        horizontal = self.preview_scroll.horizontalScrollBar()
+        vertical = self.preview_scroll.verticalScrollBar()
+        horizontal.setValue(horizontal.value() + dx)
+        vertical.setValue(vertical.value() + dy)
+
     def _handle_preview_render_mode_changed(self, _index: int) -> None:
         self.preview.set_render_quality(self._preview_render_mode() is not PreviewRenderMode.FAST)
         if self._monitor is not None:
@@ -243,6 +254,7 @@ class PreviewSection(WindowState):
             self.status.set_render_busy(False)
         self._update_denoise_info()
         self._update_exposure_info()
+        self._update_capture_info()
         if not self._main_preview_paused:
             self._update_hud()
         self._schedule_filter_thumbnails_refresh()

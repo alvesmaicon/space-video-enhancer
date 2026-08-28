@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from space_video_enhancer.pipeline.stabilization import transforms
+from space_video_enhancer.pipeline.stabilization import rolling_shutter, transforms
 from space_video_enhancer.pipeline.stabilization.estimators import (
     estimate_camera_lock_transform,
     estimate_inter_frame_transform,
@@ -363,3 +363,53 @@ def test_state_reset_clears_everything() -> None:
     state = StabilizationState(prev_frame_index=3, lock_lost_frames=2)
     state.reset()
     assert state == StabilizationState()
+
+
+# --- rolling shutter ------------------------------------------------------------------------------
+
+
+def _bars_scene() -> np.ndarray:
+    frame = np.full((180, 320, 3), 40, dtype=np.uint8)
+    for x in (60, 140, 220):
+        frame[:, x : x + 6] = 230
+    return frame
+
+
+def _edge_columns(frame: np.ndarray, row: int) -> list[int]:
+    luma = frame[row, :, 1].astype(int)
+    return [int(x) for x in np.flatnonzero(np.diff(luma) > 60) + 1]
+
+
+def test_rolling_shutter_correction_straightens_a_skewed_frame() -> None:
+    scene = _bars_scene()
+    skewed = rolling_shutter.skew(scene, (16.0, 0.0), 1.0)  # the scene moved 16 px/frame during a full readout
+    top, bottom = _edge_columns(skewed, 2), _edge_columns(skewed, 177)
+    assert bottom[0] - top[0] >= 14, "the simulated shutter leans the bars"
+    fixed = rolling_shutter.correct(skewed, (16.0, 0.0), 1.0)
+    top, bottom = _edge_columns(fixed, 2), _edge_columns(fixed, 177)
+    assert abs(bottom[0] - top[0]) <= 1 and abs(top[0] - 60) <= 1, "after correction the bars stand upright"
+    assert rolling_shutter.correct(scene, (0.4, 0.0), 1.0) is scene, "sub-pixel skew is left alone"
+
+
+def test_center_displacement_is_the_opposite_of_where_delta_sends_the_centre() -> None:
+    delta = transforms.translation_to_affine(-12.0, 5.0)  # aligns this frame onto the previous one
+    assert rolling_shutter.center_displacement(delta, (180, 320)) == pytest.approx((12.0, -5.0))
+    homography = transforms.affine_to_homography(delta)
+    assert rolling_shutter.center_displacement(homography, (180, 320)) == pytest.approx((12.0, -5.0))
+
+
+def test_apply_stabilization_unskews_with_the_mode_off_and_needs_the_previous_frame() -> None:
+    scene = _bars_scene()
+    settings = StabilizationSettings(rolling_shutter=1.0)
+    assert settings.corrects_rolling_shutter and settings.requires_sequential_processing and not settings.enabled
+    assert apply_stabilization(scene, settings, frame_index=0, state=None) is scene, "no state: nothing to measure"
+
+    state = StabilizationState()
+    previous = rolling_shutter.skew(scene, (16.0, 0.0), 1.0)
+    current = rolling_shutter.skew(np.roll(scene, 16, axis=1), (16.0, 0.0), 1.0)
+    assert apply_stabilization(previous, settings, frame_index=0, state=state) is previous, "first frame: primes"
+    fixed = apply_stabilization(current, settings, frame_index=1, state=state)
+    assert fixed is not current
+    top, bottom = _edge_columns(fixed, 2), _edge_columns(fixed, 177)
+    assert abs(bottom[0] - top[0]) <= 2, f"bars should be upright after the unskew, got {top} / {bottom}"
+    assert apply_stabilization(scene, StabilizationSettings(), frame_index=2, state=state) is scene

@@ -332,6 +332,8 @@ class ComparePreview(QWidget):
     whiteBalanceChanged = Signal(QRectF)
     openRequested = Signal()
     """The empty-state "Abrir vídeo" button was clicked."""
+    panRequested = Signal(int, int)
+    """Drag with the hand tool (or the middle button): scroll the view by this many pixels (dx, dy)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -347,6 +349,9 @@ class ComparePreview(QWidget):
         self._hud_visible = False
         self._hud_lines: list[str] = []
         self._motion: MotionOverlay | None = None
+        self._pan_mode = False
+        self._pan_anchor: QPointF | None = None
+        """Global position of the last pan event (global: the widget moves under the mouse while it scrolls)."""
 
         self.crop = SelectionOverlay(CROP_STYLE, QRectF(0.1, 0.1, 0.8, 0.8), self.cropChanged.emit)
         self.sample = SelectionOverlay(SAMPLE_STYLE, QRectF(0.33, 0.33, 0.34, 0.34), self.sampleChanged.emit)
@@ -431,6 +436,16 @@ class ComparePreview(QWidget):
         self.update()
 
     # --- state ---------------------------------------------------------------------------
+    @property
+    def pan_mode(self) -> bool:
+        return self._pan_mode
+
+    def set_pan_mode(self, enabled: bool) -> None:
+        """Hand tool: left-drag scrolls the zoomed image instead of moving the split or an overlay."""
+        self._pan_mode = enabled
+        self._pan_anchor = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor if enabled else Qt.CursorShape.SizeHorCursor)
+
     def set_hud_visible(self, visible: bool) -> None:
         self._hud_visible = visible
         self.update()
@@ -534,6 +549,12 @@ class ComparePreview(QWidget):
 
     # --- mouse ---------------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton or (
+            event.button() == Qt.MouseButton.LeftButton and self._pan_mode
+        ):
+            self._pan_anchor = event.globalPosition()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._image_rect.contains(event.position()):
@@ -547,6 +568,14 @@ class ComparePreview(QWidget):
         self._update_split_ratio(event.position().x())
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._pan_anchor is not None:
+            if event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton):
+                delta = self._pan_anchor - event.globalPosition()
+                self._pan_anchor = event.globalPosition()
+                self.panRequested.emit(round(delta.x()), round(delta.y()))
+            return
+        if self._pan_mode:
+            return  # nothing else to hover or drag with the hand tool
         left_pressed = bool(event.buttons() & Qt.MouseButton.LeftButton)
         for overlay in self._overlays:
             if overlay.interactive and overlay.dragging and left_pressed:
@@ -565,6 +594,10 @@ class ComparePreview(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         del event
+        if self._pan_anchor is not None:
+            self._pan_anchor = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor if self._pan_mode else Qt.CursorShape.SizeHorCursor)
+            return
         for overlay in self._overlays:
             overlay.end_drag()
         if any(overlay.enabled for overlay in self._overlays):

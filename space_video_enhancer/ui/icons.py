@@ -16,7 +16,7 @@ STROKE_WIDTH = 0.11
 """Line width of the stroked glyphs as a fraction of the icon size."""
 FILLED_GLYPHS = frozenset({"first", "previous", "play", "pause", "next", "last"})
 STROKED_GLYPHS = frozenset(
-    {"mark_in", "mark_out", "remove_range", "split", "trash", "move_left", "move_right", "detach"}
+    {"mark_in", "mark_out", "remove_range", "split", "trash", "move_left", "move_right", "detach", "hand"}
 )
 
 
@@ -138,6 +138,15 @@ def _draw_stroked(painter: QPainter, kind: str, size: float, color: QColor) -> N
         painter.drawLine(QPointF(middle, middle), QPointF(right, top))
         painter.drawLine(QPointF(right - size * 0.28, top), QPointF(right, top))
         painter.drawLine(QPointF(right, top), QPointF(right, top + size * 0.28))
+    elif kind == "hand":
+        # An open hand: palm, four fingers with round tips, thumb out to the left.
+        palm = QRectF(left + size * 0.2, middle - size * 0.02, size * 0.42, size * 0.36)
+        painter.drawRoundedRect(palm, size * 0.1, size * 0.1)
+        for index, (offset, tip) in enumerate(((0.06, 0.22), (0.17, 0.12), (0.28, 0.14), (0.38, 0.26))):
+            del index
+            x = palm.left() + size * offset + size * 0.01
+            painter.drawLine(QPointF(x, palm.top()), QPointF(x, top + size * tip))
+        painter.drawLine(QPointF(palm.left(), palm.center().y()), QPointF(left, middle - size * 0.16))
     elif kind in ("move_left", "move_right"):
         head = right if kind == "move_right" else left
         tail = left if kind == "move_right" else right

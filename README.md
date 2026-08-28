@@ -13,7 +13,7 @@ Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windo
 ## Funcionalidades
 
 **Preview e comparação**
-- Divisor arrastável entre o frame original e o processado; zoom por percentual (100% = 1:1) ou ajustado à janela; modos de qualidade (alta, balanceado, rápido) que só afetam a tela — a exportação é sempre completa.
+- Divisor arrastável entre o frame original e o processado; zoom por percentual (100% = 1:1) ou ajustado à janela, com a ferramenta de mão (H, ou o botão do meio do mouse) para arrastar a imagem ampliada; modos de qualidade (alta, balanceado, rápido) que só afetam a tela — a exportação é sempre completa.
 - Reprodução em tempo real ou câmera lenta (½×, ¼×) com o som dos clipes em sincronia, pulando os trechos removidos.
 - **Preview em janela separada** para uma segunda tela: frame sobre fundo escuro, controles de transporte, tela cheia (F11); a janela principal para de desenhar o frame enquanto ele está lá.
 - HUD de métricas (tempo de render por estágio, fila, decode) e vetores de movimento da estabilização sobre a imagem.
@@ -29,6 +29,7 @@ Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windo
 - **Ruído**: NLMeans desligado, manual, automático pelo frame ou por uma amostra escolhida no preview.
 - **Cor**: contraste, brilho, gama, saturação, temperatura e nitidez com presets de *look*; balanço de branco por região cinza ou *gray world*, tint, ajuste de matiz/saturação/luminância por oito faixas de matiz; trava de exposição para câmeras em auto-exposição.
 - **Geometria**: crop interativo com proporções, rotação 90°/180°/270° e espelhamento.
+- **Artefatos de captura**: desentrelaçamento (detector de "pente" que avisa se o arquivo parece entrelaçado; modo adaptativo refaz só as linhas em movimento, modo campo único remove tudo) e correção de *rolling shutter* a partir do movimento medido entre frames — verticais que tombam em panorâmicas voltam a ficar retas.
 
 **Exportação**
 - FFmpeg só para encode e mux do áudio original; tenta NVENC/VAAPI e cai para `libx264` sozinho. MP4 `yuv420p` com `+faststart`, pronto para QuickTime, iOS e decoders de hardware.
@@ -111,6 +112,7 @@ Para uma segunda tela: **Exibir › Preview em janela separada** (Ctrl+Shift+D),
 | Dividir o clipe no playhead | Ctrl+K |
 | Restaurar o preset ativo | Ctrl+R |
 | Zoom do preview: ajustar, mais, menos | Ctrl+0, Ctrl++, Ctrl+− |
+| Mão: arrastar o preview ampliado | H (o botão do meio arrasta sempre) |
 | Métricas / vetores de movimento | Ctrl+M / Ctrl+Shift+M |
 | Preview em janela separada | Ctrl+Shift+D |
 | No monitor: tela cheia, sair, fechar | F11 ou clique duplo, Esc, Ctrl+W |
@@ -120,7 +122,7 @@ As teclas sem modificador só agem quando o widget focado não as usa (um slider
 ## Como funciona
 
 - O **pipeline é puro**: `render_frame(frame, settings)` não lê widgets nem estado global. A interface lê os controles uma vez, monta um `RenderSettings` imutável e o entrega ao worker de preview, às miniaturas e à exportação — o que o preview mostra é exatamente o que sai no arquivo.
-- Ordem fixa: estabilização → filtros (inclui escala) → preset → geometria → crop.
+- Ordem fixa: correções de captura (desentrelaçar, no tamanho nativo) → estabilização (com o rolling shutter) → filtros (inclui escala) → preset → geometria → crop.
 - **Nada por frame na GUI thread**: decodificação e render acontecem em um `QThread` com caixa postal "o último vence"; o filmstrip, a forma de onda e o áudio têm threads próprias.
 - O modelo (`Sequence` de `Clip`s, `RenderSettings`) é imutável, então desfazer/refazer é só guardar referências e um projeto é a serialização direta do estado.
 

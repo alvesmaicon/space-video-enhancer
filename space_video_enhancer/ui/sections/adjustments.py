@@ -6,6 +6,7 @@ from collections.abc import Hashable
 
 from PySide6.QtCore import QRectF
 
+from space_video_enhancer.pipeline.deinterlace import likely_interlaced
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.grade import neutral_gains
 from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
@@ -15,6 +16,7 @@ from space_video_enhancer.settings import (
     DEFAULT_STABILIZATION_RECT,
     DEFAULT_WHITE_BALANCE_RECT,
     NEUTRAL_GAINS,
+    DeinterlaceMode,
     DenoiseMode,
     FilterSettings,
     NormalizedRect,
@@ -339,6 +341,30 @@ class AdjustmentsSection(WindowState):
         self.stabilization_tab.update_controls_state(self.frame_count > 0)
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
+        self._update_capture_info()
+
+    def _update_capture_info(self) -> None:
+        """What the last render measured: how much comb the frame carries, and the motion the unskew used."""
+        if self.frame_count <= 0:
+            self.stabilization_tab.set_capture_info("")
+            return
+        trace = self._last_preview.trace if self._last_preview is not None else {}
+        facts: list[str] = []
+        comb = trace.get("deinterlace.comb")
+        if isinstance(comb, (int, float)):
+            if likely_interlaced(comb):
+                facts.append(f"Entrelaçamento provável: {comb:.1%} dos pixels com pente")
+                if self.stabilization_tab.deinterlace_mode() is DeinterlaceMode.OFF:
+                    facts.append("ative o desentrelaçamento")
+            else:
+                facts.append(f"Entrelaçamento improvável ({comb:.2%} com pente)")
+        if self._current_stabilization().corrects_rolling_shutter:
+            shift = trace.get("rolling_shutter.shift_px")
+            if isinstance(shift, (list, tuple)) and len(shift) == 2:
+                facts.append(f"rolling shutter: movimento {shift[0]:+.1f}, {shift[1]:+.1f} px/frame")
+            else:
+                facts.append("rolling shutter: aguardando o movimento entre frames (reproduza ou avance um frame)")
+        self.stabilization_tab.set_capture_info(" · ".join(facts) + ("." if facts else ""))
 
     def _sync_stabilization_preview(self) -> None:
         enabled = (

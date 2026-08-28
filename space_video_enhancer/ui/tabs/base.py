@@ -16,9 +16,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from space_video_enhancer.settings import DenoiseMode, PreviewRenderMode, RotationMode, StabilizationMode
+from space_video_enhancer.settings import (
+    DeinterlaceMode,
+    DenoiseMode,
+    PreviewRenderMode,
+    RotationMode,
+    StabilizationMode,
+)
 
-E = TypeVar("E", DenoiseMode, StabilizationMode, RotationMode, PreviewRenderMode)
+E = TypeVar("E", DenoiseMode, StabilizationMode, RotationMode, PreviewRenderMode, DeinterlaceMode)
 Section = Union[QWidget, QLayout]
 
 CONTENT_MARGIN = 14
