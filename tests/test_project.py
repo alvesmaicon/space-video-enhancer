@@ -14,9 +14,11 @@ from space_video_enhancer.project import (
     Project,
     ProjectError,
     RecentProjects,
+    last_media_dir,
     load_project,
     project_from_dict,
     project_to_dict,
+    remember_media_dir,
     save_project,
     settings_from_dict,
     settings_to_dict,
@@ -183,3 +185,16 @@ def test_timeline_fps_is_saved_and_restored(tmp_path: Path) -> None:
     legacy = project_to_dict(project, tmp_path)
     del legacy["timeline_fps"]  # a project saved before the field existed
     assert project_from_dict(legacy, tmp_path).sequence.timeline_fps is None
+
+
+def test_last_media_dir_round_trips_and_ignores_a_folder_that_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SVE_STATE_DIR", str(tmp_path / "state"))
+    assert last_media_dir() is None  # nothing remembered yet
+    folder = tmp_path / "videos"
+    folder.mkdir()
+    remember_media_dir(folder)
+    assert last_media_dir() == str(folder)
+    remember_media_dir(tmp_path / "gone")  # a folder that does not exist is not offered back
+    assert last_media_dir() is None

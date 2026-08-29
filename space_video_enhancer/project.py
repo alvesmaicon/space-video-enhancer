@@ -284,6 +284,38 @@ def state_dir() -> Path:
     return Path(os.environ.get(ENV_STATE_DIR, str(DEFAULT_STATE_DIR)))
 
 
+UI_STATE_FILE = "ui_state.json"
+
+
+def _read_ui_state() -> dict[str, Any]:
+    try:
+        data = json.loads((state_dir() / UI_STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_ui_state(**updates: Any) -> None:
+    state = {**_read_ui_state(), **updates}
+    try:
+        path = state_dir() / UI_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:  # a read-only state dir must never break the file dialogs
+        pass
+
+
+def last_media_dir() -> str | None:
+    """The folder the last video was opened from, if it still exists; else ``None`` (fall back to home)."""
+    value = _read_ui_state().get("media_dir")
+    return value if isinstance(value, str) and Path(value).is_dir() else None
+
+
+def remember_media_dir(folder: Path) -> None:
+    """Remember where the user last browsed for a video, so the next import opens there."""
+    _write_ui_state(media_dir=str(folder))
+
+
 class RecentProjects:
     """The most recently opened/saved project files, newest first, kept in a small JSON file."""
 

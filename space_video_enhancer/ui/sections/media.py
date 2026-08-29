@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from space_video_enhancer.audio import AudioPeaks
 from space_video_enhancer.export.ffmpeg import find_ffmpeg
+from space_video_enhancer.project import last_media_dir, remember_media_dir
 from space_video_enhancer.sequence import FPS_TOLERANCE, Clip, ClipSource
 from space_video_enhancer.sequence import Sequence as ClipSequence
 from space_video_enhancer.settings import (
@@ -49,13 +50,18 @@ class MediaSection(WindowState):
     """Opening files, the sequence of clips and their decoders, and the active clip whose settings the tabs show."""
 
     def _select_video(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(self, "Selecionar vídeo", str(Path.home()), VIDEO_FILE_FILTER)
+        start_dir = last_media_dir() or str(Path.home())
+        file_path, _ = QFileDialog.getOpenFileName(self, "Selecionar vídeo", start_dir, VIDEO_FILE_FILTER)
         if file_path and self._confirm_discard_changes():
+            remember_media_dir(Path(file_path).parent)
             self._open_video(Path(file_path))
 
     def _select_video_to_add(self) -> None:
-        start_dir = str(self.video_path.parent) if self.video_path is not None else str(Path.home())
+        fallback = str(self.video_path.parent) if self.video_path is not None else str(Path.home())
+        start_dir = last_media_dir() or fallback
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Adicionar vídeos à sequência", start_dir, VIDEO_FILE_FILTER)
+        if file_paths:
+            remember_media_dir(Path(file_paths[-1]).parent)
         for file_path in file_paths:
             self._add_video(Path(file_path))
 
