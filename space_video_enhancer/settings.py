@@ -26,6 +26,8 @@ class StabilizationMode(str, Enum):
     PERSPECTIVE = "perspective"
     CAMERA_LOCK = "camera_lock"
     HYBRID = "hybrid"
+    MANUAL = "manual"
+    """Hand-set keyframes (position/rotation/zoom) interpolated between; no estimation, no warp surprises."""
 
     @property
     def uses_focal_point(self) -> bool:
@@ -242,6 +244,27 @@ class CropSettings:
         return self.rect.to_pixels(frame_width, frame_height, even=True)
 
 
+@dataclass(frozen=True, order=True)
+class StabilizationKeyframe:
+    """One hand-set correction at a source frame; translation is a fraction of the frame so it is resolution-free.
+
+    Positive ``tx``/``ty`` move the frame's content right/down; ``rotation`` is degrees, ``scale`` a ratio (1 = none).
+    Between keyframes every field is interpolated (see :mod:`pipeline.stabilization.keyframes`).
+    """
+
+    frame: int
+    tx: float = 0.0
+    ty: float = 0.0
+    rotation: float = 0.0
+    scale: float = 1.0
+
+    @property
+    def is_identity(self) -> bool:
+        return (
+            self.tx == 0.0 and self.ty == 0.0 and self.rotation == 0.0 and abs(self.scale - 1.0) <= 1e-6
+        )
+
+
 @dataclass(frozen=True)
 class StabilizationSettings:
     mode: StabilizationMode = StabilizationMode.OFF
@@ -250,6 +273,8 @@ class StabilizationSettings:
     focus_rect: NormalizedRect = DEFAULT_STABILIZATION_RECT
     auto_crop: bool = True
     zoom_out: bool = False
+    keyframes: tuple[StabilizationKeyframe, ...] = ()
+    """Manual mode only: the hand-set corrections, kept sorted by frame (see :meth:`__post_init__`)."""
     rolling_shutter: float = 0.0
     """Rolling-shutter skew to undo, as the sensor readout time over the frame period (0 = off, 1 = a full frame)."""
     rolling_shutter_auto: bool = False
@@ -257,6 +282,17 @@ class StabilizationSettings:
     each frame gets the distortion measured for it; needs no readout time."""
     readout_axis: ReadoutAxis = ReadoutAxis.AUTO
     """Along which axis of the frame the distortion varies (both corrections use it)."""
+
+    def __post_init__(self) -> None:
+        if self.keyframes:
+            by_frame = {keyframe.frame: keyframe for keyframe in self.keyframes}  # a later one wins its frame
+            ordered = tuple(by_frame[frame] for frame in sorted(by_frame))
+            if ordered != self.keyframes:
+                object.__setattr__(self, "keyframes", ordered)
+
+    @property
+    def uses_manual_keyframes(self) -> bool:
+        return self.mode is StabilizationMode.MANUAL
 
     @property
     def enabled(self) -> bool:
@@ -283,6 +319,8 @@ class StabilizationSettings:
         """True when frame N depends on frame N-1 (inter-frame motion, temporal smoothing, rolling-shutter skew)."""
         if self.corrects_rolling_shutter_skew:
             return True
+        if self.mode is StabilizationMode.MANUAL:
+            return False  # each frame's transform is interpolated from the keyframes, not from the previous frame
         return self.enabled and (
             self.mode.uses_auto_motion or self.mode is StabilizationMode.HYBRID or self.temporal_smoothing > 0.0
         )

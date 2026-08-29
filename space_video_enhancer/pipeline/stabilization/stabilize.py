@@ -27,6 +27,7 @@ from __future__ import annotations
 import numpy as np
 
 from space_video_enhancer.pipeline.stabilization import estimators, rolling_shutter, transforms
+from space_video_enhancer.pipeline.stabilization.keyframes import manual_correction
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.settings import ReadoutAxis, StabilizationMode, StabilizationSettings, clamp_unit
@@ -230,6 +231,8 @@ def estimate_correction(
         correction = camera_lock(frame, settings, frame_index, state, reference_frame)
     elif mode is StabilizationMode.HYBRID:
         correction = hybrid(frame, settings, frame_index, state, reference_frame)
+    elif mode is StabilizationMode.MANUAL:
+        correction = manual_correction(settings.keyframes, frame_index, frame.shape)
     else:
         correction = None
 

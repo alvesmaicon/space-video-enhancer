@@ -36,6 +36,7 @@ from space_video_enhancer.settings import (
     NormalizedRect,
     RenderSettings,
     RotationMode,
+    StabilizationKeyframe,
     StabilizationMode,
     StabilizationSettings,
 )
@@ -50,7 +51,12 @@ def _settings() -> RenderSettings:
         geometry=GeometrySettings(rotation=RotationMode.CW_90, flip_horizontal=True),
         crop=CropSettings(enabled=True, rect=NormalizedRect(0.1, 0.2, 0.5, 0.6), aspect_ratio=16 / 9),
         stabilization=StabilizationSettings(
-            mode=StabilizationMode.HYBRID, focus_rect=NormalizedRect(0.3, 0.3, 0.2, 0.2)
+            mode=StabilizationMode.HYBRID,
+            focus_rect=NormalizedRect(0.3, 0.3, 0.2, 0.2),
+            keyframes=(
+                StabilizationKeyframe(0, tx=0.02, ty=-0.01),
+                StabilizationKeyframe(30, tx=-0.03, rotation=1.5, scale=1.02),
+            ),
         ),
         grade=ColorGradeSettings(tint=42, white_balance_gains=(1.1, 1.0, 0.9), bands=tuple(bands)),
         exposure=ExposureLockSettings(enabled=True, region=None, reference=(100.5, 110.25, 120.0), max_ev=1.5),
@@ -76,7 +82,11 @@ def test_settings_round_trip_through_plain_data() -> None:
     assert data["filters"]["denoise_mode"] == "sample" and data["geometry"]["rotation"] == RotationMode.CW_90.value
     assert data["exposure"]["reference"] == [100.5, 110.25, 120.0] and data["exposure"]["region"] is None
     assert json.loads(json.dumps(data)) == data, "plain JSON, nothing exotic"
-    assert settings_from_dict(RenderSettings, json.loads(json.dumps(data))) == settings
+    keyframe = data["stabilization"]["keyframes"][1]
+    assert keyframe == {"frame": 30, "tx": -0.03, "ty": 0.0, "rotation": 1.5, "scale": 1.02}
+    loaded = settings_from_dict(RenderSettings, json.loads(json.dumps(data)))
+    assert loaded == settings
+    assert isinstance(loaded.stabilization.keyframes[0], StabilizationKeyframe), "not left as a raw dict"
 
 
 def test_settings_from_other_versions_take_defaults_and_ignore_unknown_fields() -> None:

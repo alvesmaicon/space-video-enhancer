@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import typing
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -77,14 +78,38 @@ def settings_from_dict(cls: type, data: Any) -> Any:
     if not isinstance(data, Mapping):
         raise ProjectError(f"{cls.__name__}: esperava um objeto, veio {type(data).__name__}")
     defaults = _field_defaults(cls)
+    element_types = _tuple_element_dataclasses(cls)
     kwargs = {}
     for field in dataclasses.fields(cls):
-        if field.name in data:
+        if field.name not in data:
+            continue
+        element = element_types.get(field.name)
+        if element is not None and isinstance(data[field.name], list):
+            # tuple[SomeDataclass, ...]: rebuild each item even when the default tuple is empty (no element to copy)
+            kwargs[field.name] = tuple(settings_from_dict(element, item) for item in data[field.name])
+        else:
             kwargs[field.name] = _coerce(data[field.name], defaults.get(field.name), f"{cls.__name__}.{field.name}")
     try:
         return cls(**kwargs)
     except (TypeError, ValueError) as error:
         raise ProjectError(f"{cls.__name__}: {error}") from error
+
+
+def _tuple_element_dataclasses(cls: type) -> dict[str, type]:
+    """For each ``tuple[SomeDataclass, ...]`` field, the element dataclass — so empty-default tuples still rebuild."""
+    try:
+        hints = typing.get_type_hints(cls)
+    except Exception:  # a resolvable-at-runtime type is a bonus, never a load blocker
+        return {}
+    element_types: dict[str, type] = {}
+    for field in dataclasses.fields(cls):
+        hint = hints.get(field.name)
+        if typing.get_origin(hint) is tuple:
+            args = typing.get_args(hint)
+            element = args[0] if args else None
+            if isinstance(element, type) and dataclasses.is_dataclass(element):
+                element_types[field.name] = element
+    return element_types
 
 
 def _field_defaults(cls: type) -> dict[str, Any]:
