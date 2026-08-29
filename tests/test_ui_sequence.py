@@ -270,3 +270,32 @@ def test_changing_the_timeline_fps_retimes_the_sequence_and_undoes(
     window._undo_edit()
     assert window.sequence.timeline_fps == UI_VIDEO_FPS
     assert window.export_tab.timeline_fps() == UI_VIDEO_FPS
+
+
+def test_copy_and_paste_duplicates_the_clip_under_the_playhead(
+    app: QApplication, window: MainWindow, ui_video: Path, ui_video_b: Path
+) -> None:
+    _open_two(app, window, ui_video, ui_video_b)  # clip 0: ui_video, clip 1: ui_video_b
+    _go_to(app, window, 3)  # inside clip 0
+    window.color_tab.brightness_slider.setValue(65)
+    wait_for_preview(app, window)
+
+    window._copy_active_clip()
+    assert window.paste_clip_action.isEnabled()
+    window._paste_clip()
+
+    assert len(window.sequence) == 3
+    assert window.sequence.clips[1].source.path == ui_video, "the copy sits right after the original"
+    assert window.sequence.clips[1].settings.filters.brightness == 65, "and carries its look"
+    assert window.sequence.clips[2].source.path == ui_video_b, "the old clip 1 shifted right"
+    assert window.active_clip_index == 1, "the playhead landed on the pasted copy"
+
+    window._undo_edit()
+    assert len(window.sequence) == 2, "undo removes the pasted copy"
+    window._redo_edit()
+    assert len(window.sequence) == 3, "redo brings it back"
+
+    window.color_tab.brightness_slider.setValue(20)  # editing the copy is independent of the original
+    wait_for_preview(app, window)
+    assert window.sequence.clips[1].settings.filters.brightness == 20
+    assert window.sequence.clips[0].settings.filters.brightness == 65

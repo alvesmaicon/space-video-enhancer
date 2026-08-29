@@ -82,6 +82,7 @@ class WindowState(QMainWindow):
     _reference_frames: dict[tuple[Path, int], np.ndarray]
     _waveforms_requested: set[Path]
     active_clip_index: int
+    _clip_clipboard: Clip | None
     current_frame_index: int
     clip_start_frame: int
     clip_end_frame: int
@@ -185,6 +186,8 @@ class WindowState(QMainWindow):
     clear_recent_action: QAction
     export_action: QAction
     split_clip_action: QAction
+    copy_clip_action: QAction
+    paste_clip_action: QAction
     remove_clip_action: QAction
     quit_action: QAction
     undo_action: QAction

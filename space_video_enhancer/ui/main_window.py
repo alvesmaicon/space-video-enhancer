@@ -59,6 +59,7 @@ from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.project import (
     RecentProjects,
 )
+from space_video_enhancer.sequence import Clip
 from space_video_enhancer.sequence import Sequence as ClipSequence
 from space_video_enhancer.settings import (
     DEFAULT_CROP_RECT,
@@ -150,6 +151,8 @@ class MainWindow(
         self._waveforms_requested: set[Path] = set()
         self.active_clip_index = -1
         """The clip under the playhead: the tabs show and edit its settings."""
+        self._clip_clipboard: Clip | None = None
+        """The clip copied with Ctrl+C, waiting to be pasted as a duplicate; kept across documents."""
         self.current_frame_index = 0
         """Playhead, in timeline frames."""
         self.clip_start_frame = 0
@@ -359,6 +362,10 @@ class MainWindow(
             icon=style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton),
         )
         self.split_clip_action = self._make_action("Dividir clipe no playhead", self._split_clip_at_playhead, "Ctrl+K")
+        self.copy_clip_action = self._make_action("Copiar clipe", self._copy_active_clip, QKeySequence.StandardKey.Copy)
+        self.paste_clip_action = self._make_action("Colar clipe", self._paste_clip, QKeySequence.StandardKey.Paste)
+        self.copy_clip_action.setEnabled(False)
+        self.paste_clip_action.setEnabled(False)
         self.remove_clip_action = self._make_action("Remover clipe ativo", self._remove_active_clip)
         self.quit_action = self._make_action("Sair", self.close, QKeySequence.StandardKey.Quit)
         self.undo_action = self._make_action("Desfazer", self._undo_edit, QKeySequence.StandardKey.Undo)
@@ -621,6 +628,8 @@ class MainWindow(
         edit_menu.addAction(self.reset_range_action)
         edit_menu.addSeparator()
         edit_menu.addAction(self.split_clip_action)
+        edit_menu.addAction(self.copy_clip_action)
+        edit_menu.addAction(self.paste_clip_action)
         edit_menu.addAction(self.remove_clip_action)
 
         playback_menu = menu_bar.addMenu("Reprodução")

@@ -266,6 +266,40 @@ class MediaSection(WindowState):
     def _remove_active_clip(self) -> None:
         self._remove_clip(self.active_clip_index)
 
+    def _copy_active_clip(self) -> None:
+        """Ctrl+C: remember the clip under the playhead (with its current look) to paste as a duplicate."""
+        if self.sequence.is_empty:
+            return
+        self._store_active_clip_settings()  # fold any unsaved widget changes into the clip first
+        index = self.sequence.locate(self.current_frame_index).clip_index
+        self._clip_clipboard = self.sequence.clips[index]
+        self.paste_clip_action.setEnabled(self._export_controller is None)
+        log_event(LOG, "sequence.copy", name=self._clip_clipboard.name)
+        self.status.show_message(f"Clipe copiado: {self._clip_clipboard.name} (Ctrl+V para colar).")
+
+    def _paste_clip(self) -> None:
+        """Ctrl+V: insert a copy of the copied clip right after the one under the playhead, and jump to it."""
+        clip = self._clip_clipboard
+        if clip is None or self.sequence.is_empty or self._export_controller is not None:
+            return
+        if clip.source.path in self._missing_sources:
+            QMessageBox.warning(self, "Mídia ausente", f"O arquivo {clip.source.path.name} não está disponível.")
+            return
+        if clip.source.path not in self._sources and self._open_source(clip.source.path) is None:
+            return
+        target = self.sequence.locate(self.current_frame_index).clip_index + 1
+        self._begin_sequence_edit()
+        self.sequence = self.sequence.add(clip, target)
+        self._preview_controller.set_videos(tuple(self._sources.values()))
+        self.current_frame_index = self.sequence.clip_span(target).start  # land on the pasted copy
+        self.clip_start_frame, self.clip_end_frame = 0, self.frame_count - 1
+        log_event(LOG, "sequence.paste", name=clip.name, clips=len(self.sequence))
+        self._sequence_changed()
+        self._commit_edit("colar clipe")
+        self.transport.set_value_silently(self.current_frame_index)
+        self._load_frame(self.current_frame_index)
+        self.status.show_message(f"Clipe colado: {clip.name}.")
+
     def _move_clip(self, index: int, new_index: int) -> None:
         if index == new_index or not (0 <= index < len(self.sequence.clips)):
             return
@@ -310,9 +344,12 @@ class MediaSection(WindowState):
         if self.sequence.clips:
             self.export_tab.set_timeline_fps_options([clip.fps for clip in self.sequence.clips], self.sequence.fps)
         self._update_sequence_info()
-        self.export_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
-        self.remove_clip_action.setEnabled(len(self.sequence) > 1 and self._export_controller is None)
-        self.split_clip_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
+        editable = self._export_controller is None
+        self.export_action.setEnabled(not self.sequence.is_empty and editable)
+        self.remove_clip_action.setEnabled(len(self.sequence) > 1 and editable)
+        self.split_clip_action.setEnabled(not self.sequence.is_empty and editable)
+        self.copy_clip_action.setEnabled(not self.sequence.is_empty and editable)
+        self.paste_clip_action.setEnabled(self._clip_clipboard is not None and not self.sequence.is_empty and editable)
         self.save_project_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
         self.save_project_as_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
 
