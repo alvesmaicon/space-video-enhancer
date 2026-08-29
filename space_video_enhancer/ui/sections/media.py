@@ -274,8 +274,26 @@ class MediaSection(WindowState):
         index = self.sequence.locate(self.current_frame_index).clip_index
         self._clip_clipboard = self.sequence.clips[index]
         self.paste_clip_action.setEnabled(self._export_controller is None)
+        self.paste_attributes_action.setEnabled(self._export_controller is None)
         log_event(LOG, "sequence.copy", name=self._clip_clipboard.name)
         self.status.show_message(f"Clipe copiado: {self._clip_clipboard.name} (Ctrl+V para colar).")
+
+    def _paste_clip_attributes(self) -> None:
+        """Ctrl+Shift+V: apply the copied clip's look (its settings) to the clip under the playhead, video untouched."""
+        clip = self._clip_clipboard
+        if clip is None or self.sequence.is_empty or self._export_controller is not None:
+            return
+        index = self.sequence.locate(self.current_frame_index).clip_index
+        if self.sequence.clips[index].settings == clip.settings:
+            self.status.show_message("O clipe atual já tem esses ajustes.")
+            return
+        self.active_clip_index = index
+        self.sequence = self.sequence.with_clip_settings(index, clip.settings)
+        self._load_clip_into_controls(self.sequence.clips[index])  # show the pasted settings in every tab
+        log_event(LOG, "sequence.paste_attributes", name=clip.name)
+        self._commit_edit("colar atributos")
+        self._schedule_preview_refresh()
+        self.status.show_message(f"Ajustes de {clip.name} aplicados ao clipe atual.")
 
     def _paste_clip(self) -> None:
         """Ctrl+V: insert a copy of the copied clip right after the one under the playhead, and jump to it."""
@@ -349,7 +367,9 @@ class MediaSection(WindowState):
         self.remove_clip_action.setEnabled(len(self.sequence) > 1 and editable)
         self.split_clip_action.setEnabled(not self.sequence.is_empty and editable)
         self.copy_clip_action.setEnabled(not self.sequence.is_empty and editable)
-        self.paste_clip_action.setEnabled(self._clip_clipboard is not None and not self.sequence.is_empty and editable)
+        has_clip = self._clip_clipboard is not None and not self.sequence.is_empty and editable
+        self.paste_clip_action.setEnabled(has_clip)
+        self.paste_attributes_action.setEnabled(has_clip)
         self.save_project_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
         self.save_project_as_action.setEnabled(not self.sequence.is_empty and self._export_controller is None)
 

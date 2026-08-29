@@ -188,6 +188,7 @@ class WindowState(QMainWindow):
     split_clip_action: QAction
     copy_clip_action: QAction
     paste_clip_action: QAction
+    paste_attributes_action: QAction
     remove_clip_action: QAction
     quit_action: QAction
     undo_action: QAction

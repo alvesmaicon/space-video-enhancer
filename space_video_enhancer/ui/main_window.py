@@ -364,8 +364,10 @@ class MainWindow(
         self.split_clip_action = self._make_action("Dividir clipe no playhead", self._split_clip_at_playhead, "Ctrl+K")
         self.copy_clip_action = self._make_action("Copiar clipe", self._copy_active_clip, QKeySequence.StandardKey.Copy)
         self.paste_clip_action = self._make_action("Colar clipe", self._paste_clip, QKeySequence.StandardKey.Paste)
+        self.paste_attributes_action = self._make_action("Colar atributos", self._paste_clip_attributes, "Ctrl+Shift+V")
         self.copy_clip_action.setEnabled(False)
         self.paste_clip_action.setEnabled(False)
+        self.paste_attributes_action.setEnabled(False)
         self.remove_clip_action = self._make_action("Remover clipe ativo", self._remove_active_clip)
         self.quit_action = self._make_action("Sair", self.close, QKeySequence.StandardKey.Quit)
         self.undo_action = self._make_action("Desfazer", self._undo_edit, QKeySequence.StandardKey.Undo)
@@ -630,6 +632,7 @@ class MainWindow(
         edit_menu.addAction(self.split_clip_action)
         edit_menu.addAction(self.copy_clip_action)
         edit_menu.addAction(self.paste_clip_action)
+        edit_menu.addAction(self.paste_attributes_action)
         edit_menu.addAction(self.remove_clip_action)
 
         playback_menu = menu_bar.addMenu("Reprodução")

@@ -299,3 +299,26 @@ def test_copy_and_paste_duplicates_the_clip_under_the_playhead(
     wait_for_preview(app, window)
     assert window.sequence.clips[1].settings.filters.brightness == 20
     assert window.sequence.clips[0].settings.filters.brightness == 65
+
+
+def test_paste_attributes_copies_the_look_not_the_video(
+    app: QApplication, window: MainWindow, ui_video: Path, ui_video_b: Path
+) -> None:
+    _open_two(app, window, ui_video, ui_video_b)
+    _go_to(app, window, 3)  # clip 0
+    window.color_tab.brightness_slider.setValue(70)
+    wait_for_preview(app, window)
+    window._copy_active_clip()
+
+    _go_to(app, window, 15)  # clip 1 (the other file), still at its default look
+    assert window.active_clip_index == 1 and window.color_tab.brightness_slider.value() == 50
+    window._paste_clip_attributes()
+
+    assert len(window.sequence) == 2, "no new clip: only the look is pasted"
+    assert window.sequence.clips[1].source.path == ui_video_b, "the video is untouched"
+    assert window.sequence.clips[1].settings.filters.brightness == 70, "the look is copied"
+    assert window.color_tab.brightness_slider.value() == 70, "the tabs reloaded to show it"
+    assert window.sequence.clips[0].settings.filters.brightness == 70, "the source clip is unchanged"
+
+    window._undo_edit()
+    assert window.sequence.clips[1].settings.filters.brightness == 50
