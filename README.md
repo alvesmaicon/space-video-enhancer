@@ -25,7 +25,7 @@ Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windo
 - Desfazer/refazer com rótulos ("Desfazer ajuste de estabilização"); projetos salvos em JSON legível (`.svep`) com lista de recentes.
 
 **Processamento** (OpenCV, CPU ou OpenCL)
-- **Estabilização**: suavizar tremor (deslocamento, +rotação e zoom, +perspectiva), travar uma região (*camera lock*) ou híbrida; intensidade, suavização temporal, crop automático. O estimador escolhe a hipótese de movimento que se **espalha** pelo quadro, então uma pessoa cobrindo metade do frame não vira "a câmera".
+- **Estabilização**: suavizar tremor (deslocamento, +rotação e zoom, +perspectiva), travar uma região (*camera lock*) ou híbrida; intensidade, suavização temporal, crop automático. O estimador escolhe a hipótese de movimento que se **espalha** pelo quadro, então uma pessoa cobrindo metade do frame não vira "a câmera". Ou **Manual (keyframes)**: você alinha um frame de tempos em tempos (posição, rotação, zoom) contra uma **referência fantasma** sobreposta com transparência, e o ajuste é interpolado entre os keyframes — nunca deforma a imagem.
 - **Ruído**: NLMeans desligado, manual, automático pelo frame ou por uma amostra escolhida no preview.
 - **Cor**: contraste, brilho, gama, saturação, temperatura e nitidez com presets de *look*; balanço de branco por região cinza, pelo realce (quando não há cinza na cena) ou *gray world*, tint, ajuste de matiz/saturação/luminância por oito faixas de matiz (sliders com groove colorido mostrando para onde cada direção puxa a cor); trava de exposição para câmeras em auto-exposição.
 - **Geometria**: crop interativo com proporções, rotação 90°/180°/270° e espelhamento.
@@ -88,7 +88,7 @@ No **macOS**, o nome na barra de menus continua "Python" enquanto o app roda dir
 
 1. **Arquivo › Abrir vídeo…** (Ctrl+O). Arraste o divisor no preview para comparar; ajuste nas abas à direita.
 2. **Arquivo › Adicionar vídeo à sequência…** (Ctrl+Shift+O) para juntar mais arquivos; um clipe com fps diferente é reajustado para o fps da linha do tempo (o do primeiro clipe) — o modo de reajuste é por clipe na aba Tempo. Use as ferramentas sob a linha do tempo para marcar início `[` e fim `]`, remover um trecho, dividir, remover ou mover o clipe sob o playhead.
-3. **Estabilizar**: escolha o modo; em *camera lock* arraste o retângulo verde sobre a região que deve ficar parada e use "Usar este frame como referência" para fixar o frame de referência.
+3. **Estabilizar**: escolha o modo; em *camera lock* arraste o retângulo verde sobre a região que deve ficar parada e use "Usar este frame como referência" para fixar o frame de referência. No modo **Manual (keyframes)**: defina um frame de referência (fantasma), vá pulando alguns frames, alinhe cada um com os sliders de posição/rotação/zoom até casar com o fantasma e siga — o resto é interpolado; use ◀/▶ Keyframe para navegar entre eles.
 4. **Ruído**: no modo *amostra*, arraste o retângulo azul sobre uma área lisa da imagem.
 5. **Tempo**: o **fps da linha do tempo** (começa no do primeiro clipe; mudar aqui reajusta a sequência inteira e é o fps do arquivo) e, por clipe, a **velocidade** (0.25x–4x, câmera lenta/rápida), o **reajuste de fps** e o mudo.
 6. **Exportar** (Ctrl+E): a escala de saída, as threads, o resumo (trecho, trechos removidos, tamanho de saída) e o botão. **Arquivo › Salvar projeto** (Ctrl+S) guarda tudo para continuar depois.
