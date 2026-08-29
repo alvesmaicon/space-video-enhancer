@@ -122,7 +122,8 @@ As teclas sem modificador só agem quando o widget focado não as usa (um slider
 ## Como funciona
 
 - O **pipeline é puro**: `render_frame(frame, settings)` não lê widgets nem estado global. A interface lê os controles uma vez, monta um `RenderSettings` imutável e o entrega ao worker de preview, às miniaturas e à exportação — o que o preview mostra é exatamente o que sai no arquivo.
-- Ordem fixa: correções de captura (desentrelaçar, no tamanho nativo) → estabilização (com o rolling shutter) → filtros (inclui escala) → preset → geometria → crop.
+- Ordem fixa: correções de captura (desentrelaçar, no tamanho nativo) → estabilização (com o rolling shutter) → filtros (inclui escala) → preset → anonimização → geometria → crop.
+- **Anonimizar** (aba Filtros): borra ou pixela rostos detectados automaticamente (Haar, offline) e uma região manual. É por clipe, aparece no preview e na exportação. **Esconde, não remove** — cobrir uma tatuagem com borrão funciona, mas removê-la deixando pele natural exigiria inpainting generativo (fora de escopo).
 - **Nada por frame na GUI thread**: decodificação e render acontecem em um `QThread` com caixa postal "o último vence"; o filmstrip, a forma de onda e o áudio têm threads próprias.
 - O modelo (`Sequence` de `Clip`s, `RenderSettings`) é imutável, então desfazer/refazer é só guardar referências e um projeto é a serialização direta do estado.
 

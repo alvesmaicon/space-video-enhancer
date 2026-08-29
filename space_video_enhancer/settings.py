@@ -377,6 +377,32 @@ class ExposureLockSettings:
         return self.enabled and self.reference is not None and self.strength > 0
 
 
+class AnonymizeMode(str, Enum):
+    BLUR = "blur"
+    """Gaussian blur: softens the region, still shows shapes."""
+    PIXELATE = "pixelate"
+    """Mosaic: replaces the region with coarse blocks (the classic anonymising look)."""
+
+
+@dataclass(frozen=True)
+class AnonymizeSettings:
+    """Hide people or details: blur/pixelate detected faces and a chosen region (see :mod:`pipeline.anonymize`)."""
+
+    enabled: bool = False
+    mode: AnonymizeMode = AnonymizeMode.PIXELATE
+    strength: int = 50
+    """0-100: how coarse the mosaic / how strong the blur."""
+    detect_faces: bool = True
+    """Find faces automatically and cover each one (frontal faces; a profile may be missed)."""
+    region: NormalizedRect | None = None
+    """A rectangle covered on every frame — for a tattoo, or a face the detector keeps missing."""
+
+    @property
+    def is_active(self) -> bool:
+        has_region = self.region is not None and self.region.is_valid()
+        return self.enabled and self.strength > 0 and (self.detect_faces or has_region)
+
+
 @dataclass(frozen=True)
 class RenderSettings:
     """Complete, immutable snapshot of what the user configured."""
@@ -390,6 +416,7 @@ class RenderSettings:
     grade: ColorGradeSettings = field(default_factory=ColorGradeSettings)
     exposure: ExposureLockSettings = field(default_factory=ExposureLockSettings)
     capture: CaptureSettings = field(default_factory=CaptureSettings)
+    anonymize: AnonymizeSettings = field(default_factory=AnonymizeSettings)
 
     def output_size(self, width: int, height: int) -> tuple[int, int]:
         """Size of the exported frame for a ``width x height`` source: scale, rotation, then crop.

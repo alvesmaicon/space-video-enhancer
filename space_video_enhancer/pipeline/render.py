@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from space_video_enhancer.pipeline.anonymize import apply_anonymize
 from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.exposure import exposure_lock_table
 from space_video_enhancer.pipeline.filters import (
@@ -96,6 +97,11 @@ def render_frame(
         with tracing.stage("preset"):
             processed = apply_image_filter_preset(processed, selection.preset_id, clamp_unit(selection.intensity))
         tracing.note("preset", selection.preset_id)
+
+        if settings.anonymize.is_active:
+            with tracing.stage("anonymize"):
+                processed = apply_anonymize(processed, settings.anonymize)
+            tracing.note("anonymize.mode", settings.anonymize.mode.value)
 
         with tracing.stage("geometry"):
             processed = apply_geometry(processed, settings.geometry)

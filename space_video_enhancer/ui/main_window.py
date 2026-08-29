@@ -728,6 +728,7 @@ class MainWindow(
         self.geometry_tab.cropModeChanged.connect(self._handle_crop_mode_changed)
         self.geometry_tab.cropResetRequested.connect(self._reset_crop_rect)
         self.noise_tab.controlChanged.connect(self._handle_filter_control_change)
+        self.filters_tab.anonymizeChanged.connect(self._handle_filter_control_change)
         self.noise_tab.resetRequested.connect(self._reset_slider_to_preset)
         self.noise_tab.sampleResetRequested.connect(self._reset_denoise_sample_rect)
         self.export_tab.scaleChanged.connect(self._handle_filter_control_change)
@@ -801,6 +802,7 @@ class MainWindow(
             ),
             exposure=self.grade_tab.exposure_settings(qrect_to_norm(self.white_balance_rect_norm)),
             capture=self.stabilization_tab.capture_settings(),
+            anonymize=self.filters_tab.anonymize_settings(),
         )
 
     def _preview_render_mode(self) -> PreviewRenderMode:

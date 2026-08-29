@@ -6,22 +6,41 @@ from collections.abc import Mapping
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
-from PySide6.QtWidgets import QButtonGroup, QGridLayout, QLabel, QToolButton
+from PySide6.QtWidgets import QButtonGroup, QCheckBox, QGridLayout, QLabel, QToolButton
 
 from space_video_enhancer.pipeline.presets import IMAGE_FILTER_PRESETS, ORIGINAL_PRESET_ID, get_image_filter_preset
-from space_video_enhancer.settings import ImageFilterSelection, clamp_unit
+from space_video_enhancer.settings import (
+    AnonymizeMode,
+    AnonymizeSettings,
+    ImageFilterSelection,
+    NormalizedRect,
+    clamp_unit,
+)
 from space_video_enhancer.ui.format import format_percent
-from space_video_enhancer.ui.tabs.base import TabPage, group_box
+from space_video_enhancer.ui.tabs.base import (
+    TabPage,
+    combo_enum,
+    enum_combo,
+    form_rows,
+    group_box,
+    select_combo_data,
+    set_checked_silently,
+)
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
 THUMBNAIL_SIZE = QSize(152, 86)
 PRESET_BUTTON_MIN_SIZE = QSize(170, 140)
 DEFAULT_INTENSITY = 100
+ANONYMIZE_MODE_OPTIONS: list[tuple[str, AnonymizeMode]] = [
+    ("Pixelar", AnonymizeMode.PIXELATE),
+    ("Borrar", AnonymizeMode.BLUR),
+]
 
 
 class FiltersTab(TabPage):
     filterSelected = Signal(str)
     intensityChanged = Signal(int)
+    anonymizeChanged = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -29,6 +48,7 @@ class FiltersTab(TabPage):
         self.intensity = DEFAULT_INTENSITY
         self._controls_enabled = False
         self._video_loaded = False
+        self._anonymize_region: NormalizedRect | None = None
 
         self.buttons: dict[str, QToolButton] = {}
         self.button_group = QButtonGroup(self)
@@ -58,7 +78,32 @@ class FiltersTab(TabPage):
         self.description_label = QLabel()
         self.description_label.setWordWrap(True)
 
-        self.add_sections(group_box("Presets de imagem", grid, self.intensity_slider, self.description_label))
+        self.anonymize_checkbox = QCheckBox("Anonimizar este clipe (borrar ou pixelar)")
+        self.anonymize_faces_checkbox = QCheckBox("Detectar e cobrir rostos automaticamente")
+        self.anonymize_faces_checkbox.setChecked(True)
+        self.anonymize_mode_combo = enum_combo(ANONYMIZE_MODE_OPTIONS)
+        self.anonymize_strength_slider = LabeledSlider("Intensidade", 0, 100, 50, display=format_percent)
+        self.anonymize_hint = QLabel(
+            "Cobre os rostos frontais detectados (um de perfil pode escapar). Esconde o conteúdo — não o remove."
+        )
+        self.anonymize_hint.setObjectName("hintLabel")
+        self.anonymize_hint.setWordWrap(True)
+        self.anonymize_checkbox.toggled.connect(lambda _checked: self.anonymizeChanged.emit())
+        self.anonymize_faces_checkbox.toggled.connect(lambda _checked: self.anonymizeChanged.emit())
+        self.anonymize_mode_combo.currentIndexChanged.connect(lambda _index: self.anonymizeChanged.emit())
+        self.anonymize_strength_slider.valueChanged.connect(lambda _value: self.anonymizeChanged.emit())
+
+        self.add_sections(
+            group_box("Presets de imagem", grid, self.intensity_slider, self.description_label),
+            group_box(
+                "Anonimizar",
+                self.anonymize_checkbox,
+                self.anonymize_faces_checkbox,
+                form_rows(("Efeito", self.anonymize_mode_combo)),
+                self.anonymize_strength_slider,
+                self.anonymize_hint,
+            ),
+        )
         self._sync_buttons()
         self._update_description()
 
@@ -74,6 +119,29 @@ class FiltersTab(TabPage):
         self.intensity_slider.blockSignals(False)
         self._sync_buttons()
         self._update_description()
+
+    def anonymize_settings(self) -> AnonymizeSettings:
+        return AnonymizeSettings(
+            enabled=self.anonymize_checkbox.isChecked(),
+            mode=combo_enum(self.anonymize_mode_combo, AnonymizeMode, AnonymizeMode.PIXELATE),
+            strength=self.anonymize_strength_slider.value(),
+            detect_faces=self.anonymize_faces_checkbox.isChecked(),
+            region=self._anonymize_region,
+        )
+
+    def apply_anonymize(self, settings: AnonymizeSettings) -> None:
+        """Show another clip's anonymise settings without emitting ``anonymizeChanged``."""
+        self._anonymize_region = settings.region
+        set_checked_silently(self.anonymize_checkbox, settings.enabled)
+        set_checked_silently(self.anonymize_faces_checkbox, settings.detect_faces)
+        self.anonymize_mode_combo.blockSignals(True)
+        try:
+            select_combo_data(self.anonymize_mode_combo, settings.mode.value)
+        finally:
+            self.anonymize_mode_combo.blockSignals(False)
+        self.anonymize_strength_slider.blockSignals(True)
+        self.anonymize_strength_slider.setValue(settings.strength)
+        self.anonymize_strength_slider.blockSignals(False)
 
     def set_thumbnails(self, images: Mapping[str, QImage], device_pixel_ratio: float = 1.0) -> None:
         """``images`` are in device pixels; tagging the ratio keeps them crisp on HiDPI displays."""
@@ -96,6 +164,13 @@ class FiltersTab(TabPage):
         self._controls_enabled = enabled
         for button in self.buttons.values():
             button.setEnabled(enabled)
+        for widget in (
+            self.anonymize_checkbox,
+            self.anonymize_faces_checkbox,
+            self.anonymize_mode_combo,
+            self.anonymize_strength_slider,
+        ):
+            widget.setEnabled(enabled)
         self._update_description()
 
     def _select(self, filter_id: str) -> None:
