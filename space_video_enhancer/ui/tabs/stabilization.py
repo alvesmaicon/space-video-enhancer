@@ -77,6 +77,10 @@ MANUAL_ROTATION_LIMIT = 150
 """The rotation slider spans ±15° in 0.1° steps (value/10)."""
 MANUAL_ZOOM_LIMIT = 200
 """The zoom slider spans ±20% in 0.1% steps (scale = 1 + value/1000)."""
+MANUAL_SHEAR_LIMIT = 200
+"""The shear slider spans ±0.2 of horizontal lean per frame height in 0.001 steps (shear = value/1000)."""
+MANUAL_STRETCH_LIMIT = 200
+"""The vertical-stretch slider spans ±20% in 0.1% steps (stretch_y = 1 + value/1000)."""
 
 
 def _format_manual_percent(value: int) -> str:
@@ -211,11 +215,21 @@ class StabilizationTab(TabPage):
         self.manual_zoom_slider = LabeledSlider(
             "Zoom", -MANUAL_ZOOM_LIMIT, MANUAL_ZOOM_LIMIT, 0, display=_format_manual_percent
         )
+        self.manual_shear_slider = LabeledSlider(
+            "Cisalhamento", -MANUAL_SHEAR_LIMIT, MANUAL_SHEAR_LIMIT, 0, display=_format_manual_percent
+        )
+        self.manual_shear_slider.setToolTip("Corrige a inclinação diagonal do rolling shutter (jelly).")
+        self.manual_stretch_slider = LabeledSlider(
+            "Esticar vertical", -MANUAL_STRETCH_LIMIT, MANUAL_STRETCH_LIMIT, 0, display=_format_manual_percent
+        )
+        self.manual_stretch_slider.setToolTip("Corrige o alongamento vertical do rolling shutter (jelly).")
         self.manual_sliders = (
             self.manual_x_slider,
             self.manual_y_slider,
             self.manual_rotation_slider,
             self.manual_zoom_slider,
+            self.manual_shear_slider,
+            self.manual_stretch_slider,
         )
         self.manual_prev_button = QPushButton("◀ Keyframe")
         self.manual_prev_button.setObjectName("secondaryButton")
@@ -295,6 +309,8 @@ class StabilizationTab(TabPage):
                 self.manual_y_slider,
                 self.manual_rotation_slider,
                 self.manual_zoom_slider,
+                self.manual_shear_slider,
+                self.manual_stretch_slider,
                 manual_nav_row,
                 self.manual_info_label,
             ),
@@ -410,18 +426,29 @@ class StabilizationTab(TabPage):
     def onion_opacity(self) -> float:
         return self.onion_slider.value() / 100.0
 
-    def manual_adjust(self) -> tuple[float, float, float, float]:
-        """The current sliders as ``(tx, ty, rotation, scale)`` for a keyframe (translation as a frame fraction)."""
+    def manual_adjust(self) -> tuple[float, float, float, float, float, float]:
+        """The sliders as ``(tx, ty, rotation, scale, shear, stretch_y)`` for a keyframe (translation as a fraction)."""
         return (
             self.manual_x_slider.value() / 1000.0,
             self.manual_y_slider.value() / 1000.0,
             self.manual_rotation_slider.value() / 10.0,
             1.0 + self.manual_zoom_slider.value() / 1000.0,
+            self.manual_shear_slider.value() / 1000.0,
+            1.0 + self.manual_stretch_slider.value() / 1000.0,
         )
 
-    def set_manual_adjust(self, tx: float, ty: float, rotation: float, scale: float) -> None:
-        """Show ``(tx, ty, rotation, scale)`` on the sliders without emitting ``manualAdjustChanged``."""
-        values = (round(tx * 1000), round(ty * 1000), round(rotation * 10), round((scale - 1.0) * 1000))
+    def set_manual_adjust(
+        self, tx: float, ty: float, rotation: float, scale: float, shear: float, stretch_y: float
+    ) -> None:
+        """Show ``(tx, ty, rotation, scale, shear, stretch_y)`` on the sliders without emitting the change signal."""
+        values = (
+            round(tx * 1000),
+            round(ty * 1000),
+            round(rotation * 10),
+            round((scale - 1.0) * 1000),
+            round(shear * 1000),
+            round((stretch_y - 1.0) * 1000),
+        )
         for slider, value in zip(self.manual_sliders, values):
             slider.blockSignals(True)
             slider.slider.setValue(value)

@@ -327,8 +327,8 @@ class AdjustmentsSection(WindowState):
         if self.active_clip is None or self.current_frame is None:
             return
         frame = self._decoded_frame_index
-        tx, ty, rotation, scale = self.stabilization_tab.manual_adjust()
-        keyframe = StabilizationKeyframe(frame, tx, ty, rotation, scale)
+        tx, ty, rotation, scale, shear, stretch_y = self.stabilization_tab.manual_adjust()
+        keyframe = StabilizationKeyframe(frame, tx, ty, rotation, scale, shear, stretch_y)
         others = tuple(existing for existing in self._manual_keyframes if existing.frame != frame)
         self._manual_keyframes = tuple(sorted((*others, keyframe), key=lambda item: item.frame))
         self._store_active_clip_settings()  # folds the keyframes into the clip and commits one undo step
@@ -380,7 +380,7 @@ class AdjustmentsSection(WindowState):
         if self.playback_timer.isActive():
             return  # do not chase the sliders frame by frame during playback
         params = interpolate_keyframes(self._manual_keyframes, self._decoded_frame_index)
-        self.stabilization_tab.set_manual_adjust(*(params or (0.0, 0.0, 0.0, 1.0)))
+        self.stabilization_tab.set_manual_adjust(*(params or (0.0, 0.0, 0.0, 1.0, 0.0, 1.0)))
         self._update_manual_info()
 
     def _update_manual_info(self) -> None:
@@ -389,7 +389,10 @@ class AdjustmentsSection(WindowState):
         on_keyframe = any(item.frame == frame for item in self._manual_keyframes)
         self.stabilization_tab.manual_remove_button.setEnabled(on_keyframe and self.frame_count > 0)
         if count == 0:
-            text = "Ande até um frame que saiu do lugar e mova posição/rotação/zoom até casar com o fantasma."
+            text = (
+                "Ande até um frame que saiu do lugar e mova posição/rotação/zoom (e cisalhamento/esticar "
+                "para o jelly) até casar com o fantasma."
+            )
         else:
             where = "keyframe deste frame (mova os sliders para ajustar)" if on_keyframe else "interpolado"
             text = (

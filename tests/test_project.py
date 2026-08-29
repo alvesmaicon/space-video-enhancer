@@ -83,7 +83,15 @@ def test_settings_round_trip_through_plain_data() -> None:
     assert data["exposure"]["reference"] == [100.5, 110.25, 120.0] and data["exposure"]["region"] is None
     assert json.loads(json.dumps(data)) == data, "plain JSON, nothing exotic"
     keyframe = data["stabilization"]["keyframes"][1]
-    assert keyframe == {"frame": 30, "tx": -0.03, "ty": 0.0, "rotation": 1.5, "scale": 1.02}
+    assert keyframe == {
+        "frame": 30,
+        "tx": -0.03,
+        "ty": 0.0,
+        "rotation": 1.5,
+        "scale": 1.02,
+        "shear": 0.0,
+        "stretch_y": 1.0,
+    }
     loaded = settings_from_dict(RenderSettings, json.loads(json.dumps(data)))
     assert loaded == settings
     assert isinstance(loaded.stabilization.keyframes[0], StabilizationKeyframe), "not left as a raw dict"

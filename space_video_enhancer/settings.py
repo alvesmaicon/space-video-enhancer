@@ -249,7 +249,9 @@ class StabilizationKeyframe:
     """One hand-set correction at a source frame; translation is a fraction of the frame so it is resolution-free.
 
     Positive ``tx``/``ty`` move the frame's content right/down; ``rotation`` is degrees, ``scale`` a ratio (1 = none).
-    Between keyframes every field is interpolated (see :mod:`pipeline.stabilization.keyframes`).
+    ``shear`` leans the frame horizontally with height and ``stretch_y`` scales it vertically (both 0/1 = none) —
+    the manual "jelly" correction for rolling shutter. Between keyframes every field is interpolated
+    (see :mod:`pipeline.stabilization.keyframes`).
     """
 
     frame: int
@@ -257,10 +259,19 @@ class StabilizationKeyframe:
     ty: float = 0.0
     rotation: float = 0.0
     scale: float = 1.0
+    shear: float = 0.0
+    stretch_y: float = 1.0
 
     @property
     def is_identity(self) -> bool:
-        return self.tx == 0.0 and self.ty == 0.0 and self.rotation == 0.0 and abs(self.scale - 1.0) <= 1e-6
+        return (
+            self.tx == 0.0
+            and self.ty == 0.0
+            and self.rotation == 0.0
+            and abs(self.scale - 1.0) <= 1e-6
+            and self.shear == 0.0
+            and abs(self.stretch_y - 1.0) <= 1e-6
+        )
 
 
 @dataclass(frozen=True)
