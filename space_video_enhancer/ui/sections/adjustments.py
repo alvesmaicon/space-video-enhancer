@@ -698,6 +698,11 @@ class AdjustmentsSection(WindowState):
         if not settings.enabled:
             self.stabilization_tab.set_info("")
             return
+        if settings.uses_manual_keyframes:
+            self.stabilization_tab.set_info(
+                "Move o frame inteiro (sem crop nem zoom) — bordas podem aparecer; alinhe pelo fantasma."
+            )
+            return
 
         facts = [
             (

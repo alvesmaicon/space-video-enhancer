@@ -61,6 +61,23 @@ def test_a_translation_keyframe_shifts_the_frame_content() -> None:
     assert center_x == pytest.approx(50 + 0.2 * 120, abs=2.0), "the marker moved right by tx*width"
 
 
+def test_manual_mode_moves_the_frame_without_cropping_even_with_auto_crop_on() -> None:
+    """A manual translation past the crop margin must move 1:1, not zoom/stretch to hide the border.
+
+    Regression: with auto_crop on, a >5% translation triggered the valid-area crop, whose rect had a
+    different aspect ratio than the frame; rescaling it stretched the image instead of moving it.
+    """
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    frame[86:94, 156:164] = 255  # an 8x8 marker in the centre
+    # auto_crop=True is the default; manual mode ignores it so the frame moves instead of cropping
+    settings = StabilizationSettings(mode=StabilizationMode.MANUAL, keyframes=(KF(0, tx=0.15),), auto_crop=True)
+    result = apply_stabilization(frame, settings, frame_index=0)
+    ys, xs = np.where(result.max(axis=2) > 128)
+    assert xs.max() - xs.min() + 1 == pytest.approx(8, abs=1), "the marker keeps its width — no horizontal stretch"
+    assert ys.max() - ys.min() + 1 == pytest.approx(8, abs=1), "and its height"
+    assert xs.mean() == pytest.approx(160 + 0.15 * 320, abs=2.0), "it moved right by exactly tx*width"
+
+
 def test_a_vertical_stretch_keyframe_elongates_the_frame_about_its_centre() -> None:
     frame = np.zeros((80, 120, 3), dtype=np.uint8)
     frame[20:24, 58:62] = 255  # a marker above the centre row (40)

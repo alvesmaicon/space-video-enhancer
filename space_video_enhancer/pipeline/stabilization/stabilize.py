@@ -105,8 +105,10 @@ def apply_stabilization(
             applied = blended
 
     stabilized = frame if applied is None else transforms.warp(frame, applied)
-    if settings.auto_crop:
-        # Always, even without a correction: the zoom must not pop in and out between frames.
+    if settings.auto_crop and not settings.uses_manual_keyframes:
+        # Always, even without a correction: the zoom must not pop in and out between frames. Manual mode
+        # is exempt: its corrections are not capped at the margin, so cropping to the valid area would zoom
+        # and skew the frame away from the 1:1 ghost the user aligns against — it must move, not crop.
         stabilized = transforms.stabilization_crop(stabilized, applied, CORRECTION_BUDGET_FRACTION)
     return stabilized
 
