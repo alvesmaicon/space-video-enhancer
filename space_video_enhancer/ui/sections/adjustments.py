@@ -8,7 +8,7 @@ from PySide6.QtCore import QRectF
 
 from space_video_enhancer.pipeline.deinterlace import likely_interlaced
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
-from space_video_enhancer.pipeline.grade import neutral_gains
+from space_video_enhancer.pipeline.grade import neutral_gains, white_patch_gains
 from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, wobble_window_frames
 from space_video_enhancer.sequence import Clip
@@ -164,8 +164,8 @@ class AdjustmentsSection(WindowState):
         pixels = qrect_to_norm(self.white_balance_rect_norm).to_pixels(*self.source_size)
         size = f"{pixels[2]}x{pixels[3]} px" if pixels is not None else ""
         self.grade_tab.set_region_info(
-            f"Região de cinza: {size} — arraste o retângulo roxo no preview sobre algo que deveria ser cinza "
-            "ou branco e clique em Neutralizar."
+            f"Região: {size} — arraste o retângulo roxo sobre algo cinza/branco e clique em Neutralizar; "
+            "sem cinza na cena, mire num brilho e use “pelo realce”."
         )
 
     def _neutralize_white_balance(self, whole_frame: bool) -> None:
@@ -178,6 +178,17 @@ class AdjustmentsSection(WindowState):
         self._set_white_balance_gains(gains)
         log_event(LOG, "ui.white_balance", source="frame" if whole_frame else "region", gains=list(gains))
         self.status.show_message(f"Balanço de branco: ganhos B {gains[0]:.2f} · G {gains[1]:.2f} · R {gains[2]:.2f}.")
+
+    def _white_patch_white_balance(self) -> None:
+        """Balance by the brightest pixels of the region — for scenes with no gray to point at."""
+        if self.current_frame is None:
+            self.status.show_message("Abra um vídeo e aguarde o primeiro render para neutralizar as cores.")
+            return
+        rect = qrect_to_norm(self.white_balance_rect_norm)
+        gains = white_patch_gains(self.current_frame, rect)
+        self._set_white_balance_gains(gains)
+        log_event(LOG, "ui.white_balance", source="white_patch", gains=list(gains))
+        self.status.show_message(f"Balanço pelo realce: ganhos B {gains[0]:.2f} · G {gains[1]:.2f} · R {gains[2]:.2f}.")
 
     def _reset_white_balance_gains(self) -> None:
         self._set_white_balance_gains(NEUTRAL_GAINS)

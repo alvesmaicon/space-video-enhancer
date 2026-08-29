@@ -711,6 +711,7 @@ class MainWindow(
         self.color_tab.resetRequested.connect(self._reset_slider_to_preset)
         self.grade_tab.valueChanged.connect(self._handle_grade_change)
         self.grade_tab.neutralizeRequested.connect(self._neutralize_white_balance)
+        self.grade_tab.whitePatchRequested.connect(self._white_patch_white_balance)
         self.grade_tab.gainsResetRequested.connect(self._reset_white_balance_gains)
         self.grade_tab.regionResetRequested.connect(self._reset_white_balance_rect)
         self.grade_tab.exposureChanged.connect(self._handle_exposure_change)

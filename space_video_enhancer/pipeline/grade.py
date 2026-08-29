@@ -148,3 +148,36 @@ def neutral_gains(frame: np.ndarray, rect: NormalizedRect | None) -> tuple[float
     target = float(means.mean())
     gains = np.clip(target / means, WHITE_BALANCE_GAIN_MIN, WHITE_BALANCE_GAIN_MAX)
     return (round(float(gains[0]), 3), round(float(gains[1]), 3), round(float(gains[2]), 3))
+
+
+WHITE_PATCH_PERCENTILE = 95.0
+"""Only the brightest pixels above this luma percentile stand in for the white reference."""
+_BGR_LUMA = np.array([0.114, 0.587, 0.299], dtype=np.float64)
+
+
+def white_patch_gains(
+    frame: np.ndarray, rect: NormalizedRect | None, percentile: float = WHITE_PATCH_PERCENTILE
+) -> tuple[float, float, float]:
+    """B, G, R gains that treat the brightest pixels of ``rect`` as the white reference.
+
+    Gray world needs something gray in the frame; this does not. It reads the highlights
+    (a reflection, a bright wall) inside the region and balances the channels so that near-white
+    reference is neutral, which is what you want when there is no gray card to point at.
+    """
+    sample = frame if rect is None else region(frame, rect)
+    if sample is None or sample.size == 0:
+        sample = frame
+    pixels = sample.reshape(-1, 3).astype(np.float64)
+    if pixels.shape[0] == 0:
+        return (1.0, 1.0, 1.0)
+    luma = pixels @ _BGR_LUMA
+    threshold = float(np.percentile(luma, percentile))
+    bright = pixels[luma >= threshold]
+    if bright.shape[0] == 0:
+        bright = pixels
+    means = bright.mean(axis=0)
+    if np.any(means <= 0.0):
+        return (1.0, 1.0, 1.0)
+    target = float(means.mean())  # keep the reference's brightness, only correct its cast
+    gains = np.clip(target / means, WHITE_BALANCE_GAIN_MIN, WHITE_BALANCE_GAIN_MAX)
+    return (round(float(gains[0]), 3), round(float(gains[1]), 3), round(float(gains[2]), 3))

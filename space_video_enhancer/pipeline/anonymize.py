@@ -75,8 +75,12 @@ def detect_faces(frame: np.ndarray) -> list[tuple[int, int, int, int]]:
 
 def _region_box(region: NormalizedRect, width: int, height: int) -> tuple[int, int, int, int]:
     return _clamp_box(
-        round(region.x * width), round(region.y * height), round(region.width * width), round(region.height * height),
-        width, height,
+        round(region.x * width),
+        round(region.y * height),
+        round(region.width * width),
+        round(region.height * height),
+        width,
+        height,
     )
 
 

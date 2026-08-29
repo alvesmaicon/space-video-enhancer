@@ -11,9 +11,16 @@ from space_video_enhancer.pipeline.grade import (
     build_grade_tables,
     neutral_gains,
     tint_gains,
+    white_patch_gains,
 )
 from space_video_enhancer.pipeline.render import render_frame
-from space_video_enhancer.settings import HUE_BAND_NAMES, ColorGradeSettings, HueBandAdjust, RenderSettings
+from space_video_enhancer.settings import (
+    HUE_BAND_NAMES,
+    ColorGradeSettings,
+    HueBandAdjust,
+    NormalizedRect,
+    RenderSettings,
+)
 from space_video_enhancer.telemetry.diff import flatten
 
 YELLOW, GREEN, BLUE, RED = (0, 255, 255), (0, 255, 0), (255, 0, 0), (0, 0, 255)
@@ -91,6 +98,23 @@ def test_neutral_gains_balance_a_tinted_gray() -> None:
     means = cv2.mean(balanced)[:3]
     assert max(means) - min(means) <= 1.5
     assert neutral_gains(np.zeros((8, 8, 3), dtype=np.uint8), None) == (1.0, 1.0, 1.0)  # black: nothing to infer
+
+
+def test_white_patch_balances_by_the_highlights_when_there_is_no_gray() -> None:
+    # A scene dominated by a saturated color (green) with a small warm-tinted highlight.
+    frame = np.zeros((40, 40, 3), dtype=np.uint8)
+    frame[:] = (20, 160, 20)  # green field: gray world would chase this
+    frame[:6, :6] = (150, 190, 230)  # bright warm patch (the scene "white", reddish)
+    rect = NormalizedRect(0.0, 0.0, 0.2, 0.2)  # aim the region at the highlight
+    gains = white_patch_gains(frame, rect)
+    assert gains[0] > 1.0 > gains[2]  # lift blue, pull red down: neutralizes the warm cast
+    patch = np.array([[150.0, 190.0, 230.0]])
+    balanced = patch * np.array(gains)
+    assert balanced.max() - balanced.min() < patch.max() - patch.min()  # closer to neutral
+
+
+def test_white_patch_is_neutral_on_black() -> None:
+    assert white_patch_gains(np.zeros((8, 8, 3), dtype=np.uint8), None) == (1.0, 1.0, 1.0)
 
 
 def test_tint_moves_green_against_magenta() -> None:

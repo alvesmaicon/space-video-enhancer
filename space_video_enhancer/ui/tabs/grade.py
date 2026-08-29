@@ -8,6 +8,7 @@ user clicks "Usar este frame". The eight color swatches select which band the th
 
 from __future__ import annotations
 
+import colorsys
 from dataclasses import replace
 
 from PySide6.QtCore import QSize, Qt, Signal
@@ -19,6 +20,7 @@ from space_video_enhancer.settings import (
     DEFAULT_HUE_BANDS,
     EXPOSURE_DEFAULT_MAX_EV,
     EXPOSURE_MAX_EV_LIMIT,
+    HUE_BAND_CENTERS_DEG,
     HUE_BAND_NAMES,
     HUE_SHIFT_LIMIT_DEG,
     NEUTRAL_GAINS,
@@ -59,6 +61,12 @@ EXPOSURE_SCOPES: list[tuple[str, bool]] = [("Região roxa do preview", True), ("
 EXPOSURE_MODES: list[tuple[str, bool]] = [("Brilho e cor (B/G/R)", True), ("Só brilho", False)]
 
 
+def hsv_hex(hue_deg: float, saturation: float, value: float) -> str:
+    """A ``#rrggbb`` string for an HSV colour; used to paint the HSL slider grooves."""
+    red, green, blue = colorsys.hsv_to_rgb((hue_deg % 360.0) / 360.0, saturation, value)
+    return f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+
+
 def format_degrees(value: int) -> str:
     return f"{value:+d}°" if value else "0°"
 
@@ -75,6 +83,8 @@ class ColorGradeTab(TabPage):
     valueChanged = Signal()
     neutralizeRequested = Signal(bool)
     """``True`` = whole frame (gray world), ``False`` = the gray reference region on the preview."""
+    whitePatchRequested = Signal()
+    """Balance by the brightest pixels of the region — no gray card needed, just a highlight."""
     gainsResetRequested = Signal()
     regionResetRequested = Signal()
     exposureChanged = Signal()
@@ -97,6 +107,11 @@ class ColorGradeTab(TabPage):
         )
         self.neutralize_button = QPushButton("Neutralizar pela região")
         self.neutralize_button.setToolTip("Calcula os ganhos B/G/R para a região roxa do preview virar cinza neutro.")
+        self.white_patch_button = QPushButton("Neutralizar pelo realce")
+        self.white_patch_button.setToolTip(
+            "Sem cinza na cena? Mire a região roxa num brilho/reflexo (a parte mais clara) e use isto: "
+            "trata os pixels mais claros como branco e corrige o dominante por ali."
+        )
         self.auto_button = QPushButton("Automático (frame inteiro)")
         self.auto_button.setToolTip("Gray world: assume que a média do frame inteiro deveria ser neutra.")
         self.gains_reset_button = QPushButton("Redefinir ganhos")
@@ -143,6 +158,11 @@ class ColorGradeTab(TabPage):
             "saturation": self.saturation_slider,
             "luminance": self.luminance_slider,
         }
+        self.hue_low_label = QLabel()
+        self.hue_low_label.setObjectName("hintLabel")
+        self.hue_high_label = QLabel()
+        self.hue_high_label.setObjectName("hintLabel")
+        self.hue_high_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.band_reset_button = QPushButton("Redefinir esta cor")
         self.band_reset_button.setObjectName("secondaryButton")
         self.all_bands_reset_button = QPushButton("Redefinir todas as cores")
@@ -187,6 +207,7 @@ class ColorGradeTab(TabPage):
         self.tint_slider.valueChanged.connect(lambda _value: self.valueChanged.emit())
         self.tint_slider.resetRequested.connect(lambda: self.tint_slider.setValue(DEFAULT_TINT))
         self.neutralize_button.clicked.connect(lambda: self.neutralizeRequested.emit(False))
+        self.white_patch_button.clicked.connect(self.whitePatchRequested.emit)
         self.auto_button.clicked.connect(lambda: self.neutralizeRequested.emit(True))
         self.gains_reset_button.clicked.connect(self.gainsResetRequested.emit)
         self.region_reset_button.clicked.connect(self.regionResetRequested.emit)
@@ -211,11 +232,18 @@ class ColorGradeTab(TabPage):
 
         buttons_row = QHBoxLayout()
         buttons_row.addWidget(self.neutralize_button)
-        buttons_row.addWidget(self.auto_button)
+        buttons_row.addWidget(self.white_patch_button)
+        auto_row = QHBoxLayout()
+        auto_row.addWidget(self.auto_button)
+        auto_row.addStretch(1)
         reset_row = QHBoxLayout()
         reset_row.addWidget(self.gains_reset_button)
         reset_row.addWidget(self.region_reset_button)
         reset_row.addStretch(1)
+        hue_ends_row = QHBoxLayout()
+        hue_ends_row.addWidget(self.hue_low_label)
+        hue_ends_row.addStretch(1)
+        hue_ends_row.addWidget(self.hue_high_label)
         band_reset_row = QHBoxLayout()
         band_reset_row.addWidget(self.band_reset_button)
         band_reset_row.addWidget(self.all_bands_reset_button)
@@ -229,6 +257,7 @@ class ColorGradeTab(TabPage):
                 "Balanço de branco",
                 self.tint_slider,
                 buttons_row,
+                auto_row,
                 reset_row,
                 self.gains_label,
                 self.region_label,
@@ -249,6 +278,7 @@ class ColorGradeTab(TabPage):
                 swatches,
                 self.band_label,
                 self.hue_slider,
+                hue_ends_row,
                 self.saturation_slider,
                 self.luminance_slider,
                 band_reset_row,
@@ -310,6 +340,24 @@ class ColorGradeTab(TabPage):
             button.setChecked(True)
         self._show_band(self._bands[index])
         self.band_label.setText(f"Cor selecionada: {BAND_LABELS[HUE_BAND_NAMES[index]]}")
+        self._paint_band_sliders(index)
+
+    def _paint_band_sliders(self, index: int) -> None:
+        """Colour the three sliders for the selected band so each direction reads as a colour, not a number."""
+        center = float(HUE_BAND_CENTERS_DEG[index])
+        count = len(HUE_BAND_NAMES)
+        previous = BAND_LABELS[HUE_BAND_NAMES[(index - 1) % count]]
+        following = BAND_LABELS[HUE_BAND_NAMES[(index + 1) % count]]
+        span = float(HUE_SHIFT_LIMIT_DEG)
+        self.hue_slider.set_groove_gradient(
+            [hsv_hex(center - span + fraction * 2 * span, 0.85, 0.90) for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
+        )
+        self.saturation_slider.set_groove_gradient(
+            [hsv_hex(center, saturation, 0.88) for saturation in (0.10, 0.40, 0.70, 1.0)]
+        )
+        self.luminance_slider.set_groove_gradient([hsv_hex(center, 0.55, value) for value in (0.22, 0.45, 0.70, 1.0)])
+        self.hue_low_label.setText(f"◀ {previous}")
+        self.hue_high_label.setText(f"{following} ▶")
 
     def set_band(self, index: int, adjust: HueBandAdjust, *, emit: bool = False) -> None:
         self._bands[index] = adjust
@@ -400,6 +448,7 @@ class ColorGradeTab(TabPage):
         for widget in (
             self.tint_slider,
             self.neutralize_button,
+            self.white_patch_button,
             self.auto_button,
             self.region_reset_button,
             self.hue_slider,

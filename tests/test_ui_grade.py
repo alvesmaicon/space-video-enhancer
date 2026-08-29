@@ -49,6 +49,27 @@ def test_neutralize_turns_the_current_frame_into_gains(app: QApplication, window
     assert window.white_balance_gains == NEUTRAL_GAINS and "neutro" in window.grade_tab.gains_label.text()
 
 
+def test_white_patch_button_turns_the_highlights_into_gains(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+    window.grade_tab.white_patch_button.click()
+    gains = window.white_balance_gains
+    assert len(gains) == 3 and all(0.5 <= gain <= 2.0 for gain in gains)
+    assert window._current_render_settings().grade.white_balance_gains == gains
+    assert "realce" in window.status.message().lower()
+
+
+def test_hsl_sliders_show_the_neighbour_colours_of_the_selected_band(app: QApplication, window: MainWindow) -> None:
+    tab = window.grade_tab
+    tab.select_band(3)  # green
+    assert "Amarelo" in tab.hue_low_label.text() and "Ciano" in tab.hue_high_label.text()
+    assert "qlineargradient" in tab.hue_slider.slider.styleSheet()
+    tab.select_band(5)  # blue: sits between cyan and purple
+    assert "Ciano" in tab.hue_low_label.text() and "Roxo" in tab.hue_high_label.text()
+
+
 def test_gray_reference_overlay_is_editable_only_on_the_hsl_tab(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:

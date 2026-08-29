@@ -56,6 +56,26 @@ class LabeledSlider(QWidget):
         layout.addLayout(header)
         layout.addWidget(self.slider)
 
+    def set_groove_gradient(self, colors: list[str]) -> None:
+        """Paint the groove with a left-to-right gradient of ``colors`` (hex), or clear it when empty.
+
+        Used by the HSL sliders so the groove shows where each direction takes the color; the
+        handle is restyled too, otherwise Qt drops back to an unstyled square once the groove is set.
+        """
+        if not colors:
+            self.slider.setStyleSheet("")
+            return
+        if len(colors) == 1:
+            colors = [colors[0], colors[0]]
+        last = len(colors) - 1
+        stops = ", ".join(f"stop:{index / last:.3f} {color}" for index, color in enumerate(colors))
+        self.slider.setStyleSheet(
+            "QSlider::groove:horizontal { height: 8px; border-radius: 4px;"
+            f" background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops}); }}"
+            " QSlider::handle:horizontal { background: #ffffff; border: 2px solid #111827;"
+            " width: 12px; margin: -5px 0; border-radius: 7px; }"
+        )
+
     def value(self) -> int:
         return self.slider.value()
 
