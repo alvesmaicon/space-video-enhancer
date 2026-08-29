@@ -25,7 +25,7 @@ Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windo
 - Desfazer/refazer com rótulos ("Desfazer ajuste de estabilização"); projetos salvos em JSON legível (`.svep`) com lista de recentes.
 
 **Processamento** (OpenCV, CPU ou OpenCL)
-- **Estabilização**: suavizar tremor (deslocamento, +rotação e zoom, +perspectiva), travar uma região (*camera lock*) ou híbrida; intensidade, suavização temporal, crop automático. O estimador escolhe a hipótese de movimento que se **espalha** pelo quadro, então uma pessoa cobrindo metade do frame não vira "a câmera". Ou **Manual (keyframes)**: você alinha um frame de tempos em tempos (posição, rotação, zoom e o *jelly* — cisalhamento e esticar vertical) contra uma **referência fantasma** sobreposta com transparência, e o ajuste é interpolado entre os keyframes — afim, sem perspectiva, então nada de deformação surpresa.
+- **Estabilização**: suavizar tremor (deslocamento, +rotação e zoom, +perspectiva), travar uma região (*camera lock*) ou híbrida; intensidade, suavização temporal, crop automático. O estimador escolhe a hipótese de movimento que se **espalha** pelo quadro, então uma pessoa cobrindo metade do frame não vira "a câmera". Ou **Manual (keyframes)**: você alinha um frame de tempos em tempos (posição, rotação, zoom e o *jelly* — cisalhamento e esticar vertical) contra uma **referência fantasma** sobreposta com transparência, e o ajuste é interpolado entre os keyframes — afim, sem perspectiva, então nada de deformação surpresa; **Preencher com o movimento** rastreia o clipe e cria os keyframes intermediários seguindo o movimento medido da câmera, tirando o tremor entre os que você marcou.
 - **Ruído**: NLMeans desligado, manual, automático pelo frame ou por uma amostra escolhida no preview.
 - **Cor**: contraste, brilho, gama, saturação, temperatura e nitidez com presets de *look*; balanço de branco por região cinza, pelo realce (quando não há cinza na cena) ou *gray world*, tint, ajuste de matiz/saturação/luminância por oito faixas de matiz (sliders com groove colorido mostrando para onde cada direção puxa a cor); trava de exposição para câmeras em auto-exposição.
 - **Geometria**: crop interativo com proporções, rotação 90°/180°/270° e espelhamento.
@@ -154,6 +154,8 @@ QT_QPA_PLATFORM=offscreen pytest
 ```
 
 Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos e fluxos completos com vídeos sintéticos; os de exportação usam o `ffmpeg` do `PATH` e são pulados se ele não existir. Os testes que tocam Qt levam a marca `ui` — `pytest -m "not ui"` é o loop rápido (pipeline e modelo, ~6 s); a suíte inteira é o critério. `benchmarks/` tem os scripts de medição (tremor residual, custo dos estimadores, variantes de denoise) — veja [benchmarks/README.md](benchmarks/README.md).
+
+Os prints deste README são gerados da UI atual, offscreen e de forma reprodutível, por `QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/screenshots.py` (monta um clipe de demonstração sintético, abre a janela real e captura `docs/screenshots/`). Rode-o depois de mudanças visíveis na interface.
 
 ## Limitações conhecidas
 
