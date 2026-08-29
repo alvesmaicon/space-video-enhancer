@@ -76,6 +76,9 @@ TRACK_OUTSIDE_CLIP_COLOR = QColor(120, 113, 108, 60)
 RANGE_COLOR = QColor(15, 118, 110, 70)
 START_MARKER_COLOR = QColor("#0f766e")
 END_MARKER_COLOR = QColor("#b45309")
+KEYFRAME_MARKER_COLOR = QColor("#7c3aed")
+KEYFRAME_MARKER_EDGE_COLOR = QColor(255, 255, 255, 220)
+KEYFRAME_MARKER_MIN_SPACING_PX = 3.0
 CUT_COLOR = QColor(220, 38, 38, 110)
 CUT_SELECTED_COLOR = QColor(220, 38, 38, 170)
 CUT_EDGE_COLOR = QColor("#b91c1c")
@@ -340,6 +343,8 @@ class TimelineWidget(QWidget):
         self._value = 0
         self._clip = (0, 0)
         self._show_clip = False
+        self._keyframes: tuple[int, ...] = ()
+        """Timeline frames of the active clip's manual-stabilization keyframes; drawn as diamonds on the ruler."""
         self._cuts: list[tuple[int, int]] = []
         self._pending_cut: int | None = None
         self._selected_cut = -1
@@ -512,6 +517,13 @@ class TimelineWidget(QWidget):
 
     def cuts(self) -> tuple[tuple[int, int], ...]:
         return tuple(self._cuts)
+
+    def set_keyframes(self, frames: Sequence[int]) -> None:
+        """The active clip's manual-stabilization keyframes, in timeline frames (empty clears them)."""
+        keyframes = tuple(sorted({int(frame) for frame in frames}))
+        if keyframes != self._keyframes:  # repaint only when they actually change (called on every render)
+            self._keyframes = keyframes
+            self.update()
 
     def set_pending_cut(self, frame: int | None) -> None:
         self._pending_cut = frame
@@ -983,6 +995,7 @@ class TimelineWidget(QWidget):
         self._paint_clips(painter)
         self._paint_cuts(painter)
         self._paint_clip_markers(painter)
+        self._paint_keyframes(painter)
         self._paint_playhead(painter)
         self._paint_clip_drag(painter)
         self._paint_track_labels(painter)
@@ -1177,6 +1190,29 @@ class TimelineWidget(QWidget):
                 ]
             )
             painter.drawPolygon(flag)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _paint_keyframes(self, painter: QPainter) -> None:
+        """A small violet diamond on the ruler at each manual-stabilization keyframe (the usual keyframe glyph)."""
+        if not self._keyframes:
+            return
+        ruler = self.ruler_rect()
+        first, last = self.visible_range()
+        cy = ruler.bottom() - 5.0
+        half = 4.0
+        painter.setPen(QPen(KEYFRAME_MARKER_EDGE_COLOR, 1))
+        painter.setBrush(KEYFRAME_MARKER_COLOR)
+        last_x = -KEYFRAME_MARKER_MIN_SPACING_PX
+        for frame in self._keyframes:
+            if frame < first - 1 or frame > last + 1:
+                continue
+            x = self.scale.x_of(frame)
+            if x - last_x < KEYFRAME_MARKER_MIN_SPACING_PX:  # thin out a dense fill into a dotted band
+                continue
+            last_x = x
+            painter.drawPolygon(
+                QPolygonF([QPointF(x, cy - half), QPointF(x + half, cy), QPointF(x, cy + half), QPointF(x - half, cy)])
+            )
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_playhead(self, painter: QPainter) -> None:

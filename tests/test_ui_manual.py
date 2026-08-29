@@ -101,6 +101,23 @@ def test_the_ghost_only_shows_on_the_stabilization_tab_in_manual_mode(
     assert not window.preview.has_onion_skin(), "the ghost is only for aligning on the stabilization tab"
 
 
+def test_keyframes_show_as_markers_on_the_timeline_only_in_manual_mode(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    _enter_manual_at(app, window, ui_video, 0)  # anchor keyframe at frame 0
+    for frame, value in ((5, 40), (9, -30)):
+        window.transport.set_value(frame)
+        wait_for_preview(app, window)
+        window.stabilization_tab.manual_x_slider.slider.setValue(value)
+        wait_for_preview(app, window)
+    # one clip at the timeline fps: source frames map to the same timeline frames
+    assert window.transport.timeline._keyframes == (0, 5, 9), "a diamond marks each keyframe on the ruler"
+
+    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.OFF.value)
+    app.processEvents()
+    assert window.transport.timeline._keyframes == (), "the markers only show while aligning in manual mode"
+
+
 def test_fill_button_tracks_the_clip_and_densifies_the_keyframes_as_one_undo_step(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:

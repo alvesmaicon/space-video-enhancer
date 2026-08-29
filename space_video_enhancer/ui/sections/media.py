@@ -502,6 +502,7 @@ class MediaSection(WindowState):
         self.stabilization_tab.apply(settings.stabilization)
         self._manual_keyframes = settings.stabilization.keyframes  # per-clip, keyed by source frame
         self._cancel_motion_fill()  # a fill in flight was for the clip being replaced
+        self._sync_keyframe_markers()  # the ruler diamonds follow the active clip's keyframes
         self.stabilization_tab.apply_capture(settings.capture)  # deinterlacing
         self.tempo_tab.apply_capture(settings.capture)  # speed / retiming / mute
         self.filters_tab.apply_anonymize(settings.anonymize)

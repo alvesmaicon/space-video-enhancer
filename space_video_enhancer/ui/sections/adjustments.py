@@ -315,6 +315,7 @@ class AdjustmentsSection(WindowState):
             self._cancel_motion_fill()  # a pending fill only makes sense in manual mode
         self._update_stabilization_controls_state()
         self._refresh_manual_controls()
+        self._sync_keyframe_markers()  # show them on entering manual, clear them on leaving
         self._schedule_preview_refresh()
 
     # --- manual keyframes -----------------------------------------------------------------
@@ -405,6 +406,16 @@ class AdjustmentsSection(WindowState):
             )
         self.stabilization_tab.set_manual_info(text)
         self._refresh_fill_button()
+        self._sync_keyframe_markers()
+
+    def _sync_keyframe_markers(self) -> None:
+        """Show the active clip's manual keyframes as diamonds on the timeline ruler (only in manual mode)."""
+        manual = self.stabilization_tab.mode() is StabilizationMode.MANUAL
+        if not manual or self.active_clip_index < 0 or self.sequence.is_empty:
+            self.transport.timeline.set_keyframes(())
+            return
+        frames = [self.sequence.timeline_frame(self.active_clip_index, item.frame) for item in self._manual_keyframes]
+        self.transport.timeline.set_keyframes(frames)
 
     def _refresh_fill_button(self) -> None:
         """The fill button needs two keyframes to bridge and is disabled (with a busy label) while analysing."""

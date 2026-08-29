@@ -324,6 +324,9 @@ class WindowState(QMainWindow):
     def _cancel_motion_fill(self) -> None:
         raise NotImplementedError  # adjustments
 
+    def _sync_keyframe_markers(self) -> None:
+        raise NotImplementedError  # adjustments
+
     def _sync_white_balance_preview(self) -> None:
         raise NotImplementedError  # adjustments
 
