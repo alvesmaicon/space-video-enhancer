@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from space_video_enhancer.settings import StabilizationMode
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.tabs.base import select_combo_data
-from tests.qt_helpers import wait_for_preview
+from tests.qt_helpers import wait_for_preview, wait_until
 
 
 def _keyframes(window: MainWindow) -> list[tuple[int, float]]:
@@ -99,3 +99,28 @@ def test_the_ghost_only_shows_on_the_stabilization_tab_in_manual_mode(
     window.settings_tabs.setCurrentWidget(window.filters_tab)
     app.processEvents()
     assert not window.preview.has_onion_skin(), "the ghost is only for aligning on the stabilization tab"
+
+
+def test_fill_button_tracks_the_clip_and_densifies_the_keyframes_as_one_undo_step(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    tab = window.stabilization_tab
+    _enter_manual_at(app, window, ui_video, 0)  # anchor keyframe at frame 0
+    assert not tab.manual_fill_button.isEnabled(), "one keyframe is not enough to fill a gap"
+    last = window.frame_count - 1
+    window.transport.set_value(last)
+    wait_for_preview(app, window)
+    tab.manual_x_slider.slider.setValue(60)  # a second keyframe, far from the anchor
+    wait_for_preview(app, window)
+    before = len(window.sequence.clips[0].settings.stabilization.keyframes)
+    assert tab.manual_fill_button.isEnabled(), "two keyframes bridge a gap the fill can cover"
+
+    tab.manual_fill_button.click()
+    wait_until(app, lambda: window._motion_fill_request is None, timeout=30.0, what="motion-path fill analysis")
+    app.processEvents()
+
+    after = len(window.sequence.clips[0].settings.stabilization.keyframes)
+    assert after > before, "the fill inserts keyframes across the gap"
+    assert window.undo_action.text().endswith("estabilização")
+    window._undo_edit()
+    assert len(window.sequence.clips[0].settings.stabilization.keyframes) == before, "one undo drops the whole fill"

@@ -10,6 +10,7 @@ from space_video_enhancer.pipeline.deinterlace import likely_interlaced
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.grade import neutral_gains, white_patch_gains
 from space_video_enhancer.pipeline.stabilization.keyframes import interpolate_keyframes
+from space_video_enhancer.pipeline.stabilization.motion_path import MotionPath, fill_keyframes
 from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, wobble_window_frames
 from space_video_enhancer.sequence import Clip
@@ -27,6 +28,7 @@ from space_video_enhancer.settings import (
     StabilizationMode,
 )
 from space_video_enhancer.telemetry.log import get_logger, log_event
+from space_video_enhancer.ui.motion_path_analysis import MotionPathRequest
 from space_video_enhancer.ui.sections.state import WindowState
 from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisRequest
 
@@ -309,6 +311,8 @@ class AdjustmentsSection(WindowState):
         if mode is StabilizationMode.MANUAL and self._onion_reference is None and self._last_preview is not None:
             self._onion_reference = self._last_preview.before  # start the ghost on the current frame
             self._ensure_anchor_keyframe(self._decoded_frame_index)  # pin this frame so others move relative to it
+        if mode is not StabilizationMode.MANUAL:
+            self._cancel_motion_fill()  # a pending fill only makes sense in manual mode
         self._update_stabilization_controls_state()
         self._refresh_manual_controls()
         self._schedule_preview_refresh()
@@ -397,9 +401,84 @@ class AdjustmentsSection(WindowState):
             where = "keyframe deste frame (mova os sliders para ajustar)" if on_keyframe else "interpolado"
             text = (
                 f"{count} keyframe(s) · frame {frame + 1}: {where}. "
-                "Ande alguns frames, alinhe ao fantasma e repita; o meio é preenchido sozinho."
+                "Ande alguns frames, alinhe ao fantasma e repita; ou use “Preencher com o movimento”."
             )
         self.stabilization_tab.set_manual_info(text)
+        self._refresh_fill_button()
+
+    def _refresh_fill_button(self) -> None:
+        """The fill button needs two keyframes to bridge and is disabled (with a busy label) while analysing."""
+        manual = self.stabilization_tab.mode() is StabilizationMode.MANUAL
+        busy = self._motion_fill_request is not None
+        enabled = manual and self.frame_count > 0 and len(self._manual_keyframes) >= 2 and not busy
+        self.stabilization_tab.manual_fill_button.setEnabled(enabled)
+        label = "Analisando o movimento…" if busy else "Preencher com o movimento"
+        self.stabilization_tab.manual_fill_button.setText(label)
+
+    def _fill_manual_keyframes(self) -> None:
+        """Kick off the background analysis; the filled keyframes are applied in ``_on_motion_path_finished``."""
+        clip = self.active_clip
+        if clip is None or self.stabilization_tab.mode() is not StabilizationMode.MANUAL:
+            return
+        if len(self._manual_keyframes) < 2:
+            self.status.show_message("Marque pelo menos dois keyframes para preencher o movimento entre eles.")
+            return
+        frames = [item.frame for item in self._manual_keyframes]
+        first = max(0, min(frames))
+        last = min(clip.source.last_frame, max(frames))
+        if last - first < 2:
+            self.status.show_message("Os keyframes estão muito próximos para analisar o movimento.")
+            return
+        self._cancel_motion_fill()
+        self._motion_fill_request = self._motion_path_analysis.analyze(clip.source.path, first, last)
+        log_event(LOG, "ui.motion_fill_start", clip=clip.name, first=first, last=last)
+        self.status.show_message(f"Analisando o movimento de {clip.name} ({last - first + 1} frames) em segundo plano…")
+        self._refresh_fill_button()
+
+    def _cancel_motion_fill(self) -> None:
+        if self._motion_fill_request is not None:
+            self._motion_path_analysis.cancel()
+            self._motion_fill_request = None
+
+    def _on_motion_path_progress(self, request: MotionPathRequest, done: int, total: int) -> None:
+        if request is self._motion_fill_request and total > 0:
+            self.stabilization_tab.manual_fill_button.setText(f"Analisando o movimento… {done * 100 // total}%")
+
+    def _on_motion_path_finished(self, request: MotionPathRequest, track: object, elapsed_ms: float) -> None:
+        if request is not self._motion_fill_request:
+            return  # a cancelled or superseded analysis (or one from a document that is gone)
+        self._motion_fill_request = None
+        clip = self.active_clip
+        if (
+            not isinstance(track, MotionPath)
+            or clip is None
+            or clip.source.path != request.source
+            or self.stabilization_tab.mode() is not StabilizationMode.MANUAL
+        ):
+            self.status.show_message("Não foi possível preencher o movimento (mídia ou modo mudou).")
+            self._refresh_fill_button()
+            return
+        filled = fill_keyframes(self._manual_keyframes, track)
+        if filled == self._manual_keyframes:
+            self.status.show_message("Nada a preencher: o movimento entre os keyframes já segue uma linha reta.")
+            self._refresh_fill_button()
+            return
+        added = len(filled) - len(self._manual_keyframes)
+        self._manual_keyframes = filled
+        self._store_active_clip_settings()  # one undo step
+        self._refresh_manual_controls()
+        self._schedule_preview_refresh()
+        log_event(
+            LOG,
+            "ui.motion_fill_finish",
+            clip=clip.name,
+            added=added,
+            measured=round(track.measured_fraction, 3),
+            elapsed_ms=round(elapsed_ms, 1),
+        )
+        self.status.show_message(
+            f"Movimento preenchido: +{added} keyframe(s), {track.measured_fraction:.0%} do trecho rastreado."
+        )
 
     def _handle_stabilization_control_change(self) -> None:
         self._stabilization_epoch += 1

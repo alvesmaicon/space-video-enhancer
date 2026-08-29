@@ -88,6 +88,7 @@ from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.history import EditHistory
 from space_video_enhancer.ui.icons import glyph_icon
 from space_video_enhancer.ui.monitor_window import MonitorWindow
+from space_video_enhancer.ui.motion_path_analysis import MotionPathController, MotionPathRequest
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages
 from space_video_enhancer.ui.reference_frames import ReferenceFrameController
 from space_video_enhancer.ui.sections.adjustments import AdjustmentsSection, norm_to_qrect, qrect_to_norm
@@ -189,6 +190,7 @@ class MainWindow(
         self.stabilization_reference_frame_index = 0
         self._manual_keyframes: tuple[StabilizationKeyframe, ...] = ()  # the active clip's manual-mode keyframes
         self._onion_reference: QImage | None = None  # the reference frame drawn as a ghost in manual mode
+        self._motion_fill_request: MotionPathRequest | None = None  # the keyframe-fill analysis in flight, if any
         self._stabilization_epoch = 0  # bumped whenever inter-frame stabilization memory must restart
 
         # --- processing / export infra -----------------------------------------------------
@@ -205,6 +207,9 @@ class MainWindow(
         self._wobble_analysis = WobbleAnalysisController(self)  # tracks a clip's frames once for the wobble correction
         self._wobble_analysis.progress.connect(self._on_wobble_progress)
         self._wobble_analysis.finished.connect(self._on_wobble_finished)
+        self._motion_path_analysis = MotionPathController(self)  # tracks a clip once to fill manual keyframes (Phase 2)
+        self._motion_path_analysis.progress.connect(self._on_motion_path_progress)
+        self._motion_path_analysis.finished.connect(self._on_motion_path_finished)
         self._wobble_tracks: list[WobbleTrack] = []
         self._wobble_pending: list[WobbleAnalysisRequest] = []
         self._wobble_progress: dict[int, tuple[int, int]] = {}
@@ -738,6 +743,7 @@ class MainWindow(
         self.stabilization_tab.manualReferenceRequested.connect(self._capture_onion_reference)
         self.stabilization_tab.manualRemoveKeyframeRequested.connect(self._remove_manual_keyframe)
         self.stabilization_tab.manualNavigateRequested.connect(self._go_to_keyframe)
+        self.stabilization_tab.manualFillRequested.connect(self._fill_manual_keyframes)
         self.stabilization_tab.onionOpacityChanged.connect(self._sync_stabilization_preview)
         self.tempo_tab.captureChanged.connect(self._handle_stabilization_control_change)
         self.tempo_tab.timelineFpsChanged.connect(self._handle_timeline_fps_change)
@@ -890,6 +896,7 @@ class MainWindow(
         self._waveform.stop()
         self._reference_loader.stop()
         self._wobble_analysis.stop()
+        self._motion_path_analysis.stop()
         self._audio_player.stop()
         self._pcm_loader.stop()
         self._preview_controller.stop()  # also releases the decoders it owns

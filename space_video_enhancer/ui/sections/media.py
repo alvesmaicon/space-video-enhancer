@@ -154,6 +154,7 @@ class MediaSection(WindowState):
         self.current_frame = None
         self._onion_reference = None  # the ghost belonged to the document being replaced
         self.preview.set_onion_skin(None)
+        self._cancel_motion_fill()  # a fill in flight was for the document being replaced
         self._decoded_frame_index = 0
         self._decoded_source = None
         self._decode_stats = RollingStats(window=120)
@@ -500,6 +501,7 @@ class MediaSection(WindowState):
         self.denoise_sample_rect_norm = norm_to_qrect(settings.denoise_sample_rect)
         self.stabilization_tab.apply(settings.stabilization)
         self._manual_keyframes = settings.stabilization.keyframes  # per-clip, keyed by source frame
+        self._cancel_motion_fill()  # a fill in flight was for the clip being replaced
         self.stabilization_tab.apply_capture(settings.capture)  # deinterlacing
         self.tempo_tab.apply_capture(settings.capture)  # speed / retiming / mute
         self.filters_tab.apply_anonymize(settings.anonymize)

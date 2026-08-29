@@ -155,6 +155,8 @@ class StabilizationTab(TabPage):
     manualRemoveKeyframeRequested = Signal()
     manualNavigateRequested = Signal(int)
     """Jump to the previous (-1) or next (+1) keyframe."""
+    manualFillRequested = Signal()
+    """Track the clip and fill keyframes between the hand-set ones with the measured motion."""
     onionOpacityChanged = Signal()
 
     def __init__(self) -> None:
@@ -237,6 +239,11 @@ class StabilizationTab(TabPage):
         self.manual_next_button.setObjectName("secondaryButton")
         self.manual_remove_button = QPushButton("Remover keyframe")
         self.manual_remove_button.setObjectName("secondaryButton")
+        self.manual_fill_button = QPushButton("Preencher com o movimento")
+        self.manual_fill_button.setToolTip(
+            "Analisa o clipe e cria keyframes entre os seus, seguindo o movimento medido da câmera "
+            "para tirar o tremor do meio (precisa de pelo menos dois keyframes)."
+        )
         self.manual_info_label = QLabel()
         self.manual_info_label.setObjectName("hintLabel")
         self.manual_info_label.setWordWrap(True)
@@ -277,6 +284,7 @@ class StabilizationTab(TabPage):
         self.manual_remove_button.clicked.connect(self.manualRemoveKeyframeRequested.emit)
         self.manual_prev_button.clicked.connect(lambda: self.manualNavigateRequested.emit(-1))
         self.manual_next_button.clicked.connect(lambda: self.manualNavigateRequested.emit(1))
+        self.manual_fill_button.clicked.connect(self.manualFillRequested.emit)
         reference_buttons = QHBoxLayout()
         reference_buttons.addWidget(self.reference_button)
         reference_buttons.addWidget(self.reset_button)
@@ -288,6 +296,9 @@ class StabilizationTab(TabPage):
         manual_nav_row.addWidget(self.manual_next_button)
         manual_nav_row.addWidget(self.manual_remove_button)
         manual_nav_row.addStretch(1)
+        manual_fill_row = QHBoxLayout()
+        manual_fill_row.addWidget(self.manual_fill_button)
+        manual_fill_row.addStretch(1)
 
         self.add_sections(
             group_box(
@@ -312,6 +323,7 @@ class StabilizationTab(TabPage):
                 self.manual_shear_slider,
                 self.manual_stretch_slider,
                 manual_nav_row,
+                manual_fill_row,
                 self.manual_info_label,
             ),
             group_box(
@@ -409,6 +421,7 @@ class StabilizationTab(TabPage):
             self.manual_prev_button,
             self.manual_next_button,
             self.manual_remove_button,
+            self.manual_fill_button,  # the window narrows this to "≥2 keyframes and not analysing"
         ):
             widget.setEnabled(manual_enabled)
         self.deinterlace_combo.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
@@ -472,6 +485,7 @@ class StabilizationTab(TabPage):
             self.manual_prev_button,
             self.manual_next_button,
             self.manual_remove_button,
+            self.manual_fill_button,
             self.deinterlace_combo,
             self.rolling_shutter_slider,
             self.wobble_checkbox,

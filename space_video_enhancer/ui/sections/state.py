@@ -53,6 +53,7 @@ from space_video_enhancer.ui.audio_preview import (
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.history import EditHistory
 from space_video_enhancer.ui.monitor_window import MonitorWindow
+from space_video_enhancer.ui.motion_path_analysis import MotionPathController, MotionPathRequest
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages
 from space_video_enhancer.ui.reference_frames import ReferenceFrameController
 from space_video_enhancer.ui.tabs.base import TabPage
@@ -121,6 +122,10 @@ class WindowState(QMainWindow):
     """Analyses queued or running (one per source range); a clip covered by one waits instead of re-queuing."""
     _wobble_progress: dict[int, tuple[int, int]]
     """``(frames done, total)`` per pending analysis generation, for the progress text."""
+    _motion_path_analysis: MotionPathController
+    """Tracks a clip once to fill manual keyframes with the measured motion; see ``_fill_manual_keyframes``."""
+    _motion_fill_request: MotionPathRequest | None
+    """The fill analysis in flight, or ``None``; a late result that is not this one is dropped."""
     _preview_generation: int
     _applied_preview_generation: int
     _thumbnail_generation: int
@@ -314,6 +319,9 @@ class WindowState(QMainWindow):
         raise NotImplementedError  # adjustments
 
     def _refresh_manual_controls(self) -> None:
+        raise NotImplementedError  # adjustments
+
+    def _cancel_motion_fill(self) -> None:
         raise NotImplementedError  # adjustments
 
     def _sync_white_balance_preview(self) -> None:
