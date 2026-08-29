@@ -124,7 +124,14 @@ class PlaybackSection(WindowState):
         self._playback_anchor_time = time.monotonic()
         self._playback_anchor_index = 0
         speed = self._playback_speed()
-        pieces = [AudioPiece(run.clip.source.path, *run.seconds) for run in runs]
+        # A retimed or muted clip plays silent in the preview (its span in timeline seconds); the export
+        # stretches the audio with atempo, but doing that live per clip is not worth the desync risk here.
+        pieces = [
+            AudioPiece(None, 0.0, run.span.count / self.sequence.fps)
+            if run.clip.settings.capture.is_retimed or run.clip.settings.capture.mute
+            else AudioPiece(run.clip.source.path, *run.seconds)
+            for run in runs
+        ]
         started = self._audio_player.start(pieces, speed)
         if not started and not self._audio_player.available and not self._audio_warned:
             self._audio_warned = True

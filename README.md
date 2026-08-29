@@ -157,6 +157,7 @@ Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos
 ## Limitações conhecidas
 
 - Clipes de fps diferente são reajustados para o fps da linha do tempo. O modo é por clipe (aba Estabilizar › "Reajuste de fps"): *frame mais próximo* (rápido, pode trepidar), *mistura de quadros* (dissolvência, mais suave) ou *fluxo óptico* (sintetiza o quadro intermediário — melhor, mais lento; aplicado só na exportação, o preview mostra a mistura).
+- **Velocidade do clipe** (aba Estabilizar › "Velocidade", 0.25x–4x): câmera lenta usa o mesmo reajuste (fluxo óptico dá o slow-mo mais suave). O áudio é esticado com `atempo` (mantém o tom) para acompanhar; "Sem áudio neste clipe" silencia. Na exportação o áudio segue o vídeo; **no preview um clipe com velocidade toca sem som** (evita dessincronizar).
 - Mídia que mudou de lugar é marcada no projeto, não religada: coloque o arquivo de volta e reabra.
 - Arquivos com mais de 30 min tocam sem som no preview (o PCM não caberia com folga na memória); a exportação não é afetada.
 - Interface em português.

@@ -288,6 +288,10 @@ class StabilizationSettings:
         )
 
 
+SPEED_MIN = 0.25
+SPEED_MAX = 4.0
+
+
 @dataclass(frozen=True)
 class CaptureSettings:
     """Artefacts of how the frame was captured, undone before anything else looks at it."""
@@ -295,6 +299,14 @@ class CaptureSettings:
     deinterlace: DeinterlaceMode = DeinterlaceMode.OFF
     retiming: RetimingMode = RetimingMode.NEAREST
     """How this clip is resampled when its fps differs from the timeline's (no effect when they match)."""
+    speed: float = 1.0
+    """Playback speed: below 1 is slow motion (frames interpolated per ``retiming``), above 1 is fast."""
+    mute: bool = False
+    """Drop this clip's audio in the export (its span becomes silence)."""
+
+    @property
+    def is_retimed(self) -> bool:
+        return abs(self.speed - 1.0) > 1e-6
 
 
 HUE_BAND_NAMES = ("red", "orange", "yellow", "green", "cyan", "blue", "purple", "magenta")

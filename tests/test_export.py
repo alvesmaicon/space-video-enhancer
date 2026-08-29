@@ -19,6 +19,7 @@ from space_video_enhancer.export.ffmpeg import (
     VAAPI,
     AudioSegment,
     FfmpegProbe,
+    atempo_chain,
     audio_concat_filter,
     build_export_command,
     resolve_encoder,
@@ -515,3 +516,53 @@ def test_retiming_modes_all_export_the_same_retimed_frame_count(tmp_path: Path, 
     assert result.success, result.message
     assert result.processed_frames == 36  # 12 (1:1) + 12 doubled to 24; the mode only changes the pixels
     assert int(_probe_video(output)["nb_read_frames"]) == 36
+
+
+def test_retimed_audio_is_stretched_with_atempo_and_silence_uses_the_output_length() -> None:
+    assert atempo_chain(0.5) == "atempo=0.500000"
+    assert atempo_chain(0.25) == "atempo=0.500000,atempo=0.500000"  # below 0.5 needs a chain
+    assert atempo_chain(4.0) == "atempo=2.000000,atempo=2.000000"
+
+    graph = audio_concat_filter([AudioSegment(0, 0.0, 1.0, tempo=0.5), AudioSegment(0, 2.0, 3.0, tempo=0.5)])
+    assert graph.count("atempo=0.500000") == 2, "each retimed segment is stretched"
+    silent = audio_concat_filter([AudioSegment(0, 0.0, 1.0, has_audio=False, tempo=0.5), AudioSegment(0, 2.0, 3.0)])
+    assert "atrim=0:2.000000" in silent, "1 s of a 0.5x clip is 2 s of silence on the timeline"
+
+
+def test_a_single_retimed_or_muted_clip_takes_the_right_audio_path() -> None:
+    def command(segment: AudioSegment) -> list[str]:
+        return build_export_command(
+            "ffmpeg",
+            width=64,
+            height=64,
+            fps=30.0,
+            sources=[Path("in.mp4")],
+            audio=[segment],
+            encoder=LIBX264,
+            output_path=Path("out.mp4"),
+        )
+
+    retimed = command(AudioSegment(0, 0.0, 1.0, tempo=0.5))
+    assert "-filter_complex" in retimed and "-ss" not in retimed, "atempo needs the filter graph"
+    assert "atempo=0.500000" in retimed[retimed.index("-filter_complex") + 1]
+    muted = command(AudioSegment(0, 0.0, 1.0, has_audio=False))
+    assert "-an" in muted and "-filter_complex" not in muted and "aac" not in muted
+
+
+@requires_ffmpeg
+def test_slow_motion_doubles_the_output_frames(tmp_path: Path) -> None:
+    source, output = tmp_path / "src.mp4", tmp_path / "out.mp4"
+    _write_source_video_at(source, 24.0, 12)
+    clip_source = ClipSource(source, 12, 24.0, 64, 64)
+    slow = RenderSettings(capture=CaptureSettings(speed=0.5, retiming=RetimingMode.BLEND))
+    sequence = Sequence((Clip.whole(clip_source, settings=slow),))
+    assert sequence.timeline_count == 24  # 12 frames of 24 fps footage played at half speed
+
+    result = run_export(
+        ExportRequest(sequence, output, 1, FFMPEG or "ffmpeg", LIBX264),
+        progress=lambda *_: None,
+        cancel=threading.Event(),
+    )
+
+    assert result.success, result.message
+    assert result.processed_frames == 24 and int(_probe_video(output)["nb_read_frames"]) == 24

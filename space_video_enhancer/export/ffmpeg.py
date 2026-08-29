@@ -186,10 +186,35 @@ class AudioSegment:
     end_seconds: float
     """Exclusive."""
     has_audio: bool = True
+    tempo: float = 1.0
+    """The clip's speed: the audio is stretched by ``atempo`` so it lasts as long as the retimed video."""
 
     @property
     def duration_seconds(self) -> float:
         return max(0.0, self.end_seconds - self.start_seconds)
+
+    @property
+    def output_seconds(self) -> float:
+        """How long this segment lasts on the timeline: the source span stretched by the speed."""
+        return self.duration_seconds / self.tempo if self.tempo > 0 else self.duration_seconds
+
+    @property
+    def is_retimed(self) -> bool:
+        return abs(self.tempo - 1.0) > 1e-6
+
+
+def atempo_chain(tempo: float) -> str:
+    """One or more ``atempo`` filters whose product is ``tempo`` (each factor kept in ffmpeg's 0.5..2.0 range)."""
+    factors: list[float] = []
+    remaining = tempo
+    while remaining < 0.5 - 1e-9:
+        factors.append(0.5)
+        remaining /= 0.5
+    while remaining > 2.0 + 1e-9:
+        factors.append(2.0)
+        remaining /= 2.0
+    factors.append(remaining)
+    return ",".join(f"atempo={factor:.6f}" for factor in factors)
 
 
 def audio_concat_filter(segments: Sequence[AudioSegment]) -> str:
@@ -202,13 +227,14 @@ def audio_concat_filter(segments: Sequence[AudioSegment]) -> str:
     parts = []
     for index, segment in enumerate(segments):
         if segment.has_audio:
+            stretch = f"{atempo_chain(segment.tempo)}," if segment.is_retimed else ""
             parts.append(
                 f"[{segment.source_index + 1}:a]atrim=start={segment.start_seconds:.6f}:end={segment.end_seconds:.6f},"
-                f"asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}[a{index}]"
+                f"asetpts=PTS-STARTPTS,{stretch}{AUDIO_NORMALIZE}[a{index}]"
             )
         else:
             parts.append(
-                f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:{segment.duration_seconds:.6f},"
+                f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:{segment.output_seconds:.6f},"
                 f"asetpts=PTS-STARTPTS[a{index}]"
             )
     inputs = "".join(f"[a{index}]" for index in range(len(segments)))
@@ -258,11 +284,13 @@ def build_export_command(
         "-i",
         "pipe:0",
     ]
-    if multi_segment and has_audio:
+    # A retimed clip needs its audio stretched (atempo), which only the filter graph can do — even alone.
+    needs_filter = has_audio and (multi_segment or any(segment.is_retimed for segment in audio))
+    if needs_filter:
         for source in sources:
             command += ["-i", str(source)]
         command += ["-filter_complex", audio_concat_filter(audio), "-map", "0:v:0", "-map", "[aout]"]
-    elif multi_segment:
+    elif not has_audio:
         command += ["-map", "0:v:0", "-an"]
     else:
         segment = audio[0]
@@ -281,7 +309,7 @@ def build_export_command(
     command += list(encoder.args)
     if not encoder.sets_own_pixel_format:
         command += ["-pix_fmt", OUTPUT_PIXEL_FORMAT]
-    if not (multi_segment and not has_audio):
+    if has_audio:
         command += ["-c:a", "aac", "-b:a", AUDIO_BITRATE]
     command += ["-shortest", "-movflags", "+faststart", str(output_path)]
     return command

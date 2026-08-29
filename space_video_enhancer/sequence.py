@@ -277,31 +277,37 @@ class Sequence:
             return self.timeline_fps
         return self.clips[0].fps if self.clips else 30.0
 
+    def _clip_rate(self, clip: Clip) -> float:
+        """The clip's source frames per timeline second: its fps scaled by its speed (slow motion < 1)."""
+        speed = clip.settings.capture.speed
+        return clip.fps * speed if speed > 0 else clip.fps
+
     def _clip_length(self, clip: Clip) -> int:
         """Timeline frames clip ``clip`` occupies (its whole trimmed range, cuts included), retimed to the timeline."""
-        return timeline_length(clip.timeline_count, clip.fps, self.fps)
+        return timeline_length(clip.timeline_count, self._clip_rate(clip), self.fps)
 
     def export_segment_length(self, segment: ExportSegment) -> int:
         """Output frames a kept run yields after retiming — what the export writes and the encoder receives."""
-        return timeline_length(segment.frames.count, segment.clip.fps, self.fps)
+        return timeline_length(segment.frames.count, self._clip_rate(segment.clip), self.fps)
 
     def resampled_export_frames(self, segment: ExportSegment) -> tuple[int, ...]:
         """The source frame index behind each output frame of ``segment`` (nearest-frame; may repeat or skip)."""
-        clip = segment.clip
+        rate = self._clip_rate(segment.clip)
         start, end = segment.frames.start, segment.frames.end
         length = self.export_segment_length(segment)
         if length == segment.frames.count:
             return tuple(range(start, end + 1))
-        return tuple(min(end, start + source_offset(j, clip.fps, self.fps)) for j in range(length))
+        return tuple(min(end, start + source_offset(j, rate, self.fps)) for j in range(length))
 
     def export_samples(self, segment: ExportSegment) -> tuple[RetimeSample, ...]:
         """One :class:`RetimeSample` per output frame of ``segment``, honouring the clip's retiming mode."""
         clip = segment.clip
+        rate = self._clip_rate(clip)
         first, last = segment.frames.start, segment.frames.end
         mode = clip.settings.capture.retiming
-        if _rates_match(clip.fps, self.fps):
+        if _rates_match(rate, self.fps):
             return tuple(RetimeSample(frame, frame, 0.0, mode) for frame in range(first, last + 1))
-        ratio = clip.fps / self.fps
+        ratio = rate / self.fps
         length = self.export_segment_length(segment)
         return tuple(_retime_sample(first, last, index * ratio, mode) for index in range(length))
 
@@ -309,12 +315,13 @@ class Sequence:
         """Clip index and the sample the preview should show at ``timeline_frame`` (its ``a`` is :meth:`locate`)."""
         index = self.clip_at(timeline_frame)
         clip = self.clips[index]
+        rate = self._clip_rate(clip)
         local = max(0, min(timeline_frame - self.clip_offsets()[index], self._clip_length(clip) - 1))
         mode = clip.settings.capture.retiming
-        if _rates_match(clip.fps, self.fps):
+        if _rates_match(rate, self.fps):
             source = min(clip.range.start + local, clip.range.end)
             return index, RetimeSample(source, source, 0.0, mode)
-        return index, _retime_sample(clip.range.start, clip.range.end, local * clip.fps / self.fps, mode)
+        return index, _retime_sample(clip.range.start, clip.range.end, local * rate / self.fps, mode)
 
     @property
     def timeline_count(self) -> int:
@@ -330,7 +337,8 @@ class Sequence:
 
     @property
     def duration_seconds(self) -> float:
-        return sum(clip.duration_seconds for clip in self.clips)
+        """Timeline duration: the retimed output frames over the timeline rate (a slowed clip lasts longer)."""
+        return self.export_count / self.fps if self.fps > 0 else 0.0
 
     @property
     def source_paths(self) -> tuple[Path, ...]:
@@ -369,13 +377,13 @@ class Sequence:
         index = self.clip_at(timeline_frame)
         clip = self.clips[index]
         local = max(0, min(timeline_frame - self.clip_offsets()[index], self._clip_length(clip) - 1))
-        source_local = min(source_offset(local, clip.fps, self.fps), clip.timeline_count - 1)
+        source_local = min(source_offset(local, self._clip_rate(clip), self.fps), clip.timeline_count - 1)
         return Location(index, clip.range.start + source_local)
 
     def timeline_frame(self, clip_index: int, source_frame: int) -> int:
         clip = self.clips[clip_index]
         source_local = max(0, min(source_frame - clip.range.start, clip.timeline_count - 1))
-        local = min(timeline_offset(source_local, clip.fps, self.fps), self._clip_length(clip) - 1)
+        local = min(timeline_offset(source_local, self._clip_rate(clip), self.fps), self._clip_length(clip) - 1)
         return self.clip_offsets()[clip_index] + local
 
     def timeline_cuts(self) -> tuple[FrameRange, ...]:
@@ -384,9 +392,10 @@ class Sequence:
         shifted: list[FrameRange] = []
         for index, clip in enumerate(self.clips):
             base = offsets[index]
+            rate = self._clip_rate(clip)
             for cut in clip.cuts:
-                start = base + timeline_offset(cut.start - clip.range.start, clip.fps, self.fps)
-                end = base + timeline_offset(cut.end - clip.range.start, clip.fps, self.fps)
+                start = base + timeline_offset(cut.start - clip.range.start, rate, self.fps)
+                end = base + timeline_offset(cut.end - clip.range.start, rate, self.fps)
                 shifted.append(FrameRange(start, end))
         return normalize_cuts(shifted)
 
@@ -410,12 +419,13 @@ class Sequence:
         for segment in self.export_segments():
             clip = segment.clip
             base = offsets[segment.clip_index]
-            tl_start = base + timeline_offset(segment.frames.start - clip.range.start, clip.fps, self.fps)
-            tl_end = base + timeline_offset(segment.frames.end - clip.range.start, clip.fps, self.fps)
+            rate = self._clip_rate(clip)
+            tl_start = base + timeline_offset(segment.frames.start - clip.range.start, rate, self.fps)
+            tl_end = base + timeline_offset(segment.frames.end - clip.range.start, rate, self.fps)
             span = FrameRange(tl_start, tl_end).clamped(window)
             if span is not None:
-                src_start = clip.range.start + source_offset(span.start - base, clip.fps, self.fps)
-                src_end = clip.range.start + source_offset(span.end - base, clip.fps, self.fps)
+                src_start = clip.range.start + source_offset(span.start - base, rate, self.fps)
+                src_end = clip.range.start + source_offset(span.end - base, rate, self.fps)
                 frames = FrameRange(min(src_start, src_end), max(src_start, src_end))
                 runs.append(PlaybackRun(segment.clip_index, clip, span, frames))
         return tuple(runs)
@@ -431,12 +441,13 @@ class Sequence:
         for index, clip in enumerate(self.clips):
             span = self.clip_span(index)
             base = offsets[index]
+            rate = self._clip_rate(clip)
             local = []
             for cut in normalized:
                 part = cut.clamped(span)
                 if part is not None:
-                    src_start = clip.range.start + source_offset(part.start - base, clip.fps, self.fps)
-                    src_end = clip.range.start + source_offset(part.end - base, clip.fps, self.fps)
+                    src_start = clip.range.start + source_offset(part.start - base, rate, self.fps)
+                    src_end = clip.range.start + source_offset(part.end - base, rate, self.fps)
                     local.append(FrameRange(min(src_start, src_end), max(src_start, src_end)))
             clips.append(clip.with_cuts(local))
         return replace(self, clips=tuple(clips))

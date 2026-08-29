@@ -13,6 +13,7 @@ from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from space_video_enhancer.export.ffmpeg import LIBX264
+from space_video_enhancer.project import load_project
 from space_video_enhancer.settings import StabilizationMode
 from space_video_enhancer.timeline import FrameRange
 from space_video_enhancer.ui.main_window import MainWindow
@@ -322,3 +323,29 @@ def test_paste_attributes_copies_the_look_not_the_video(
 
     window._undo_edit()
     assert window.sequence.clips[1].settings.filters.brightness == 50
+
+
+def test_clip_speed_stretches_the_timeline_and_is_saved(
+    app: QApplication, window: MainWindow, ui_video: Path, tmp_path: Path
+) -> None:
+    window._open_video(ui_video)  # 12 frames at 24 fps
+    wait_for_preview(app, window)
+    before = window.frame_count
+    tab = window.stabilization_tab
+
+    select_combo_data(tab.speed_combo, 0.5)  # half speed
+    wait_for_preview(app, window)
+    assert window.sequence.clips[0].settings.capture.speed == 0.5
+    assert window.frame_count == before * 2, "half speed doubles the clip's length on the timeline"
+
+    tab.mute_checkbox.setChecked(True)
+    wait_for_preview(app, window)
+    assert window.sequence.clips[0].settings.capture.mute
+
+    path = tmp_path / "speed.svep"
+    assert window._write_project(path)
+    loaded = load_project(path).sequence.clips[0].settings.capture
+    assert loaded.speed == 0.5 and loaded.mute
+
+    window._undo_edit()  # undoing the mute keeps the speed
+    assert window.sequence.clips[0].settings.capture.speed == 0.5

@@ -297,6 +297,11 @@ class AdjustmentsSection(WindowState):
     def _handle_stabilization_control_change(self) -> None:
         self._stabilization_epoch += 1
         self._update_stabilization_controls_state()
+        before = self.sequence.timeline_count
+        self._store_active_clip_settings()  # fold the capture change in now, so a speed change resizes the clip
+        if self.sequence.timeline_count != before:
+            self._sequence_changed()  # speed changed the clip's length: refresh the timeline, transport and markers
+            self.transport.set_value_silently(self.current_frame_index)
         self._schedule_preview_refresh()
 
     def _handle_preview_stabilization_changed(self, rect: QRectF) -> None:

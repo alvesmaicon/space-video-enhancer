@@ -544,13 +544,18 @@ def _run_export(
     first_processed = process(first_frame, first_clip, first_index, True)
     height, width = first_processed.shape[:2]
     sources = sequence.source_paths
-    has_audio = (
-        {path: source_has_audio(request.ffmpeg_path, path) for path in sources}
-        if len(request.segments) > 1
-        else {path: True for path in sources}
-    )
+    # A single unretimed clip keeps the proven -ss path (no probe); anything that needs the filter graph
+    # (several segments, or a retimed clip whose audio must be stretched) probes each source for real audio.
+    retimed = any(segment.clip.settings.capture.is_retimed for segment in request.segments)
+    probe = len(request.segments) > 1 or retimed
+    has_audio = {path: (source_has_audio(request.ffmpeg_path, path) if probe else True) for path in sources}
     audio = [
-        AudioSegment(sources.index(segment.clip.source.path), *segment.seconds, has_audio[segment.clip.source.path])
+        AudioSegment(
+            sources.index(segment.clip.source.path),
+            *segment.seconds,
+            has_audio=has_audio[segment.clip.source.path] and not segment.clip.settings.capture.mute,
+            tempo=segment.clip.settings.capture.speed,
+        )
         for segment in request.segments
     ]
     command = build_export_command(

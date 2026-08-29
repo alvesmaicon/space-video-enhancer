@@ -240,3 +240,24 @@ def test_a_single_fps_clip_never_retimes_even_in_blend_mode() -> None:
     sequence = Sequence((_retimed(A, RetimingMode.OPTICAL_FLOW),))  # one 30 fps clip, timeline 30 fps
     samples = sequence.export_samples(sequence.export_segments()[0])
     assert all(s.is_single and s.a == s.b for s in samples)  # rates match -> nothing to interpolate
+
+
+def test_clip_speed_stretches_the_timeline_and_the_duration() -> None:
+    slow = RenderSettings(capture=CaptureSettings(speed=0.5))
+    sequence = Sequence((Clip(A, FrameRange(0, 29), settings=slow),))  # 30 frames of 30 fps footage at half speed
+    assert sequence.timeline_count == 60 and sequence.duration_seconds == pytest.approx(2.0)
+    segment = sequence.export_segments()[0]
+    assert sequence.export_segment_length(segment) == 60
+    samples = sequence.export_samples(segment)
+    assert len(samples) == 60 and samples[0].a == 0 and samples[-1].a == 29
+    assert samples[30].a in (14, 15), "the halfway output frame sits mid-clip"
+    # The playhead maps to the right source frame both ways.
+    assert sequence.locate(30).source_frame in (14, 15)
+    assert sequence.locate(sequence.timeline_frame(0, 15)).source_frame in (14, 15, 16)
+
+
+def test_double_speed_halves_the_clip() -> None:
+    fast = RenderSettings(capture=CaptureSettings(speed=2.0))
+    sequence = Sequence((Clip(A, FrameRange(0, 29), settings=fast),))
+    assert sequence.timeline_count == 15 and sequence.duration_seconds == pytest.approx(0.5)
+    assert [s.a for s in sequence.export_samples(sequence.export_segments()[0])] == list(range(0, 30, 2))

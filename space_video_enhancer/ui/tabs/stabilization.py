@@ -13,7 +13,7 @@ the lock holds on to is the one on screen when the mode is chosen or the region 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton
 
 from space_video_enhancer.settings import (
     CaptureSettings,
@@ -83,6 +83,13 @@ DEINTERLACE_DESCRIPTIONS: dict[DeinterlaceMode, str] = {
         "reduz o detalhe vertical à metade."
     ),
 }
+SPEED_OPTIONS: list[tuple[str, float]] = [
+    ("0.25x (bem lento)", 0.25),
+    ("0.5x (lento)", 0.5),
+    ("1x (normal)", 1.0),
+    ("2x (rápido)", 2.0),
+    ("4x (bem rápido)", 4.0),
+]
 RETIMING_OPTIONS: list[tuple[str, RetimingMode]] = [
     ("Frame mais próximo", RetimingMode.NEAREST),
     ("Mistura de quadros", RetimingMode.BLEND),
@@ -195,6 +202,15 @@ class StabilizationTab(TabPage):
         self.readout_axis_combo = enum_combo(READOUT_AXIS_OPTIONS)
         for index, (_label, axis) in enumerate(READOUT_AXIS_OPTIONS):
             self.readout_axis_combo.setItemData(index, READOUT_AXIS_DESCRIPTIONS[axis], Qt.ItemDataRole.ToolTipRole)
+        self.speed_combo = QComboBox()
+        for label, factor in SPEED_OPTIONS:
+            self.speed_combo.addItem(label, factor)
+        select_combo_data(self.speed_combo, 1.0)
+        self.speed_combo.setToolTip(
+            "Velocidade deste clipe: abaixo de 1x é câmera lenta (o modo de reajuste abaixo faz a interpolação; "
+            "fluxo óptico dá o slow-mo mais suave), acima é câmera rápida. O áudio é esticado para acompanhar."
+        )
+        self.mute_checkbox = QCheckBox("Sem áudio neste clipe")
         self.retiming_combo = enum_combo(RETIMING_OPTIONS)
         self.retiming_combo.setToolTip(RETIMING_TOOLTIP)
         for index, (_label, retiming_mode) in enumerate(RETIMING_OPTIONS):
@@ -207,6 +223,8 @@ class StabilizationTab(TabPage):
         self.wobble_checkbox.toggled.connect(lambda _checked: self.captureChanged.emit())
         self.readout_axis_combo.currentIndexChanged.connect(self._handle_readout_axis_changed)
         self.retiming_combo.currentIndexChanged.connect(lambda _index: self.captureChanged.emit())
+        self.speed_combo.currentIndexChanged.connect(lambda _index: self.captureChanged.emit())
+        self.mute_checkbox.toggled.connect(lambda _checked: self.captureChanged.emit())
 
         self.mode_combo.currentIndexChanged.connect(self._handle_mode_changed)
         self.intensity_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
@@ -237,7 +255,8 @@ class StabilizationTab(TabPage):
                 self.rolling_shutter_slider,
                 self.wobble_checkbox,
                 form_rows(("Leitura do sensor", self.readout_axis_combo)),
-                form_rows(("Reajuste de fps", self.retiming_combo)),
+                form_rows(("Velocidade", self.speed_combo), ("Reajuste de fps", self.retiming_combo)),
+                self.mute_checkbox,
                 self.capture_info_label,
             ),
         )
@@ -270,20 +289,30 @@ class StabilizationTab(TabPage):
     def retiming_mode(self) -> RetimingMode:
         return combo_enum(self.retiming_combo, RetimingMode, RetimingMode.NEAREST)
 
+    def speed(self) -> float:
+        return float(self.speed_combo.currentData() or 1.0)
+
     def capture_settings(self) -> CaptureSettings:
-        return CaptureSettings(deinterlace=self.deinterlace_mode(), retiming=self.retiming_mode())
+        return CaptureSettings(
+            deinterlace=self.deinterlace_mode(),
+            retiming=self.retiming_mode(),
+            speed=self.speed(),
+            mute=self.mute_checkbox.isChecked(),
+        )
 
     def apply_capture(self, capture: CaptureSettings) -> None:
-        """Show another clip's deinterlacing and retiming without emitting ``captureChanged``."""
+        """Show another clip's deinterlacing, retiming and speed without emitting ``captureChanged``."""
         for combo, value in (
             (self.deinterlace_combo, capture.deinterlace.value),
             (self.retiming_combo, capture.retiming.value),
+            (self.speed_combo, capture.speed),
         ):
             combo.blockSignals(True)
             try:
                 select_combo_data(combo, value)
             finally:
                 combo.blockSignals(False)
+        set_checked_silently(self.mute_checkbox, capture.mute)
         self._update_deinterlace_tooltip()
 
     def apply(self, settings: StabilizationSettings) -> None:
@@ -351,6 +380,9 @@ class StabilizationTab(TabPage):
             self.rolling_shutter_slider,
             self.wobble_checkbox,
             self.readout_axis_combo,
+            self.speed_combo,
+            self.retiming_combo,
+            self.mute_checkbox,
         ):
             widget.setEnabled(enabled)
 
