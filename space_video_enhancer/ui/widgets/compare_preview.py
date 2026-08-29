@@ -616,21 +616,15 @@ class ComparePreview(QWidget):
         layout = self._layout(self._after.size())
         self._panels = layout
         self._before_rect, self._image_rect = layout.before_image, layout.after_image
-        if self._compare_mode.is_split:
+        if self._onion is not None:
+            self._paint_onion(painter)  # manual alignment: the corrected frame under the reference ghost, no split
+        elif self._compare_mode.is_split:
             self._paint_split(painter)
         else:
             self._paint_panels(painter, layout)
 
-        if self._onion is not None:
-            painter.save()
-            if not self._compare_mode.is_split:
-                painter.setClipRect(layout.after_panel)
-            painter.setOpacity(self._onion_opacity)
-            painter.drawImage(self._image_rect, self._onion)
-            painter.restore()
-
         painter.save()
-        if not self._compare_mode.is_split:
+        if self._onion is None and not self._compare_mode.is_split:
             painter.setClipRect(layout.after_panel)  # the zoomed frame may extend past its panel
         for overlay in (self.crop, self.sample, self.focus, self.white_balance):
             if overlay.enabled:
@@ -639,6 +633,16 @@ class ComparePreview(QWidget):
 
         if self._hud_visible and self._hud_lines:
             self._draw_hud(painter, layout.after_panel)
+
+    def _paint_onion(self, painter: QPainter) -> None:
+        """Manual alignment: the corrected frame full, with the reference ghost laid over it at ``_onion_opacity``."""
+        rect = self._image_rect
+        assert self._after is not None and self._onion is not None
+        painter.drawImage(rect, self._after)
+        painter.setOpacity(self._onion_opacity)
+        painter.drawImage(rect, self._onion)
+        painter.setOpacity(1.0)
+        draw_pill(painter, QPointF(rect.left() + 10, rect.top() + 10), "Fantasma (referência)", CAPTION_BACKGROUND)
 
     def _paint_split(self, painter: QPainter) -> None:
         """One image: the before frame shows on one side of a draggable divider, the after frame on the other."""

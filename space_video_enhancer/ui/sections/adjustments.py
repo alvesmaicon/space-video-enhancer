@@ -308,11 +308,20 @@ class AdjustmentsSection(WindowState):
             self._capture_stabilization_reference_from_current_frame(label="ajuste de estabilização")
         if mode is StabilizationMode.MANUAL and self._onion_reference is None and self._last_preview is not None:
             self._onion_reference = self._last_preview.before  # start the ghost on the current frame
+            self._ensure_anchor_keyframe(self._decoded_frame_index)  # pin this frame so others move relative to it
         self._update_stabilization_controls_state()
         self._refresh_manual_controls()
         self._schedule_preview_refresh()
 
     # --- manual keyframes -----------------------------------------------------------------
+    def _ensure_anchor_keyframe(self, frame: int) -> bool:
+        """Guarantee a keyframe exists at ``frame`` (an identity one if absent), so it is pinned. Returns if added."""
+        if any(item.frame == frame for item in self._manual_keyframes):
+            return False
+        anchor = StabilizationKeyframe(frame)  # identity: this frame stays exactly as it is
+        self._manual_keyframes = tuple(sorted((*self._manual_keyframes, anchor), key=lambda item: item.frame))
+        return True
+
     def _handle_manual_adjust(self) -> None:
         """A slider moved: create or move the keyframe at the current frame to the sliders' values."""
         if self.active_clip is None or self.current_frame is None:
@@ -331,9 +340,12 @@ class AdjustmentsSection(WindowState):
             self.status.show_message("Aguarde o primeiro render para definir a referência.")
             return
         self._onion_reference = self._last_preview.before  # the raw current frame, canvas-sized, as the ghost
+        if self._ensure_anchor_keyframe(self._decoded_frame_index):
+            self._store_active_clip_settings()
+        self._refresh_manual_controls()
         self._sync_stabilization_preview()
         log_event(LOG, "ui.manual_reference", frame=self._decoded_frame_index)
-        self.status.show_message(f"Referência (fantasma): frame {self._decoded_frame_index + 1}.")
+        self.status.show_message(f"Referência (fantasma): frame {self._decoded_frame_index + 1} fixado como âncora.")
 
     def _remove_manual_keyframe(self) -> None:
         if self.active_clip is None:
@@ -377,10 +389,13 @@ class AdjustmentsSection(WindowState):
         on_keyframe = any(item.frame == frame for item in self._manual_keyframes)
         self.stabilization_tab.manual_remove_button.setEnabled(on_keyframe and self.frame_count > 0)
         if count == 0:
-            text = "Sem keyframes. Alinhe este frame ao fantasma e mova um slider para criar o primeiro."
+            text = "Ande até um frame que saiu do lugar e mova posição/rotação/zoom até casar com o fantasma."
         else:
-            where = "keyframe deste frame" if on_keyframe else "interpolado entre keyframes"
-            text = f"{count} keyframe(s) · frame {frame + 1}: {where}."
+            where = "keyframe deste frame (mova os sliders para ajustar)" if on_keyframe else "interpolado"
+            text = (
+                f"{count} keyframe(s) · frame {frame + 1}: {where}. "
+                "Ande alguns frames, alinhe ao fantasma e repita; o meio é preenchido sozinho."
+            )
         self.stabilization_tab.set_manual_info(text)
 
     def _handle_stabilization_control_change(self) -> None:

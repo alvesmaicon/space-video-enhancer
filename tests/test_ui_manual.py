@@ -16,74 +16,85 @@ from space_video_enhancer.ui.tabs.base import select_combo_data
 from tests.qt_helpers import wait_for_preview
 
 
-def _enter_manual(app: QApplication, window: MainWindow, ui_video: Path) -> None:
+def _keyframes(window: MainWindow) -> list[tuple[int, float]]:
+    return [(k.frame, round(k.tx, 3)) for k in window.sequence.clips[0].settings.stabilization.keyframes]
+
+
+def _enter_manual_at(app: QApplication, window: MainWindow, ui_video: Path, frame: int) -> None:
+    """Open the video, park on ``frame`` and switch to manual mode — which anchors that frame."""
     window._open_video(ui_video)
+    wait_for_preview(app, window)
+    window.transport.set_value(frame)
     wait_for_preview(app, window)
     window.settings_tabs.setCurrentWidget(window.stabilization_tab)
     select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.MANUAL.value)
     app.processEvents()
+    wait_for_preview(app, window)
 
 
-def test_manual_mode_enables_the_keyframe_controls_and_shows_the_ghost(
+def test_manual_mode_enables_the_keyframe_controls_and_anchors_the_current_frame(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:
-    _enter_manual(app, window, ui_video)
+    _enter_manual_at(app, window, ui_video, 0)
     tab = window.stabilization_tab
     assert tab.manual_x_slider.isEnabled() and tab.manual_rotation_slider.isEnabled()
     assert not tab.intensity_slider.isEnabled(), "intensity/smoothing belong to the estimated modes, not manual"
     assert window.preview.has_onion_skin(), "entering manual mode captures the current frame as the ghost"
+    assert _keyframes(window) == [(0, 0.0)], "the reference frame is pinned with an identity keyframe"
 
 
 def test_adjusting_a_slider_creates_a_keyframe_that_interpolates_and_undoes(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:
-    _enter_manual(app, window, ui_video)
+    _enter_manual_at(app, window, ui_video, 0)  # anchor at frame 0
     tab = window.stabilization_tab
     before = window.frame_count
     window.transport.set_value(6)
     wait_for_preview(app, window)
-    tab.manual_x_slider.slider.setValue(80)  # +8% of the width
+    tab.manual_x_slider.slider.setValue(80)  # +8% of the width at frame 6
     wait_for_preview(app, window)
 
-    keyframes = window.sequence.clips[0].settings.stabilization.keyframes
-    assert [(k.frame, round(k.tx, 3)) for k in keyframes] == [(6, 0.08)]
+    assert _keyframes(window) == [(0, 0.0), (6, 0.08)]
     assert window.sequence.clips[0].settings.stabilization.mode is StabilizationMode.MANUAL
     assert window.frame_count == before, "a keyframe never changes the clip's length"
 
-    window.transport.set_value(0)  # before the only keyframe: the value is held flat
+    window.transport.set_value(3)  # halfway between the anchor (0) and the keyframe (0.08)
     wait_for_preview(app, window)
-    assert tab.manual_adjust()[0] == pytest.approx(0.08)
+    assert tab.manual_adjust()[0] == pytest.approx(0.04)
 
     assert window.undo_action.text().endswith("estabilização")
     window._undo_edit()
-    assert window.sequence.clips[0].settings.stabilization.keyframes == ()
+    assert _keyframes(window) == [(0, 0.0)], "undo drops the frame-6 keyframe, the anchor stays"
 
 
 def test_remove_and_navigate_between_keyframes(app: QApplication, window: MainWindow, ui_video: Path) -> None:
-    _enter_manual(app, window, ui_video)
+    _enter_manual_at(app, window, ui_video, 0)  # anchor at frame 0
     tab = window.stabilization_tab
     for frame, value in ((2, 40), (9, -60)):
         window.transport.set_value(frame)
         wait_for_preview(app, window)
         tab.manual_y_slider.slider.setValue(value)
         wait_for_preview(app, window)
-    assert [k.frame for k in window.sequence.clips[0].settings.stabilization.keyframes] == [2, 9]
+    assert [k.frame for k in window.sequence.clips[0].settings.stabilization.keyframes] == [0, 2, 9]
 
-    window.transport.set_value(0)
+    window.transport.set_value(5)
     wait_for_preview(app, window)
-    window._go_to_keyframe(1)  # next keyframe from frame 0 -> 2
+    window._go_to_keyframe(1)  # next keyframe after 5 -> 9
+    wait_for_preview(app, window)
+    assert window._decoded_frame_index == 9
+    window._go_to_keyframe(-1)  # previous before 9 -> 2
     wait_for_preview(app, window)
     assert window._decoded_frame_index == 2 and tab.manual_remove_button.isEnabled()
 
     window._remove_manual_keyframe()
     wait_for_preview(app, window)
-    assert [k.frame for k in window.sequence.clips[0].settings.stabilization.keyframes] == [9]
+    assert [k.frame for k in window.sequence.clips[0].settings.stabilization.keyframes] == [0, 9]
 
 
 def test_the_ghost_only_shows_on_the_stabilization_tab_in_manual_mode(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:
-    _enter_manual(app, window, ui_video)
+    _enter_manual_at(app, window, ui_video, 0)
     assert window.preview.has_onion_skin()
     window.settings_tabs.setCurrentWidget(window.filters_tab)
     app.processEvents()

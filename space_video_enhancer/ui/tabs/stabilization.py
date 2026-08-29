@@ -190,8 +190,11 @@ class StabilizationTab(TabPage):
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
 
-        self.onion_slider = LabeledSlider("Transparência do fantasma", 0, 100, 50, display=format_percent)
-        self.onion_slider.setToolTip("Quanto do frame de referência aparece sobreposto para você alinhar o atual.")
+        self.onion_slider = LabeledSlider("Opacidade do fantasma", 0, 100, 50, display=format_percent)
+        self.onion_slider.setToolTip(
+            "Quanto o frame de referência aparece por cima do atual: 0% = só o frame atual, 100% = só o fantasma. "
+            "Deixe em torno da metade e mova posição/rotação/zoom até o frame atual casar com o fantasma."
+        )
         self.manual_reference_button = QPushButton("Usar este frame como referência")
         self.manual_reference_button.setToolTip(
             "Congela o frame atual como o fantasma; alinhe os outros frames contra ele nos keyframes."
