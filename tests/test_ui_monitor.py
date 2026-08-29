@@ -194,6 +194,8 @@ def test_the_main_window_stops_painting_while_the_monitor_shows_the_frame(
 ) -> None:
     window._open_video(ui_video)
     wait_for_preview(app, window)
+    window.settings_tabs.setCurrentWidget(window.filters_tab)  # a tab that only needs sliders, not a preview region
+    wait_for_preview(app, window)
     assert not window.main_preview_paused and window.preview_stack.currentWidget() is window.preview_scroll
     assert not window.pause_preview_action.isEnabled(), "it only means anything with the monitor open"
     assert window.pause_preview_action.isChecked(), "on by default: that is why the monitor was opened"
@@ -218,11 +220,11 @@ def test_the_main_window_stops_painting_while_the_monitor_shows_the_frame(
     wait_for_preview(app, window)
     assert not window.main_preview_paused, "the focus region is dragged over the image: it has to be here"
     assert window.preview._after is not None and window.preview_stack.currentWidget() is window.preview_scroll
-    for tab in (window.geometry_tab, window.noise_tab, window.grade_tab):
+    for tab in (window.geometry_tab, window.noise_tab, window.color_page):
         window.settings_tabs.setCurrentWidget(tab)
         wait_for_preview(app, window)
         assert not window.main_preview_paused, window.settings_tabs.tabText(window.settings_tabs.currentIndex())
-    window.settings_tabs.setCurrentWidget(window.color_tab)
+    window.settings_tabs.setCurrentWidget(window.filters_tab)
     wait_for_preview(app, window)
     assert window.main_preview_paused, "back to a tab that only needs sliders"
 

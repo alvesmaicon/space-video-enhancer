@@ -70,15 +70,15 @@ def test_hsl_sliders_show_the_neighbour_colours_of_the_selected_band(app: QAppli
     assert "Ciano" in tab.hue_low_label.text() and "Roxo" in tab.hue_high_label.text()
 
 
-def test_gray_reference_overlay_is_editable_only_on_the_hsl_tab(
+def test_gray_reference_overlay_is_editable_only_on_the_color_tab(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:
     window._open_video(ui_video)
     wait_for_preview(app, window)
-    window.settings_tabs.setCurrentWidget(window.grade_tab)
+    window.settings_tabs.setCurrentWidget(window.color_page)
     app.processEvents()
     assert window.preview.white_balance.interactive
-    window.settings_tabs.setCurrentWidget(window.color_tab)
+    window.settings_tabs.setCurrentWidget(window.filters_tab)
     app.processEvents()
     assert not window.preview.white_balance.enabled
 

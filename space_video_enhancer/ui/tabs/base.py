@@ -75,6 +75,16 @@ class TabPage(QScrollArea):
         """Narrowest width that shows the content without clipping (horizontal scrolling is off)."""
         return self.content.minimumSizeHint().width() + self.verticalScrollBar().sizeHint().width()
 
+    def section_widgets(self) -> list[QWidget]:
+        """The section widgets this page stacked, in order — used to fold two tabs' contents into one page."""
+        widgets = []
+        for index in range(self._layout.count()):
+            item = self._layout.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widgets.append(widget)
+        return widgets
+
     def set_controls_enabled(self, enabled: bool) -> None:
         raise NotImplementedError
 

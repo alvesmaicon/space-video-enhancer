@@ -154,7 +154,7 @@ class AdjustmentsSection(WindowState):
         self._exposure_region_moved()
 
     def _sync_white_balance_preview(self) -> None:
-        enabled = self.frame_count > 0 and self._tab_is_active(self.grade_tab)
+        enabled = self.frame_count > 0 and self._tab_is_active(self.color_page)
         self.preview.set_white_balance_state(enabled, self.white_balance_rect_norm, editing=True)
 
     def _update_white_balance_info(self) -> None:

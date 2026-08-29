@@ -68,6 +68,7 @@ from space_video_enhancer.settings import (
     DEFAULT_STABILIZATION_RECT,
     DEFAULT_WHITE_BALANCE_RECT,
     NEUTRAL_GAINS,
+    CaptureSettings,
     CropSettings,
     FilterSettings,
     GeometrySettings,
@@ -104,12 +105,14 @@ from space_video_enhancer.ui.sections.projects import ProjectSection
 from space_video_enhancer.ui.sections.state import WindowState
 from space_video_enhancer.ui.tabs.base import TabPage, combo_enum, enum_combo
 from space_video_enhancer.ui.tabs.color import ColorTab
+from space_video_enhancer.ui.tabs.color_page import ColorPage
 from space_video_enhancer.ui.tabs.export import ExportTab
 from space_video_enhancer.ui.tabs.filters import FiltersTab
 from space_video_enhancer.ui.tabs.geometry import GeometryTab
 from space_video_enhancer.ui.tabs.grade import ColorGradeTab
 from space_video_enhancer.ui.tabs.noise import NoiseTab
 from space_video_enhancer.ui.tabs.stabilization import StabilizationTab
+from space_video_enhancer.ui.tabs.tempo import TempoTab
 from space_video_enhancer.ui.theme import load_stylesheet
 from space_video_enhancer.ui.timeline_media import FilmstripController, WaveformController
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
@@ -285,18 +288,20 @@ class MainWindow(
 
         self.color_tab = ColorTab()
         self.grade_tab = ColorGradeTab()
+        self.color_page = ColorPage(self.color_tab, self.grade_tab)  # "Cor": tone sliders above white balance/HSL
         self.filters_tab = FiltersTab()
         self.stabilization_tab = StabilizationTab()
         self.geometry_tab = GeometryTab()
         self.noise_tab = NoiseTab()
+        self.tempo_tab = TempoTab()
         self.export_tab = ExportTab()
         self._tabs: tuple[tuple[str, TabPage], ...] = (
-            ("Ajustes", self.color_tab),
-            ("HSL", self.grade_tab),
+            ("Cor", self.color_page),
             ("Filtros", self.filters_tab),
             ("Estabilizar", self.stabilization_tab),
             ("Geometria", self.geometry_tab),
             ("Ruído", self.noise_tab),
+            ("Tempo", self.tempo_tab),
             ("Exportar", self.export_tab),
         )
 
@@ -725,6 +730,8 @@ class MainWindow(
         self.stabilization_tab.captureChanged.connect(self._handle_stabilization_control_change)
         self.stabilization_tab.resetRequested.connect(self._reset_stabilization_rect)
         self.stabilization_tab.referenceRequested.connect(self._set_stabilization_reference_here)
+        self.tempo_tab.captureChanged.connect(self._handle_stabilization_control_change)
+        self.tempo_tab.timelineFpsChanged.connect(self._handle_timeline_fps_change)
         self.geometry_tab.geometryChanged.connect(self._handle_geometry_change)
         self.geometry_tab.cropModeChanged.connect(self._handle_crop_mode_changed)
         self.geometry_tab.cropResetRequested.connect(self._reset_crop_rect)
@@ -733,7 +740,6 @@ class MainWindow(
         self.noise_tab.resetRequested.connect(self._reset_slider_to_preset)
         self.noise_tab.sampleResetRequested.connect(self._reset_denoise_sample_rect)
         self.export_tab.scaleChanged.connect(self._handle_filter_control_change)
-        self.export_tab.timelineFpsChanged.connect(self._handle_timeline_fps_change)
         self.export_tab.thread_combo.currentIndexChanged.connect(lambda _index: self._update_window_title())
 
     def _filter_sliders(self) -> dict[str, Any]:
@@ -802,7 +808,12 @@ class MainWindow(
                 self.grade_tab.settings(self.white_balance_gains), region=qrect_to_norm(self.white_balance_rect_norm)
             ),
             exposure=self.grade_tab.exposure_settings(qrect_to_norm(self.white_balance_rect_norm)),
-            capture=self.stabilization_tab.capture_settings(),
+            capture=CaptureSettings(
+                deinterlace=self.stabilization_tab.deinterlace_mode(),
+                retiming=self.tempo_tab.retiming_mode(),
+                speed=self.tempo_tab.speed(),
+                mute=self.tempo_tab.mute(),
+            ),
             anonymize=self.filters_tab.anonymize_settings(),
         )
 

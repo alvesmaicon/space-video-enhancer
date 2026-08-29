@@ -261,16 +261,16 @@ def test_changing_the_timeline_fps_retimes_the_sequence_and_undoes(
     window.transport.set_value(window.frame_count - 1)  # playhead at the end
     before_seconds = window.current_frame_index / window.sequence.fps
 
-    select_combo_data(window.export_tab.timeline_fps_combo, faster)  # fires timelineFpsChanged
+    select_combo_data(window.tempo_tab.timeline_fps_combo, faster)  # fires timelineFpsChanged
 
     assert window.sequence.timeline_fps == faster and window.sequence.fps == faster
-    assert window.export_tab.timeline_fps() == faster
+    assert window.tempo_tab.timeline_fps() == faster
     assert window.current_frame_index / window.sequence.fps == pytest.approx(before_seconds, abs=1 / faster)
     assert window.undo_action.text().endswith("linha do tempo"), window.undo_action.text()
 
     window._undo_edit()
     assert window.sequence.timeline_fps == UI_VIDEO_FPS
-    assert window.export_tab.timeline_fps() == UI_VIDEO_FPS
+    assert window.tempo_tab.timeline_fps() == UI_VIDEO_FPS
 
 
 def test_copy_and_paste_duplicates_the_clip_under_the_playhead(
@@ -331,7 +331,7 @@ def test_clip_speed_stretches_the_timeline_and_is_saved(
     window._open_video(ui_video)  # 12 frames at 24 fps
     wait_for_preview(app, window)
     before = window.frame_count
-    tab = window.stabilization_tab
+    tab = window.tempo_tab
 
     select_combo_data(tab.speed_combo, 0.5)  # half speed
     wait_for_preview(app, window)

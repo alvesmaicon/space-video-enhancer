@@ -56,12 +56,14 @@ from space_video_enhancer.ui.preview_worker import PreviewController, PreviewIma
 from space_video_enhancer.ui.reference_frames import ReferenceFrameController
 from space_video_enhancer.ui.tabs.base import TabPage
 from space_video_enhancer.ui.tabs.color import ColorTab
+from space_video_enhancer.ui.tabs.color_page import ColorPage
 from space_video_enhancer.ui.tabs.export import ExportTab
 from space_video_enhancer.ui.tabs.filters import FiltersTab
 from space_video_enhancer.ui.tabs.geometry import GeometryTab
 from space_video_enhancer.ui.tabs.grade import ColorGradeTab
 from space_video_enhancer.ui.tabs.noise import NoiseTab
 from space_video_enhancer.ui.tabs.stabilization import StabilizationTab
+from space_video_enhancer.ui.tabs.tempo import TempoTab
 from space_video_enhancer.ui.timeline_media import FilmstripController, WaveformController
 from space_video_enhancer.ui.widgets.compare_preview import ComparePreview
 from space_video_enhancer.ui.widgets.status_panel import StatusPanel
@@ -166,10 +168,12 @@ class WindowState(QMainWindow):
     status: StatusPanel
     color_tab: ColorTab
     grade_tab: ColorGradeTab
+    color_page: ColorPage
     filters_tab: FiltersTab
     stabilization_tab: StabilizationTab
     geometry_tab: GeometryTab
     noise_tab: NoiseTab
+    tempo_tab: TempoTab
     export_tab: ExportTab
     _tabs: tuple[tuple[str, TabPage], ...]
     preview_zoom_combo: QComboBox

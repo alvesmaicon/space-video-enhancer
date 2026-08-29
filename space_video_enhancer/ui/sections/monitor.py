@@ -45,7 +45,7 @@ class MonitorSection(WindowState):
             self.geometry_tab,
             self.noise_tab,
             self.stabilization_tab,
-            self.grade_tab,
+            self.color_page,
         )
 
     def _should_pause_main_preview(self) -> bool:

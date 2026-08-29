@@ -130,7 +130,7 @@ def test_overlays_are_editable_only_on_their_tab(app: QApplication, window: Main
     tabs.setCurrentWidget(window.geometry_tab)
     pump(app)
     assert preview.crop.enabled and preview.crop.interactive
-    tabs.setCurrentWidget(window.color_tab)
+    tabs.setCurrentWidget(window.color_page)
     pump(app)
     assert preview.crop.enabled and not preview.crop.interactive, "crop stays visible but frozen elsewhere"
 
@@ -139,7 +139,7 @@ def test_overlays_are_editable_only_on_their_tab(app: QApplication, window: Main
     pump(app)
     assert preview.sample.enabled and preview.sample.interactive
     assert not preview.focus.enabled
-    tabs.setCurrentWidget(window.color_tab)
+    tabs.setCurrentWidget(window.color_page)
     pump(app)
     assert not preview.sample.enabled
 

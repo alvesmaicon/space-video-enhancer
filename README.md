@@ -87,10 +87,11 @@ No **macOS**, o nome na barra de menus continua "Python" enquanto o app roda dir
 ## Uso
 
 1. **Arquivo › Abrir vídeo…** (Ctrl+O). Arraste o divisor no preview para comparar; ajuste nas abas à direita.
-2. **Arquivo › Adicionar vídeo à sequência…** (Ctrl+Shift+O) para juntar mais arquivos; um clipe com fps diferente é reajustado para o fps da linha do tempo (o do primeiro clipe) — o modo de reajuste é por clipe na aba Estabilizar. Use as ferramentas sob a linha do tempo para marcar início `[` e fim `]`, remover um trecho, dividir, remover ou mover o clipe sob o playhead.
+2. **Arquivo › Adicionar vídeo à sequência…** (Ctrl+Shift+O) para juntar mais arquivos; um clipe com fps diferente é reajustado para o fps da linha do tempo (o do primeiro clipe) — o modo de reajuste é por clipe na aba Tempo. Use as ferramentas sob a linha do tempo para marcar início `[` e fim `]`, remover um trecho, dividir, remover ou mover o clipe sob o playhead.
 3. **Estabilizar**: escolha o modo; em *camera lock* arraste o retângulo verde sobre a região que deve ficar parada e use "Usar este frame como referência" para fixar o frame de referência.
 4. **Ruído**: no modo *amostra*, arraste o retângulo azul sobre uma área lisa da imagem.
-5. **Exportar** (Ctrl+E): a aba mostra o **fps da linha do tempo** (começa no do primeiro clipe; mudar aqui reajusta a sequência inteira e é o fps do arquivo), a escala de saída, as threads, o resumo (trecho, trechos removidos, tamanho de saída) e o botão. **Arquivo › Salvar projeto** (Ctrl+S) guarda tudo para continuar depois.
+5. **Tempo**: o **fps da linha do tempo** (começa no do primeiro clipe; mudar aqui reajusta a sequência inteira e é o fps do arquivo) e, por clipe, a **velocidade** (0.25x–4x, câmera lenta/rápida), o **reajuste de fps** e o mudo.
+6. **Exportar** (Ctrl+E): a escala de saída, as threads, o resumo (trecho, trechos removidos, tamanho de saída) e o botão. **Arquivo › Salvar projeto** (Ctrl+S) guarda tudo para continuar depois.
 
 Para uma segunda tela: **Exibir › Preview em janela separada** (Ctrl+Shift+D), arraste a janela (ou "Outra tela") e F11.
 
@@ -156,8 +157,8 @@ Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos
 
 ## Limitações conhecidas
 
-- Clipes de fps diferente são reajustados para o fps da linha do tempo. O modo é por clipe (aba Estabilizar › "Reajuste de fps"): *frame mais próximo* (rápido, pode trepidar), *mistura de quadros* (dissolvência, mais suave) ou *fluxo óptico* (sintetiza o quadro intermediário — melhor, mais lento; aplicado só na exportação, o preview mostra a mistura).
-- **Velocidade do clipe** (aba Estabilizar › "Velocidade", 0.25x–4x): câmera lenta usa o mesmo reajuste (fluxo óptico dá o slow-mo mais suave). O áudio é esticado com `atempo` (mantém o tom) para acompanhar; "Sem áudio neste clipe" silencia. Na exportação o áudio segue o vídeo; **no preview um clipe com velocidade toca sem som** (evita dessincronizar).
+- Clipes de fps diferente são reajustados para o fps da linha do tempo. O modo é por clipe (aba Tempo › "Reajuste de fps"): *frame mais próximo* (rápido, pode trepidar), *mistura de quadros* (dissolvência, mais suave) ou *fluxo óptico* (sintetiza o quadro intermediário — melhor, mais lento; aplicado só na exportação, o preview mostra a mistura).
+- **Velocidade do clipe** (aba Tempo › "Velocidade", 0.25x–4x): câmera lenta usa o mesmo reajuste (fluxo óptico dá o slow-mo mais suave). O áudio é esticado com `atempo` (mantém o tom) para acompanhar; "Sem áudio neste clipe" silencia. Na exportação o áudio segue o vídeo; **no preview um clipe com velocidade toca sem som** (evita dessincronizar).
 - Mídia que mudou de lugar é marcada no projeto, não religada: coloque o arquivo de volta e reabra.
 - Arquivos com mais de 30 min tocam sem som no preview (o PCM não caberia com folga na memória); a exportação não é afetada.
 - Interface em português.

@@ -360,7 +360,7 @@ class MediaSection(WindowState):
         self._update_timeline_markers()
         self._update_export_summary()
         if self.sequence.clips:
-            self.export_tab.set_timeline_fps_options([clip.fps for clip in self.sequence.clips], self.sequence.fps)
+            self.tempo_tab.set_timeline_fps_options([clip.fps for clip in self.sequence.clips], self.sequence.fps)
         self._update_sequence_info()
         editable = self._export_controller is None
         self.export_action.setEnabled(not self.sequence.is_empty and editable)
@@ -375,7 +375,7 @@ class MediaSection(WindowState):
 
     def _handle_timeline_fps_change(self) -> None:
         """The user picked another timeline fps: retime the whole sequence, keeping the playhead on its moment."""
-        new_fps = self.export_tab.timeline_fps()
+        new_fps = self.tempo_tab.timeline_fps()
         if new_fps <= 0 or self.sequence.is_empty or abs(new_fps - self.sequence.fps) <= FPS_TOLERANCE:
             return
         self._stop_playback()
@@ -497,7 +497,8 @@ class MediaSection(WindowState):
         self.crop_rect_norm = norm_to_qrect(settings.crop.rect)
         self.denoise_sample_rect_norm = norm_to_qrect(settings.denoise_sample_rect)
         self.stabilization_tab.apply(settings.stabilization)
-        self.stabilization_tab.apply_capture(settings.capture)
+        self.stabilization_tab.apply_capture(settings.capture)  # deinterlacing
+        self.tempo_tab.apply_capture(settings.capture)  # speed / retiming / mute
         self.filters_tab.apply_anonymize(settings.anonymize)
         self.stabilization_rect_norm = norm_to_qrect(settings.stabilization.focus_rect)
         self.white_balance_gains = settings.grade.white_balance_gains
