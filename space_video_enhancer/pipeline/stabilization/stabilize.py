@@ -216,7 +216,12 @@ def estimate_correction(
 ) -> np.ndarray | None:
     """Full-strength correction for ``frame`` (before the intensity blend), or ``None``."""
     width = int(frame.shape[1])
-    if state is not None:
+    mode = settings.mode
+    # Manual mode recomputes cheaply from (keyframes, frame_index); the per-frame correction cache is
+    # keyed only by (frame_index, width) and cannot tell that a keyframe just moved, so manual skips it
+    # (otherwise editing a keyframe would keep replaying the frame's first, stale correction).
+    manual = mode is StabilizationMode.MANUAL
+    if state is not None and not manual:
         state.adopt_frame_width(width)
         cached = state.cached_correction(frame_index, width)
         if cached is not None:
@@ -224,19 +229,19 @@ def estimate_correction(
             state.remember_correction(cached, frame_index, width)  # keep the stored units current
             return cached
 
-    mode = settings.mode
     if mode.uses_auto_motion:
         correction = follow_smoothed_path(frame, settings, frame_index, state)
     elif mode is StabilizationMode.CAMERA_LOCK:
         correction = camera_lock(frame, settings, frame_index, state, reference_frame)
     elif mode is StabilizationMode.HYBRID:
         correction = hybrid(frame, settings, frame_index, state, reference_frame)
-    elif mode is StabilizationMode.MANUAL:
+    elif manual:
+        note("stabilization.estimator", "manual")
         correction = manual_correction(settings.keyframes, frame_index, frame.shape)
     else:
         correction = None
 
-    if state is not None:
+    if state is not None and not manual:
         state.remember_correction(correction, frame_index, width)
     return correction
 

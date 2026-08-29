@@ -7,6 +7,7 @@ import pytest
 
 from space_video_enhancer.pipeline.stabilization.keyframes import interpolate_keyframes, manual_correction
 from space_video_enhancer.pipeline.stabilization.stabilize import apply_stabilization
+from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import StabilizationKeyframe, StabilizationMode, StabilizationSettings
 
 KF = StabilizationKeyframe
@@ -54,3 +55,23 @@ def test_a_translation_keyframe_shifts_the_frame_content() -> None:
     assert moved.size, "the marker survived the warp"
     center_x = moved[:, 1].mean()
     assert center_x == pytest.approx(50 + 0.2 * 120, abs=2.0), "the marker moved right by tx*width"
+
+
+def test_editing_a_manual_keyframe_is_not_masked_by_the_correction_cache() -> None:
+    """A frame's correction is cached per (frame, width); editing its keyframe must still take effect.
+
+    Regression: the first render of frame 6 cached an identity correction; moving the slider changed
+    the keyframe but the cache replayed the stale identity, so the preview never moved (result went
+    ``negligible``). Manual mode must recompute from the current keyframes every time.
+    """
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    frame[38:42, 58:62] = 255  # a bright marker just right of centre
+    state = StabilizationState()  # one state reused across renders, exactly like the preview worker
+
+    at_rest = StabilizationSettings(mode=StabilizationMode.MANUAL, keyframes=(KF(6, tx=0.0),), auto_crop=False)
+    apply_stabilization(frame, at_rest, frame_index=6, state=state)  # would cache an identity for frame 6
+
+    moved = StabilizationSettings(mode=StabilizationMode.MANUAL, keyframes=(KF(6, tx=0.2),), auto_crop=False)
+    result = apply_stabilization(frame, moved, frame_index=6, state=state)  # same frame, edited keyframe
+    center_x = np.argwhere(result.max(axis=2) > 128)[:, 1].mean()
+    assert center_x == pytest.approx(60 + 0.2 * 120, abs=2.0), "the edited keyframe shifts the frame despite the cache"
