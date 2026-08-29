@@ -260,9 +260,7 @@ class StabilizationKeyframe:
 
     @property
     def is_identity(self) -> bool:
-        return (
-            self.tx == 0.0 and self.ty == 0.0 and self.rotation == 0.0 and abs(self.scale - 1.0) <= 1e-6
-        )
+        return self.tx == 0.0 and self.ty == 0.0 and self.rotation == 0.0 and abs(self.scale - 1.0) <= 1e-6
 
 
 @dataclass(frozen=True)

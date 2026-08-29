@@ -9,6 +9,7 @@ from PySide6.QtCore import QRectF
 from space_video_enhancer.pipeline.deinterlace import likely_interlaced
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.grade import neutral_gains, white_patch_gains
+from space_video_enhancer.pipeline.stabilization.keyframes import interpolate_keyframes
 from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, wobble_window_frames
 from space_video_enhancer.sequence import Clip
@@ -22,6 +23,8 @@ from space_video_enhancer.settings import (
     DenoiseMode,
     FilterSettings,
     NormalizedRect,
+    StabilizationKeyframe,
+    StabilizationMode,
 )
 from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.ui.sections.state import WindowState
@@ -300,10 +303,85 @@ class AdjustmentsSection(WindowState):
 
     def _handle_stabilization_mode_changed(self) -> None:
         self._stabilization_epoch += 1
-        if self.stabilization_tab.mode().uses_focal_point:
+        mode = self.stabilization_tab.mode()
+        if mode.uses_focal_point:
             self._capture_stabilization_reference_from_current_frame(label="ajuste de estabilização")
+        if mode is StabilizationMode.MANUAL and self._onion_reference is None and self._last_preview is not None:
+            self._onion_reference = self._last_preview.before  # start the ghost on the current frame
         self._update_stabilization_controls_state()
+        self._refresh_manual_controls()
         self._schedule_preview_refresh()
+
+    # --- manual keyframes -----------------------------------------------------------------
+    def _handle_manual_adjust(self) -> None:
+        """A slider moved: create or move the keyframe at the current frame to the sliders' values."""
+        if self.active_clip is None or self.current_frame is None:
+            return
+        frame = self._decoded_frame_index
+        tx, ty, rotation, scale = self.stabilization_tab.manual_adjust()
+        keyframe = StabilizationKeyframe(frame, tx, ty, rotation, scale)
+        others = tuple(existing for existing in self._manual_keyframes if existing.frame != frame)
+        self._manual_keyframes = tuple(sorted((*others, keyframe), key=lambda item: item.frame))
+        self._store_active_clip_settings()  # folds the keyframes into the clip and commits one undo step
+        self._update_manual_info()
+        self._schedule_preview_refresh()
+
+    def _capture_onion_reference(self) -> None:
+        if self._last_preview is None:
+            self.status.show_message("Aguarde o primeiro render para definir a referência.")
+            return
+        self._onion_reference = self._last_preview.before  # the raw current frame, canvas-sized, as the ghost
+        self._sync_stabilization_preview()
+        log_event(LOG, "ui.manual_reference", frame=self._decoded_frame_index)
+        self.status.show_message(f"Referência (fantasma): frame {self._decoded_frame_index + 1}.")
+
+    def _remove_manual_keyframe(self) -> None:
+        if self.active_clip is None:
+            return
+        frame = self._decoded_frame_index
+        remaining = tuple(item for item in self._manual_keyframes if item.frame != frame)
+        if remaining == self._manual_keyframes:
+            return
+        self._manual_keyframes = remaining
+        self._store_active_clip_settings()
+        self._refresh_manual_controls()
+        self._schedule_preview_refresh()
+
+    def _go_to_keyframe(self, direction: int) -> None:
+        if not self._manual_keyframes or self.active_clip is None:
+            return
+        frame = self._decoded_frame_index
+        frames = sorted(item.frame for item in self._manual_keyframes)
+        if direction < 0:
+            below = [value for value in frames if value < frame]
+            target_source = max(below) if below else frames[0]
+        else:
+            above = [value for value in frames if value > frame]
+            target_source = min(above) if above else frames[-1]
+        self._stop_playback()
+        self.transport.set_value(self.sequence.timeline_frame(self.active_clip_index, target_source))
+
+    def _refresh_manual_controls(self) -> None:
+        """Show the interpolated transform for the current frame on the sliders (no keyframe is created)."""
+        if self.stabilization_tab.mode() is not StabilizationMode.MANUAL:
+            return
+        if self.playback_timer.isActive():
+            return  # do not chase the sliders frame by frame during playback
+        params = interpolate_keyframes(self._manual_keyframes, self._decoded_frame_index)
+        self.stabilization_tab.set_manual_adjust(*(params or (0.0, 0.0, 0.0, 1.0)))
+        self._update_manual_info()
+
+    def _update_manual_info(self) -> None:
+        frame = self._decoded_frame_index
+        count = len(self._manual_keyframes)
+        on_keyframe = any(item.frame == frame for item in self._manual_keyframes)
+        self.stabilization_tab.manual_remove_button.setEnabled(on_keyframe and self.frame_count > 0)
+        if count == 0:
+            text = "Sem keyframes. Alinhe este frame ao fantasma e mova um slider para criar o primeiro."
+        else:
+            where = "keyframe deste frame" if on_keyframe else "interpolado entre keyframes"
+            text = f"{count} keyframe(s) · frame {frame + 1}: {where}."
+        self.stabilization_tab.set_manual_info(text)
 
     def _handle_stabilization_control_change(self) -> None:
         self._stabilization_epoch += 1
@@ -494,12 +572,14 @@ class AdjustmentsSection(WindowState):
         self._schedule_preview_refresh(immediate=True)
 
     def _sync_stabilization_preview(self) -> None:
-        enabled = (
-            self.frame_count > 0
-            and self.stabilization_tab.mode().uses_focal_point
-            and self._tab_is_active(self.stabilization_tab)
+        active = self.frame_count > 0 and self._tab_is_active(self.stabilization_tab)
+        mode = self.stabilization_tab.mode()
+        self.preview.set_stabilization_state(
+            active and mode.uses_focal_point, self.stabilization_rect_norm, editing=True
         )
-        self.preview.set_stabilization_state(enabled, self.stabilization_rect_norm, editing=True)
+        show_ghost = active and mode is StabilizationMode.MANUAL and self._onion_reference is not None
+        ghost = self._onion_reference if show_ghost else None
+        self.preview.set_onion_skin(ghost, self.stabilization_tab.onion_opacity())
 
     def _update_stabilization_info_label(self) -> None:
         """Facts only (the mode description lives in the tab's hint and tooltips)."""

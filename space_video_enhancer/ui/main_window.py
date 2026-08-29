@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QIcon,
+    QImage,
     QKeyEvent,
     QKeySequence,
 )
@@ -74,6 +75,7 @@ from space_video_enhancer.settings import (
     GeometrySettings,
     PreviewRenderMode,
     RenderSettings,
+    StabilizationKeyframe,
     StabilizationSettings,
 )
 from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
@@ -185,6 +187,8 @@ class MainWindow(
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
         self.stabilization_reference_frame: np.ndarray | None = None
         self.stabilization_reference_frame_index = 0
+        self._manual_keyframes: tuple[StabilizationKeyframe, ...] = ()  # the active clip's manual-mode keyframes
+        self._onion_reference: QImage | None = None  # the reference frame drawn as a ghost in manual mode
         self._stabilization_epoch = 0  # bumped whenever inter-frame stabilization memory must restart
 
         # --- processing / export infra -----------------------------------------------------
@@ -730,6 +734,11 @@ class MainWindow(
         self.stabilization_tab.captureChanged.connect(self._handle_stabilization_control_change)
         self.stabilization_tab.resetRequested.connect(self._reset_stabilization_rect)
         self.stabilization_tab.referenceRequested.connect(self._set_stabilization_reference_here)
+        self.stabilization_tab.manualAdjustChanged.connect(self._handle_manual_adjust)
+        self.stabilization_tab.manualReferenceRequested.connect(self._capture_onion_reference)
+        self.stabilization_tab.manualRemoveKeyframeRequested.connect(self._remove_manual_keyframe)
+        self.stabilization_tab.manualNavigateRequested.connect(self._go_to_keyframe)
+        self.stabilization_tab.onionOpacityChanged.connect(self._sync_stabilization_preview)
         self.tempo_tab.captureChanged.connect(self._handle_stabilization_control_change)
         self.tempo_tab.timelineFpsChanged.connect(self._handle_timeline_fps_change)
         self.geometry_tab.geometryChanged.connect(self._handle_geometry_change)
@@ -794,7 +803,8 @@ class MainWindow(
         )
 
     def _current_stabilization(self) -> StabilizationSettings:
-        return self.stabilization_tab.settings(qrect_to_norm(self.stabilization_rect_norm))
+        base = self.stabilization_tab.settings(qrect_to_norm(self.stabilization_rect_norm))
+        return replace(base, keyframes=self._manual_keyframes)  # keyframes are per-clip data, not a widget value
 
     def _current_render_settings(self) -> RenderSettings:
         return RenderSettings(

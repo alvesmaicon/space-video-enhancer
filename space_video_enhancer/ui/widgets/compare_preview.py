@@ -387,6 +387,8 @@ class ComparePreview(QWidget):
         super().__init__()
         self._before: QImage | None = None
         self._after: QImage | None = None
+        self._onion: QImage | None = None  # manual stabilization: the reference frame drawn as a ghost
+        self._onion_opacity = 0.5
         self._split_ratio = 0.5
         self._compare_mode = CompareMode.SPLIT_VERTICAL
         self._image_rect = QRectF()
@@ -556,6 +558,15 @@ class ComparePreview(QWidget):
     def motion_overlay(self) -> MotionOverlay | None:
         return self._motion
 
+    def set_onion_skin(self, image: QImage | None, opacity: float = 0.5) -> None:
+        """A reference frame drawn semi-transparent over the corrected frame, to align manual keyframes by eye."""
+        self._onion = image
+        self._onion_opacity = max(0.0, min(1.0, opacity))
+        self.update()
+
+    def has_onion_skin(self) -> bool:
+        return self._onion is not None
+
     def set_hud_lines(self, lines: list[str]) -> None:
         self._hud_lines = list(lines)
         if self._hud_visible:
@@ -609,6 +620,14 @@ class ComparePreview(QWidget):
             self._paint_split(painter)
         else:
             self._paint_panels(painter, layout)
+
+        if self._onion is not None:
+            painter.save()
+            if not self._compare_mode.is_split:
+                painter.setClipRect(layout.after_panel)
+            painter.setOpacity(self._onion_opacity)
+            painter.drawImage(self._image_rect, self._onion)
+            painter.restore()
 
         painter.save()
         if not self._compare_mode.is_split:

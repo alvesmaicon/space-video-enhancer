@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PySide6.QtCore import QRectF, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QImage
 from PySide6.QtWidgets import (
     QComboBox,
     QMainWindow,
@@ -42,6 +42,7 @@ from space_video_enhancer.settings import (
     GeometrySettings,
     PreviewRenderMode,
     RenderSettings,
+    StabilizationKeyframe,
     StabilizationSettings,
 )
 from space_video_enhancer.telemetry.stats import RollingStats
@@ -105,6 +106,8 @@ class WindowState(QMainWindow):
     stabilization_rect_norm: QRectF
     stabilization_reference_frame: np.ndarray | None
     stabilization_reference_frame_index: int
+    _manual_keyframes: tuple[StabilizationKeyframe, ...]
+    _onion_reference: QImage | None
     _stabilization_epoch: int
     _backend: OpenCLBackend
     _preview_controller: PreviewController
@@ -308,6 +311,9 @@ class WindowState(QMainWindow):
         raise NotImplementedError  # adjustments
 
     def _sync_stabilization_preview(self) -> None:
+        raise NotImplementedError  # adjustments
+
+    def _refresh_manual_controls(self) -> None:
         raise NotImplementedError  # adjustments
 
     def _sync_white_balance_preview(self) -> None:

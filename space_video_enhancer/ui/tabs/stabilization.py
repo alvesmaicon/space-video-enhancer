@@ -43,6 +43,7 @@ MODE_OPTIONS: list[tuple[str, StabilizationMode]] = [
     ("Suavizar tremor + perspectiva", StabilizationMode.PERSPECTIVE),
     ("Travar uma região (camera lock)", StabilizationMode.CAMERA_LOCK),
     ("Travar uma região, suavizar se perder", StabilizationMode.HYBRID),
+    ("Manual (keyframes)", StabilizationMode.MANUAL),
 ]
 MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
     StabilizationMode.OFF: "Nenhuma compensação de movimento.",
@@ -63,9 +64,29 @@ MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
         "Prende a região verde (arraste-a no preview) com camera lock; se perder o alvo, segue o movimento "
         "global até reencontrá-lo."
     ),
+    StabilizationMode.MANUAL: (
+        "Você alinha um frame de tempos em tempos (posição, rotação, zoom) contra a referência fantasma; "
+        "entre os keyframes o ajuste é interpolado. Nunca deforma a imagem."
+    ),
 }
 DEFAULT_INTENSITY = 100
 DEFAULT_SMOOTHING = 35
+MANUAL_TRANSLATION_LIMIT = 200
+"""The X/Y sliders span ±20% of the frame in 0.1% steps (value/1000)."""
+MANUAL_ROTATION_LIMIT = 150
+"""The rotation slider spans ±15° in 0.1° steps (value/10)."""
+MANUAL_ZOOM_LIMIT = 200
+"""The zoom slider spans ±20% in 0.1% steps (scale = 1 + value/1000)."""
+
+
+def _format_manual_percent(value: int) -> str:
+    return f"{value / 10:+.1f}%" if value else "0%"
+
+
+def _format_manual_degrees(value: int) -> str:
+    return f"{value / 10:+.1f}°" if value else "0°"
+
+
 DEINTERLACE_OPTIONS: list[tuple[str, DeinterlaceMode]] = [
     ("Desligado", DeinterlaceMode.OFF),
     ("Automático (só onde há pente)", DeinterlaceMode.ADAPTIVE),
@@ -123,6 +144,14 @@ class StabilizationTab(TabPage):
     """Make the frame on screen the camera-lock reference; the focal region stays where it is."""
     captureChanged = Signal()
     """Deinterlacing or the rolling-shutter correction changed."""
+    manualAdjustChanged = Signal()
+    """An X/Y/rotation/zoom slider moved: set (or update) the keyframe at the current frame."""
+    manualReferenceRequested = Signal()
+    """Make the current frame the onion-skin ghost the user aligns against."""
+    manualRemoveKeyframeRequested = Signal()
+    manualNavigateRequested = Signal(int)
+    """Jump to the previous (-1) or next (+1) keyframe."""
+    onionOpacityChanged = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -161,6 +190,40 @@ class StabilizationTab(TabPage):
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
 
+        self.onion_slider = LabeledSlider("Transparência do fantasma", 0, 100, 50, display=format_percent)
+        self.onion_slider.setToolTip("Quanto do frame de referência aparece sobreposto para você alinhar o atual.")
+        self.manual_reference_button = QPushButton("Usar este frame como referência")
+        self.manual_reference_button.setToolTip(
+            "Congela o frame atual como o fantasma; alinhe os outros frames contra ele nos keyframes."
+        )
+        self.manual_x_slider = LabeledSlider(
+            "Posição X", -MANUAL_TRANSLATION_LIMIT, MANUAL_TRANSLATION_LIMIT, 0, display=_format_manual_percent
+        )
+        self.manual_y_slider = LabeledSlider(
+            "Posição Y", -MANUAL_TRANSLATION_LIMIT, MANUAL_TRANSLATION_LIMIT, 0, display=_format_manual_percent
+        )
+        self.manual_rotation_slider = LabeledSlider(
+            "Rotação", -MANUAL_ROTATION_LIMIT, MANUAL_ROTATION_LIMIT, 0, display=_format_manual_degrees
+        )
+        self.manual_zoom_slider = LabeledSlider(
+            "Zoom", -MANUAL_ZOOM_LIMIT, MANUAL_ZOOM_LIMIT, 0, display=_format_manual_percent
+        )
+        self.manual_sliders = (
+            self.manual_x_slider,
+            self.manual_y_slider,
+            self.manual_rotation_slider,
+            self.manual_zoom_slider,
+        )
+        self.manual_prev_button = QPushButton("◀ Keyframe")
+        self.manual_prev_button.setObjectName("secondaryButton")
+        self.manual_next_button = QPushButton("Keyframe ▶")
+        self.manual_next_button.setObjectName("secondaryButton")
+        self.manual_remove_button = QPushButton("Remover keyframe")
+        self.manual_remove_button.setObjectName("secondaryButton")
+        self.manual_info_label = QLabel()
+        self.manual_info_label.setObjectName("hintLabel")
+        self.manual_info_label.setWordWrap(True)
+
         self.deinterlace_combo = enum_combo(DEINTERLACE_OPTIONS)
         for index, (_label, deinterlace_mode) in enumerate(DEINTERLACE_OPTIONS):
             self.deinterlace_combo.setItemData(
@@ -188,9 +251,26 @@ class StabilizationTab(TabPage):
         self.zoom_out_checkbox.toggled.connect(self._handle_zoom_out_toggled)
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.reference_button.clicked.connect(self.referenceRequested.emit)
+        self.onion_slider.valueChanged.connect(lambda _value: self.onionOpacityChanged.emit())
+        self.onion_slider.resetRequested.connect(lambda: self.onion_slider.setValue(50))
+        self.manual_reference_button.clicked.connect(self.manualReferenceRequested.emit)
+        for slider in self.manual_sliders:
+            slider.valueChanged.connect(lambda _value: self.manualAdjustChanged.emit())
+            slider.resetRequested.connect(lambda slider=slider: slider.setValue(0))
+        self.manual_remove_button.clicked.connect(self.manualRemoveKeyframeRequested.emit)
+        self.manual_prev_button.clicked.connect(lambda: self.manualNavigateRequested.emit(-1))
+        self.manual_next_button.clicked.connect(lambda: self.manualNavigateRequested.emit(1))
         reference_buttons = QHBoxLayout()
         reference_buttons.addWidget(self.reference_button)
         reference_buttons.addWidget(self.reset_button)
+        manual_reference_row = QHBoxLayout()
+        manual_reference_row.addWidget(self.manual_reference_button)
+        manual_reference_row.addStretch(1)
+        manual_nav_row = QHBoxLayout()
+        manual_nav_row.addWidget(self.manual_prev_button)
+        manual_nav_row.addWidget(self.manual_next_button)
+        manual_nav_row.addWidget(self.manual_remove_button)
+        manual_nav_row.addStretch(1)
 
         self.add_sections(
             group_box(
@@ -203,6 +283,17 @@ class StabilizationTab(TabPage):
                 self.zoom_out_checkbox,
                 reference_buttons,
                 self.info_label,
+            ),
+            group_box(
+                "Ajuste manual (keyframes)",
+                self.onion_slider,
+                manual_reference_row,
+                self.manual_x_slider,
+                self.manual_y_slider,
+                self.manual_rotation_slider,
+                self.manual_zoom_slider,
+                manual_nav_row,
+                self.manual_info_label,
             ),
             group_box(
                 "Artefatos de captura",
@@ -282,13 +373,25 @@ class StabilizationTab(TabPage):
         mode = self.mode()
         controls_enabled = has_video and self.mode_combo.isEnabled()
         stabilization_enabled = controls_enabled and mode is not StabilizationMode.OFF
-        self.intensity_slider.setEnabled(stabilization_enabled)
-        self.smoothing_slider.setEnabled(stabilization_enabled)
-        zoom_out_enabled = stabilization_enabled and self.zoom_out_checkbox.isChecked()
-        self.auto_crop_checkbox.setEnabled(stabilization_enabled and not zoom_out_enabled)
-        self.zoom_out_checkbox.setEnabled(stabilization_enabled)
+        manual = mode is StabilizationMode.MANUAL
+        auto_enabled = stabilization_enabled and not manual  # intensity/smoothing/crop belong to the estimated modes
+        self.intensity_slider.setEnabled(auto_enabled)
+        self.smoothing_slider.setEnabled(auto_enabled)
+        zoom_out_enabled = auto_enabled and self.zoom_out_checkbox.isChecked()
+        self.auto_crop_checkbox.setEnabled(auto_enabled and not zoom_out_enabled)
+        self.zoom_out_checkbox.setEnabled(auto_enabled)
         self.reset_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
         self.reference_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
+        manual_enabled = controls_enabled and manual
+        for widget in (
+            self.onion_slider,
+            self.manual_reference_button,
+            *self.manual_sliders,
+            self.manual_prev_button,
+            self.manual_next_button,
+            self.manual_remove_button,
+        ):
+            widget.setEnabled(manual_enabled)
         self.deinterlace_combo.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.rolling_shutter_slider.setEnabled(controls_enabled)
         self.wobble_checkbox.setEnabled(controls_enabled)
@@ -300,6 +403,30 @@ class StabilizationTab(TabPage):
     def set_capture_info(self, text: str) -> None:
         self.capture_info_label.setText(text)
 
+    # --- manual keyframes -----------------------------------------------------------------
+    def onion_opacity(self) -> float:
+        return self.onion_slider.value() / 100.0
+
+    def manual_adjust(self) -> tuple[float, float, float, float]:
+        """The current sliders as ``(tx, ty, rotation, scale)`` for a keyframe (translation as a frame fraction)."""
+        return (
+            self.manual_x_slider.value() / 1000.0,
+            self.manual_y_slider.value() / 1000.0,
+            self.manual_rotation_slider.value() / 10.0,
+            1.0 + self.manual_zoom_slider.value() / 1000.0,
+        )
+
+    def set_manual_adjust(self, tx: float, ty: float, rotation: float, scale: float) -> None:
+        """Show ``(tx, ty, rotation, scale)`` on the sliders without emitting ``manualAdjustChanged``."""
+        values = (round(tx * 1000), round(ty * 1000), round(rotation * 10), round((scale - 1.0) * 1000))
+        for slider, value in zip(self.manual_sliders, values):
+            slider.blockSignals(True)
+            slider.slider.setValue(value)
+            slider.blockSignals(False)
+
+    def set_manual_info(self, text: str) -> None:
+        self.manual_info_label.setText(text)
+
     def set_controls_enabled(self, enabled: bool) -> None:
         for widget in (
             self.mode_combo,
@@ -309,6 +436,12 @@ class StabilizationTab(TabPage):
             self.reference_button,
             self.auto_crop_checkbox,
             self.zoom_out_checkbox,
+            self.onion_slider,
+            self.manual_reference_button,
+            *self.manual_sliders,
+            self.manual_prev_button,
+            self.manual_next_button,
+            self.manual_remove_button,
             self.deinterlace_combo,
             self.rolling_shutter_slider,
             self.wobble_checkbox,

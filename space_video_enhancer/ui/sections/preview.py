@@ -290,6 +290,7 @@ class PreviewSection(WindowState):
         self._update_denoise_info()
         self._update_exposure_info()
         self._update_capture_info()
+        self._refresh_manual_controls()  # show the interpolated transform for the frame that just landed
         if not self._main_preview_paused:
             self._update_hud()
         self._schedule_filter_thumbnails_refresh()
