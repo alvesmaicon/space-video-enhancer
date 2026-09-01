@@ -6,13 +6,12 @@ from collections.abc import Hashable
 
 from PySide6.QtCore import QRectF
 
-from space_video_enhancer.pipeline.deinterlace import likely_interlaced
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.grade import neutral_gains, white_patch_gains
 from space_video_enhancer.pipeline.stabilization.keyframes import interpolate_keyframes
 from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, MeshPath, corrections_for
 from space_video_enhancer.pipeline.stabilization.motion_path import MotionPath, fill_keyframes
-from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION, smoothing_time_constant
+from space_video_enhancer.pipeline.stabilization.stabilize import smoothing_time_constant
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, wobble_window_frames
 from space_video_enhancer.sequence import Clip
 from space_video_enhancer.settings import (
@@ -21,7 +20,6 @@ from space_video_enhancer.settings import (
     DEFAULT_STABILIZATION_RECT,
     DEFAULT_WHITE_BALANCE_RECT,
     NEUTRAL_GAINS,
-    DeinterlaceMode,
     DenoiseMode,
     FilterSettings,
     NormalizedRect,
@@ -563,14 +561,6 @@ class AdjustmentsSection(WindowState):
             return
         trace = self._last_preview.trace if self._last_preview is not None else {}
         facts: list[str] = []
-        comb = trace.get("deinterlace.comb")
-        if isinstance(comb, (int, float)):
-            if likely_interlaced(comb):
-                facts.append(f"Entrelaçamento provável: {comb:.1%} dos pixels com pente")
-                if self.stabilization_tab.deinterlace_mode() is DeinterlaceMode.OFF:
-                    facts.append("ative o desentrelaçamento")
-            else:
-                facts.append(f"Entrelaçamento improvável ({comb:.2%} com pente)")
         stabilization = self._current_stabilization()
         if stabilization.corrects_rolling_shutter_skew:
             shift = trace.get("rolling_shutter.shift_px")
@@ -773,12 +763,14 @@ class AdjustmentsSection(WindowState):
         track = self._mesh_track_for(clip)
         if track is None:
             return None
-        key = (id(track), round(stabilization.temporal_smoothing * 1000))
+        key = (id(track), round(stabilization.temporal_smoothing * 1000), round(stabilization.margin * 1000))
         corrections = self._mesh_corrections.get(key)
         if corrections is None:
             if len(self._mesh_corrections) > 8:
                 self._mesh_corrections.clear()  # slider sweeps must not hoard old fields
-            corrections = corrections_for(track, smoothing_time_constant(stabilization.temporal_smoothing))
+            corrections = corrections_for(
+                track, smoothing_time_constant(stabilization.temporal_smoothing), stabilization.margin
+            )
             self._mesh_corrections[key] = corrections
         return corrections
 
@@ -855,7 +847,7 @@ class AdjustmentsSection(WindowState):
 
         facts = [
             (
-                f"Crop automático ligado (margem fixa de {CORRECTION_BUDGET_FRACTION:.0%})"
+                f"Crop automático ligado (margem de {settings.margin:.0%}, zoom {1 / (1 - 2 * settings.margin):.2f}x)"
                 if settings.auto_crop
                 else "Crop automático desligado"
             ),

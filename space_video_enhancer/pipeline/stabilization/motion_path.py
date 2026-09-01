@@ -88,7 +88,7 @@ def analyze_motion_path(
     """Track frames ``first`` .. ``last`` (inclusive) and accumulate the camera path relative to ``first``.
 
     ``read(frame_index)`` returns the decoded frame or ``None`` (the stream ended early: the path stops
-    there). Frames are only tracked, never rendered, so deinterlacing never enters. ``progress(done, total)``
+    there). Frames are only tracked, never rendered. ``progress(done, total)``
     is called after each frame; ``cancelled()`` is polled between frames.
     """
     started = time.perf_counter()

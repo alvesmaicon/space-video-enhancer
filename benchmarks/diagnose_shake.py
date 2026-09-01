@@ -9,7 +9,8 @@ de leitura do sensor (o valor do slider de rolling shutter, estimado por regress
 nao chutado) e a energia de jello restante (o que a correcao automatica de oscilacao removeria).
 
 O relatorio final mapeia cada medida para os controles reais da aba Estabilizar: modo, suavizacao,
-slider de rolling shutter (%), oscilacao automatica, eixo de leitura e desentrelacamento.
+slider de rolling shutter (%), oscilacao automatica e eixo de leitura — mais um aviso quando o
+video parece entrelacado (o app nao desentrelaca; use ffmpeg antes).
 
 Exemplos:
 
@@ -27,7 +28,6 @@ from pathlib import Path
 
 import numpy as np
 
-from space_video_enhancer.pipeline.deinterlace import comb_score, likely_interlaced
 from space_video_enhancer.pipeline.stabilization.estimators import analysis_gray
 from space_video_enhancer.pipeline.stabilization.global_motion import (
     estimate_global_motion,
@@ -77,6 +77,29 @@ BANDS = (
     ("media (1,5-5 Hz — balanco da mao)", 1.5, 5.0),
     ("alta (>5 Hz — tremor/vibracao)", 5.0, 1e9),
 )
+
+
+COMB_THRESHOLD = 24
+LIKELY_INTERLACED_SCORE = 0.01
+"""Deteccao de entrelacamento (familia decomb/yadif): uma linha e 'pente' quando difere das duas
+vizinhas na mesma direcao, (a-b)*(c-b) > T^2. So diagnostico — o app nao desentrelaca."""
+
+
+def comb_score(frame: np.ndarray) -> float:
+    """Fracao amostrada de pixels com pente: ~0 em video progressivo, porcentos em entrelacado com movimento."""
+    height = frame.shape[0]
+    if height < 4:
+        return 0.0
+    luma = (frame[..., 1] if frame.ndim == 3 else frame).astype(np.int32)
+    rows = np.arange(1, height - 1, 8)
+    columns = slice(None, None, 4)
+    above, row, below = luma[rows - 1, columns], luma[rows, columns], luma[rows + 1, columns]
+    mask = (above - row) * (below - row) > COMB_THRESHOLD * COMB_THRESHOLD
+    return float(mask.mean()) if mask.size else 0.0
+
+
+def likely_interlaced(score: float) -> bool:
+    return score >= LIKELY_INTERLACED_SCORE
 
 
 def hann_trend(values: np.ndarray, half: int) -> np.ndarray:
@@ -345,7 +368,10 @@ def recommend(report: dict) -> list[str]:
         )
 
     if likely_interlaced(report["comb_score_max"]):
-        lines.append(f"Desentrelacar: Adaptativo — pente detectado (comb score {report['comb_score_max']:.3f}).")
+        lines.append(
+            f"ATENCAO: pente de entrelacamento detectado (comb score {report['comb_score_max']:.3f}) — "
+            "desentrelace fora do app (ex.: ffmpeg -vf bwdif) antes de estabilizar."
+        )
 
     if report["shake_peak_fraction"] > TRANSLATION_CAP_FRACTION:
         lines.append(

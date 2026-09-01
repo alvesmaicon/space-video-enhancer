@@ -18,7 +18,6 @@ import cv2
 import numpy as np
 
 from space_video_enhancer.pipeline import retime
-from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect, normalized_through_geometry
 from space_video_enhancer.pipeline.render import render_frame
@@ -201,11 +200,7 @@ def render_preview(
         seeks, sequential_reads = video.seeks, video.sequential_reads
         trace.note("decode.sequential", decode_sequential)
 
-    with trace.stage("capture"):  # on the native rows: a resize would blur the comb away and back
-        prepared, comb = prepare_source(frame, request.settings.capture.deinterlace)
-    trace.note("deinterlace.mode", request.settings.capture.deinterlace.value)
-    trace.note("deinterlace.comb", round(comb, 4))
-    source = downscale_to_limit(prepared, request.size_limit)
+    source = downscale_to_limit(frame, request.size_limit)
     if (
         request.settings.stabilization.corrects_rolling_shutter_skew
         and video is not None
@@ -216,10 +211,7 @@ def render_preview(
         with trace.stage("previous"):
             previous = video.read_frame(request.frame_index - 1)
         if previous is not None:
-            previous_prepared, _comb = prepare_source(previous, request.settings.capture.deinterlace)
-            prime_with_previous(
-                downscale_to_limit(previous_prepared, request.size_limit), request.frame_index - 1, state
-            )
+            prime_with_previous(downscale_to_limit(previous, request.size_limit), request.frame_index - 1, state)
     reference = request.stabilization_reference
     if reference is not None:
         reference = downscale_to_limit(reference, request.size_limit)
@@ -234,7 +226,6 @@ def render_preview(
         stabilization_reference=reference,
         backend=backend,
         trace=trace,
-        source_prepared=True,
         wobble_track=request.wobble_track,
         mesh_corrections=request.mesh_corrections,
     )

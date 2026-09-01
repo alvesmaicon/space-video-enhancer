@@ -1,8 +1,8 @@
-"""Tab "Estabilizar": mode, strength, smoothing, focal region, border handling — and the capture artefacts.
+"""Tab "Estabilizar": mode, strength, smoothing, margin, focal region — and the capture artefacts.
 
-The second group, "Artefatos de captura", holds what the sensor and the scan did to the frame:
-deinterlacing (first stage of the pipeline) and the rolling-shutter unskew (inside the
-stabilization stage, since it needs the same inter-frame motion). Both work with the mode off.
+The second group, "Artefatos de captura", holds what the sensor did to the frame: the
+rolling-shutter unskew (inside the stabilization stage, since it needs the same inter-frame
+motion). It works with the mode off.
 
 The focal region itself is edited directly on the preview whenever this tab is active
 and the mode uses a focal point; there is no separate "edit" toggle. The reference frame
@@ -16,8 +16,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton
 
 from space_video_enhancer.settings import (
-    CaptureSettings,
-    DeinterlaceMode,
     NormalizedRect,
     ReadoutAxis,
     StabilizationMode,
@@ -97,22 +95,6 @@ def _format_manual_degrees(value: int) -> str:
     return f"{value / 10:+.1f}°" if value else "0°"
 
 
-DEINTERLACE_OPTIONS: list[tuple[str, DeinterlaceMode]] = [
-    ("Desligado", DeinterlaceMode.OFF),
-    ("Automático (só onde há pente)", DeinterlaceMode.ADAPTIVE),
-    ("Campo único (meia resolução)", DeinterlaceMode.FIELD),
-]
-DEINTERLACE_DESCRIPTIONS: dict[DeinterlaceMode, str] = {
-    DeinterlaceMode.OFF: "Mantém os dois campos como estão.",
-    DeinterlaceMode.ADAPTIVE: (
-        "Onde as linhas pares e ímpares discordam (o pente que o movimento deixa), as ímpares são refeitas a "
-        "partir das pares; o que está parado fica intacto, com a resolução inteira."
-    ),
-    DeinterlaceMode.FIELD: (
-        "Descarta o campo ímpar em todo o frame e o reconstrói a partir do par: elimina qualquer pente, mas "
-        "reduz o detalhe vertical à metade."
-    ),
-}
 READOUT_AXIS_OPTIONS: list[tuple[str, ReadoutAxis]] = [
     ("Automático", ReadoutAxis.AUTO),
     ("Linhas (topo → base)", ReadoutAxis.ROWS),
@@ -158,6 +140,10 @@ def _format_signed_percent(value: int) -> str:
     return f"{value:+d}%" if value else "0%"
 
 
+def _format_margin(value: int) -> str:
+    return f"{value}% (zoom {1.0 / (1.0 - 2.0 * value / 100.0):.2f}x)"
+
+
 class StabilizationTab(TabPage):
     modeChanged = Signal()
     controlChanged = Signal()
@@ -193,6 +179,12 @@ class StabilizationTab(TabPage):
             "Intensidade da estabilização", 0, 100, DEFAULT_INTENSITY, display=format_percent
         )
         self.smoothing_slider = LabeledSlider("Suavização temporal", 0, 100, DEFAULT_SMOOTHING, display=format_percent)
+        self.margin_slider = LabeledSlider("Margem da estabilização", 5, 15, 5, display=_format_margin)
+        self.margin_slider.setToolTip(
+            "Quanto do quadro a correção pode usar de cada lado — é a mesma margem que o crop automático "
+            "recorta (zoom fixo). Mais margem = mais estabilização (menos correções batem no teto), "
+            "menos imagem. Medido em caminhada: 5% deixa 0,92% de tremor; 8%, 0,73%; 12%, 0,50%."
+        )
         self.smoothing_slider.setToolTip(
             "Quão devagar a câmera virtual segue a real: "
             "baixo remove só o tremor rápido, alto quase trava o enquadramento."
@@ -270,11 +262,6 @@ class StabilizationTab(TabPage):
         self.manual_info_label.setObjectName("hintLabel")
         self.manual_info_label.setWordWrap(True)
 
-        self.deinterlace_combo = enum_combo(DEINTERLACE_OPTIONS)
-        for index, (_label, deinterlace_mode) in enumerate(DEINTERLACE_OPTIONS):
-            self.deinterlace_combo.setItemData(
-                index, DEINTERLACE_DESCRIPTIONS[deinterlace_mode], Qt.ItemDataRole.ToolTipRole
-            )
         self.rolling_shutter_slider = LabeledSlider(
             "Correção de rolling shutter", -100, 100, 0, display=_format_signed_percent
         )
@@ -290,7 +277,6 @@ class StabilizationTab(TabPage):
         self.capture_info_label = QLabel()
         self.capture_info_label.setObjectName("hintLabel")
         self.capture_info_label.setWordWrap(True)
-        self.deinterlace_combo.currentIndexChanged.connect(self._handle_deinterlace_changed)
         self.rolling_shutter_slider.valueChanged.connect(lambda _value: self.captureChanged.emit())
         self.rolling_shutter_slider.resetRequested.connect(lambda: self.rolling_shutter_slider.setValue(0))
         self.readout_measure_button.clicked.connect(self.readoutMeasureRequested.emit)
@@ -300,6 +286,8 @@ class StabilizationTab(TabPage):
         self.mode_combo.currentIndexChanged.connect(self._handle_mode_changed)
         self.intensity_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
         self.smoothing_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
+        self.margin_slider.valueChanged.connect(lambda _value: self.controlChanged.emit())
+        self.margin_slider.resetRequested.connect(lambda: self.margin_slider.setValue(5))
         self.auto_crop_checkbox.toggled.connect(lambda _checked: self.controlChanged.emit())
         self.zoom_out_checkbox.toggled.connect(self._handle_zoom_out_toggled)
         self.reset_button.clicked.connect(self.resetRequested.emit)
@@ -339,6 +327,7 @@ class StabilizationTab(TabPage):
                 self.hint_label,
                 self.intensity_slider,
                 self.smoothing_slider,
+                self.margin_slider,
                 self.auto_crop_checkbox,
                 self.zoom_out_checkbox,
                 reference_buttons,
@@ -360,7 +349,6 @@ class StabilizationTab(TabPage):
             ),
             group_box(
                 "Artefatos de captura",
-                form_rows(("Desentrelaçar", self.deinterlace_combo)),
                 self.rolling_shutter_slider,
                 readout_measure_row,
                 self.wobble_checkbox,
@@ -369,7 +357,6 @@ class StabilizationTab(TabPage):
             ),
         )
         self._update_hint()
-        self._update_deinterlace_tooltip()
         self._update_readout_axis_tooltip()
 
     def mode(self) -> StabilizationMode:
@@ -380,6 +367,7 @@ class StabilizationTab(TabPage):
             mode=self.mode(),
             intensity=clamp_unit(self.intensity_slider.value() / 100.0),
             temporal_smoothing=clamp_unit(self.smoothing_slider.value() / 100.0),
+            margin=max(0.05, min(0.15, self.margin_slider.value() / 100.0)),
             focus_rect=focus_rect,
             auto_crop=self.auto_crop_checkbox.isChecked(),
             zoom_out=self.zoom_out_checkbox.isChecked(),
@@ -390,18 +378,6 @@ class StabilizationTab(TabPage):
 
     def readout_axis(self) -> ReadoutAxis:
         return combo_enum(self.readout_axis_combo, ReadoutAxis, ReadoutAxis.AUTO)
-
-    def deinterlace_mode(self) -> DeinterlaceMode:
-        return combo_enum(self.deinterlace_combo, DeinterlaceMode, DeinterlaceMode.OFF)
-
-    def apply_capture(self, capture: CaptureSettings) -> None:
-        """Show another clip's deinterlacing without emitting ``captureChanged`` (speed/retiming live in "Tempo")."""
-        self.deinterlace_combo.blockSignals(True)
-        try:
-            select_combo_data(self.deinterlace_combo, capture.deinterlace.value)
-        finally:
-            self.deinterlace_combo.blockSignals(False)
-        self._update_deinterlace_tooltip()
 
     def apply(self, settings: StabilizationSettings) -> None:
         """Show another clip's stabilization without emitting ``modeChanged``/``controlChanged``."""
@@ -422,6 +398,7 @@ class StabilizationTab(TabPage):
             select_combo_data(self.readout_axis_combo, settings.readout_axis.value)
             self.intensity_slider.slider.setValue(round(settings.intensity * 100))
             self.smoothing_slider.slider.setValue(round(settings.temporal_smoothing * 100))
+            self.margin_slider.slider.setValue(round(settings.margin * 100))
             self.rolling_shutter_slider.slider.setValue(round(settings.rolling_shutter * 100))
             set_checked_silently(self.wobble_checkbox, settings.rolling_shutter_auto)
             set_checked_silently(self.zoom_out_checkbox, settings.zoom_out)
@@ -442,6 +419,7 @@ class StabilizationTab(TabPage):
         auto_enabled = stabilization_enabled and not manual  # intensity/smoothing/crop belong to the estimated modes
         self.intensity_slider.setEnabled(auto_enabled)
         self.smoothing_slider.setEnabled(auto_enabled)
+        self.margin_slider.setEnabled(auto_enabled)
         zoom_out_enabled = auto_enabled and not mesh and self.zoom_out_checkbox.isChecked()
         self.auto_crop_checkbox.setEnabled(auto_enabled and not zoom_out_enabled)
         self.zoom_out_checkbox.setEnabled(auto_enabled and not mesh)  # a malha já é limitada à margem do crop
@@ -458,8 +436,7 @@ class StabilizationTab(TabPage):
             self.manual_fill_button,  # the window narrows this to "≥2 keyframes and not analysing"
         ):
             widget.setEnabled(manual_enabled)
-        self.deinterlace_combo.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
-        self.rolling_shutter_slider.setEnabled(controls_enabled)
+        self.rolling_shutter_slider.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.readout_measure_button.setEnabled(controls_enabled)
         wobble_moot = mode in (StabilizationMode.PERSPECTIVE, StabilizationMode.MESH)
         self.wobble_checkbox.setEnabled(controls_enabled and not wobble_moot)
@@ -512,6 +489,7 @@ class StabilizationTab(TabPage):
             self.mode_combo,
             self.intensity_slider,
             self.smoothing_slider,
+            self.margin_slider,
             self.reset_button,
             self.reference_button,
             self.auto_crop_checkbox,
@@ -523,20 +501,12 @@ class StabilizationTab(TabPage):
             self.manual_next_button,
             self.manual_remove_button,
             self.manual_fill_button,
-            self.deinterlace_combo,
             self.rolling_shutter_slider,
             self.readout_measure_button,
             self.wobble_checkbox,
             self.readout_axis_combo,
         ):
             widget.setEnabled(enabled)
-
-    def _handle_deinterlace_changed(self, _index: int) -> None:
-        self._update_deinterlace_tooltip()
-        self.captureChanged.emit()
-
-    def _update_deinterlace_tooltip(self) -> None:
-        self.deinterlace_combo.setToolTip(DEINTERLACE_DESCRIPTIONS[self.deinterlace_mode()])
 
     def _handle_readout_axis_changed(self, _index: int) -> None:
         self._update_readout_axis_tooltip()

@@ -41,14 +41,6 @@ class StabilizationMode(str, Enum):
         return self in (StabilizationMode.AUTO, StabilizationMode.SIMILARITY, StabilizationMode.PERSPECTIVE)
 
 
-class DeinterlaceMode(str, Enum):
-    OFF = "off"
-    ADAPTIVE = "adaptive"
-    """Interpolate only the pixels where the two fields disagree (combing); static areas keep full resolution."""
-    FIELD = "field"
-    """Keep one field and interpolate the other everywhere: removes all combing at half the vertical detail."""
-
-
 class RetimingMode(str, Enum):
     """How a clip whose fps differs from the timeline is resampled onto it (see ``pipeline.retime``)."""
 
@@ -296,6 +288,10 @@ class StabilizationSettings:
     (see :attr:`applies_wobble`)."""
     readout_axis: ReadoutAxis = ReadoutAxis.AUTO
     """Along which axis of the frame the distortion varies (both corrections use it)."""
+    margin: float = 0.05
+    """Correction budget per side, and the fixed inset the automatic crop removes (0.05 .. 0.15).
+    Wider = smoother (fewer corrections saturate; measured on walking footage: 5% -> 0.92% RMS,
+    8% -> 0.73%, 12% -> 0.50%) at the cost of a bigger constant zoom (1/(1-2*margin))."""
 
     def __post_init__(self) -> None:
         if self.keyframes:
@@ -359,9 +355,8 @@ SPEED_MAX = 4.0
 
 @dataclass(frozen=True)
 class CaptureSettings:
-    """Artefacts of how the frame was captured, undone before anything else looks at it."""
+    """How the clip's frames map onto the timeline (fps resampling, speed, audio)."""
 
-    deinterlace: DeinterlaceMode = DeinterlaceMode.OFF
     retiming: RetimingMode = RetimingMode.NEAREST
     """How this clip is resampled when its fps differs from the timeline's (no effect when they match)."""
     speed: float = 1.0

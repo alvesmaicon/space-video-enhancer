@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
+from space_video_enhancer.pipeline.stabilization import transforms
 from space_video_enhancer.pipeline.stabilization.mesh import (
     CORRECTION_LIMIT_FRACTION,
     VERTEX_COLUMNS,
@@ -187,3 +188,23 @@ def test_mesh_settings_flags() -> None:
     assert not settings.requires_sequential_processing, "per-frame fields keep the export parallel"
     assert not settings.applies_wobble, "the mesh already absorbs the wobble (measured: correcting twice deforms)"
     assert not settings.mode.uses_auto_motion and not settings.mode.uses_focal_point
+
+
+def test_margin_setting_widens_the_mesh_budget_and_the_crop() -> None:
+    count = 40
+    dx = np.tile((0.09 * np.sin(np.arange(count)))[:, None, None], (1, VERTEX_ROWS, VERTEX_COLUMNS))
+    path = MeshPath(
+        Path("clip.mp4"), 0, dx.astype(np.float32), np.zeros_like(dx, dtype=np.float32), np.ones(count, dtype=bool)
+    )
+    tight = mesh_correction(path, smoothing_frames=4.0, limit=0.05)
+    wide = mesh_correction(path, smoothing_frames=4.0, limit=0.12)
+    assert float(np.abs(tight).max()) <= 0.05 + 1e-6
+    assert 0.05 < float(np.abs(wide).max()) <= 0.12 + 1e-6, "a wider margin lets more correction through"
+
+    frame = _canvas(0)[:HEIGHT, :WIDTH]
+
+    for margin in (0.05, 0.12):
+        settings = StabilizationSettings(mode=StabilizationMode.MESH, margin=margin)
+        output = apply_stabilization(frame, settings, frame_index=0, mesh_corrections=None)
+        expected = transforms.stabilization_crop(frame, None, margin)
+        assert np.array_equal(output, expected), f"the crop follows the margin setting ({margin})"

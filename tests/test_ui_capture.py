@@ -1,4 +1,4 @@
-"""Capture artefacts in the UI (deinterlace, rolling shutter) and the hand tool that pans a zoomed preview."""
+"""Capture artefacts in the UI (rolling shutter) and the hand tool that pans a zoomed preview."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.project import load_project
 from space_video_enhancer.sequence import Clip, ClipSource
 from space_video_enhancer.settings import (
-    DeinterlaceMode,
     ReadoutAxis,
     RenderSettings,
     RetimingMode,
@@ -40,21 +39,14 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     app: QApplication, window: MainWindow, ui_video: Path, tmp_path: Path
 ) -> None:
     tab = window.stabilization_tab
-    assert not tab.deinterlace_combo.isEnabled(), "no video yet"
+    assert not tab.rolling_shutter_slider.isEnabled(), "no video yet"
     _open(app, window, ui_video)
-    assert tab.deinterlace_combo.isEnabled() and tab.rolling_shutter_slider.isEnabled()
+    assert tab.rolling_shutter_slider.isEnabled()
     assert tab.mode_combo.currentData() == "off", "capture fixes do not need a stabilization mode"
-    assert "Entrelaçamento improvável" in tab.capture_info_label.text(), "the synthetic video is progressive"
 
-    select_combo_data(tab.deinterlace_combo, DeinterlaceMode.FIELD.value)
-    wait_for_preview(app, window)
-    clip = window.sequence.clips[0]
-    assert clip.settings.capture.deinterlace is DeinterlaceMode.FIELD
     select_combo_data(window.tempo_tab.retiming_combo, RetimingMode.BLEND.value)
     wait_for_preview(app, window)
     assert window.sequence.clips[0].settings.capture.retiming is RetimingMode.BLEND
-    trace = window._last_preview.trace
-    assert trace["deinterlace.mode"] == "field" and "capture" in trace["stages"]
     assert window.undo_action.text().endswith("captura"), window.undo_action.text()
 
     tab.rolling_shutter_slider.setValue(70)
@@ -84,11 +76,10 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     project_path = tmp_path / "capture.svep"
     assert window._write_project(project_path)
     loaded = load_project(project_path).sequence.clips[0].settings
-    assert loaded.capture.deinterlace is DeinterlaceMode.FIELD and loaded.stabilization.rolling_shutter == 0.7
+    assert loaded.stabilization.rolling_shutter == 0.7
     assert loaded.stabilization.rolling_shutter_auto and loaded.stabilization.readout_axis is ReadoutAxis.COLUMNS
     assert loaded.capture.retiming is RetimingMode.BLEND
 
-    select_combo_data(tab.deinterlace_combo, DeinterlaceMode.OFF.value)
     tab.rolling_shutter_slider.setValue(0)
     tab.wobble_checkbox.setChecked(False)
     select_combo_data(tab.readout_axis_combo, ReadoutAxis.AUTO.value)
@@ -97,7 +88,7 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     _open(app, window, ui_video)
     assert window._open_project(project_path)
     wait_for_preview(app, window)
-    assert tab.deinterlace_combo.currentData() == "field" and tab.rolling_shutter_slider.value() == 70
+    assert tab.rolling_shutter_slider.value() == 70
     assert tab.wobble_checkbox.isChecked() and tab.readout_axis_combo.currentData() == "columns"
     assert window.tempo_tab.retiming_combo.currentData() == "blend"
 

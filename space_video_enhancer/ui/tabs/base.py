@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
 
 from space_video_enhancer.settings import (
     AnonymizeMode,
-    DeinterlaceMode,
     DenoiseMode,
     PreviewRenderMode,
     ReadoutAxis,
@@ -34,7 +33,6 @@ E = TypeVar(
     StabilizationMode,
     RotationMode,
     PreviewRenderMode,
-    DeinterlaceMode,
     CompareMode,
     ReadoutAxis,
     RetimingMode,

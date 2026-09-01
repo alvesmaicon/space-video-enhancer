@@ -40,7 +40,7 @@ SMOOTHING_MAX_FRAMES = 60.0
 LOCK_SMOOTHING_MAX = 0.7
 """At smoothing 1 a fresh camera-lock estimate replaces only 30% of the previous correction."""
 CORRECTION_BUDGET_FRACTION = 0.05
-"""Cap on the accumulated translation per axis, and the fixed margin of the automatic crop."""
+"""Default of ``StabilizationSettings.margin``: correction budget per axis = the automatic crop inset."""
 HYBRID_RELEASE_FRAMES = 30.0
 HYBRID_REACQUIRE_WEIGHT = 0.5
 HYBRID_REACQUIRE_FRAMES = 6
@@ -106,7 +106,7 @@ def apply_stabilization(
         elif settings.auto_crop and not settings.uses_manual_keyframes:
             # The crop below must never change size between frames (constant zoom), so the correction
             # saturates at the margin — rotation/zoom/keystone can escape it even with the translation capped.
-            fitted = transforms.fit_within_margin(blended, frame.shape, CORRECTION_BUDGET_FRACTION)
+            fitted = transforms.fit_within_margin(blended, frame.shape, settings.margin)
             if fitted is not blended:
                 note("stabilization.margin_fit", 1)
                 blended = fitted
@@ -122,7 +122,7 @@ def apply_stabilization(
         # Always, even without a correction: the zoom must not pop in and out between frames. Manual mode
         # is exempt: its corrections are not capped at the margin, so cropping to the valid area would zoom
         # and skew the frame away from the 1:1 ghost the user aligns against — it must move, not crop.
-        stabilized = transforms.stabilization_crop(stabilized, applied, CORRECTION_BUDGET_FRACTION)
+        stabilized = transforms.stabilization_crop(stabilized, applied, settings.margin)
     return stabilized
 
 
@@ -148,7 +148,7 @@ def _apply_mesh_mode(
         scaled = field if settings.intensity >= 1.0 else field * settings.intensity
         stabilized = apply_mesh(frame, scaled)
     if settings.auto_crop:
-        stabilized = transforms.stabilization_crop(stabilized, None, CORRECTION_BUDGET_FRACTION)
+        stabilized = transforms.stabilization_crop(stabilized, None, settings.margin)
     return stabilized
 
 
@@ -319,7 +319,7 @@ def follow_smoothed_path(
     correction = transforms.mix_transforms(
         transforms.identity_like(accumulated), accumulated, path_decay(settings.temporal_smoothing) ** gap
     )
-    correction = transforms.clamp_translation(correction, frame.shape, CORRECTION_BUDGET_FRACTION)
+    correction = transforms.clamp_translation(correction, frame.shape, settings.margin)
     if not transforms.is_reasonable(correction, frame.shape, allow_perspective=not transforms.is_affine(correction)):
         note("stabilization.rejected", "accumulated")
         return None

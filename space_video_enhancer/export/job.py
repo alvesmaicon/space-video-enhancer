@@ -29,7 +29,6 @@ import numpy as np
 
 from space_video_enhancer.export.ffmpeg import AudioSegment, EncoderChoice, build_export_command, source_has_audio
 from space_video_enhancer.pipeline import retime
-from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend, ProcessingContext
 from space_video_enhancer.pipeline.geometry import ensure_even_size, fit_to_canvas
 from space_video_enhancer.pipeline.render import build_context, render_frame
@@ -365,7 +364,7 @@ class _ClipRenderer:
         self.mesh_corrections: MeshCorrections | None = None
         if mesh_track is not None and clip.settings.stabilization.needs_mesh_analysis:
             smoothing = smoothing_time_constant(clip.settings.stabilization.temporal_smoothing)
-            self.mesh_corrections = corrections_for(mesh_track, smoothing)
+            self.mesh_corrections = corrections_for(mesh_track, smoothing, clip.settings.stabilization.margin)
 
 
 def _analyze_clip_wobble(
@@ -617,8 +616,7 @@ def _run_export(
         if settings.stabilization.corrects_rolling_shutter_skew and needs_previous_frame(renderer.state, frame_index):
             previous = readers.read(sequence.clips[clip_index].source.path, frame_index - 1)
             if previous is not None:
-                previous_prepared, _comb = prepare_source(previous, settings.capture.deinterlace)
-                prime_with_previous(previous_prepared, frame_index - 1, renderer.state)
+                prime_with_previous(previous, frame_index - 1, renderer.state)
 
     def process(frame: np.ndarray, clip_index: int, frame_index: int, sequential: bool) -> np.ndarray:
         renderer = renderers[clip_index]

@@ -129,7 +129,7 @@ class WindowState(QMainWindow):
     """Mesh stabilization analyses done so far (one per source range); see ``_mesh_track_for``."""
     _mesh_pending: list[MeshAnalysisRequest]
     _mesh_progress: dict[int, tuple[int, int]]
-    _mesh_corrections: dict[tuple[int, int], MeshCorrections]
+    _mesh_corrections: dict[tuple[int, int, int], MeshCorrections]
     """Correction fields per ``(id(track), smoothing per mil)``: recomputed when the slider moves."""
     _readout_measure_pending: set[tuple[Path, int, int]]
     """Clip ranges whose 'Medir do clipe' waits for the wobble analysis; filled when it lands."""

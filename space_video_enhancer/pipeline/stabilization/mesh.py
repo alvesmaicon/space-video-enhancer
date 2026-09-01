@@ -223,14 +223,20 @@ def _centred_smooth(values: np.ndarray, half: int) -> np.ndarray:
     return (smoothed / weight[:, None]).reshape(values.shape)
 
 
-def mesh_correction(path: MeshPath, smoothing_frames: float, *, spatial_passes: int = SPATIAL_PASSES) -> np.ndarray:
+def mesh_correction(
+    path: MeshPath,
+    smoothing_frames: float,
+    *,
+    spatial_passes: int = SPATIAL_PASSES,
+    limit: float = CORRECTION_LIMIT_FRACTION,
+) -> np.ndarray:
     """Per-frame vertex displacements (fractions) that put every vertex on its smoothed path.
 
     ``smoothing_frames`` is the virtual camera's time constant (the smoothing slider, see
     ``stabilize.smoothing_time_constant``): each vertex path is replaced by its centred moving
     average over that many frames on each side, and the correction is the difference. The field is
     then blurred across the grid (``spatial_passes``) so neighbouring vertices agree, and
-    clamped to :data:`CORRECTION_LIMIT_FRACTION` so the fixed crop always hides it.
+    clamped to ``limit`` (the stabilization margin) so the fixed crop always hides it.
 
     Returns ``(count, VERTEX_ROWS, VERTEX_COLUMNS, 2)`` float32, ``[..., 0]`` = x fraction.
     """
@@ -240,7 +246,7 @@ def mesh_correction(path: MeshPath, smoothing_frames: float, *, spatial_passes: 
     for index in range(len(correction)):
         for _ in range(spatial_passes):
             correction[index] = cv2.blur(correction[index].astype(np.float32), (3, 3), borderType=cv2.BORDER_REPLICATE)
-    return np.clip(correction, -CORRECTION_LIMIT_FRACTION, CORRECTION_LIMIT_FRACTION).astype(np.float32)
+    return np.clip(correction, -limit, limit).astype(np.float32)
 
 
 @dataclass(frozen=True)
@@ -262,9 +268,11 @@ class MeshCorrections:
         return self.fields[offset]
 
 
-def corrections_for(path: MeshPath, smoothing_frames: float) -> MeshCorrections:
-    """The clip's correction fields for one smoothing setting (see :func:`mesh_correction`)."""
-    return MeshCorrections(path.first_frame, mesh_correction(path, smoothing_frames))
+def corrections_for(
+    path: MeshPath, smoothing_frames: float, limit: float = CORRECTION_LIMIT_FRACTION
+) -> MeshCorrections:
+    """The clip's correction fields for one smoothing and margin (see :func:`mesh_correction`)."""
+    return MeshCorrections(path.first_frame, mesh_correction(path, smoothing_frames, limit=limit))
 
 
 def apply_mesh(frame: np.ndarray, correction: np.ndarray) -> np.ndarray:

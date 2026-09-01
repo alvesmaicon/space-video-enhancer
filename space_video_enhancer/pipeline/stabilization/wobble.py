@@ -232,8 +232,8 @@ def analyze_wobble(
     """Track the motion through frames ``first`` .. ``last`` (inclusive) of ``source`` and record each change of wobble.
 
     ``read(frame_index)`` returns the decoded frame or ``None`` (the stream ended early: the track stops
-    there). The frames are only tracked, never rendered, so deinterlacing does not enter — the comb of
-    an interlaced frame vanishes at the analysis size. Both readout axes are measured; ``rotation`` (the
+    there). The frames are only tracked, never rendered, at the estimator's analysis size.
+    Both readout axes are measured; ``rotation`` (the
     file's, in degrees) breaks the tie when neither carries wobble. ``progress(done, total)`` is called
     after every frame; ``cancelled()`` is polled between frames.
     """
