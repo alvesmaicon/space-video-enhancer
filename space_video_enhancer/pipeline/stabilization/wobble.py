@@ -63,7 +63,7 @@ def filter_wobble(changes: np.ndarray, displacements: np.ndarray, readout_fracti
     length; the result is clamped to :data:`MAX_WOBBLE_FRACTION`.
     """
     total = np.cumsum(np.asarray(changes, dtype=np.float64), axis=0)
-    if readout_fraction > 0.0:
+    if readout_fraction != 0.0:
         total = total - readout_fraction * np.asarray(displacements, dtype=np.float64)
     count = len(total)
     if count == 0:
@@ -189,6 +189,24 @@ class WobbleTrack:
     def correlation(self, axis: ReadoutAxis) -> float:
         """See :func:`readout_correlation`: the rolling-shutter signature of ``axis`` in this range."""
         return readout_correlation(self.changes(axis), self.displacements, self.measured)
+
+    def readout_fraction_estimate(self, axis: ReadoutAxis) -> float:
+        """The signed readout fraction the footage implies: the slider value, measured instead of guessed.
+
+        Least-squares slope (through the origin) of the gradient changes against the camera's acceleration
+        (``change = r · (v_k - v_{k-1})``, see :func:`readout_correlation`). Negative means the sensor read
+        against the frame's axis — some phones recorded upright do. ``0.0`` when the range holds too little
+        motion to tell.
+        """
+        both = self.measured[1:] & self.measured[:-1]
+        if int(both.sum()) < AXIS_MIN_SAMPLES:
+            return 0.0
+        acceleration = (self.displacements[1:] - self.displacements[:-1])[both].ravel()
+        gradient = self.changes(axis)[1:][both].ravel()
+        denominator = float(np.dot(acceleration, acceleration))
+        if denominator < 1e-9:
+            return 0.0
+        return float(np.clip(np.dot(gradient, acceleration) / denominator, -1.0, 1.0))
 
 
 @dataclass(frozen=True)

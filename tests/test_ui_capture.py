@@ -8,10 +8,12 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+import numpy as np
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.project import load_project
 from space_video_enhancer.sequence import Clip, ClipSource
 from space_video_enhancer.settings import (
@@ -19,6 +21,7 @@ from space_video_enhancer.settings import (
     ReadoutAxis,
     RenderSettings,
     RetimingMode,
+    StabilizationMode,
     StabilizationSettings,
 )
 from space_video_enhancer.timeline import FrameRange
@@ -204,3 +207,72 @@ def test_the_analysis_queue_keeps_running_work_and_takes_the_newest_next(app: QA
 
 def _key_event(key: Qt.Key) -> QKeyEvent:
     return QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+
+
+def _track_with_fraction(readout: float, source: Path, count: int = 12) -> WobbleTrack:
+    """A wobble track whose gradients follow the camera's acceleration with slope ``readout`` (noise-free)."""
+    rng = np.random.default_rng(9)
+    velocities = np.cumsum(rng.normal(0.0, 2.0, (count, 2)), axis=0)
+    changes = np.zeros((count, 2))
+    changes[1:] = readout * (velocities[1:] - velocities[:-1])
+    return WobbleTrack(
+        source=source,
+        first_frame=0,
+        row_changes=changes,
+        column_changes=np.zeros((count, 2)),
+        displacements=velocities,
+        measured=np.ones(count, dtype=bool),
+        analysis_size=(480, 270),
+        rotation=0,
+        window=6,
+        detected_axis=ReadoutAxis.ROWS,
+    )
+
+
+def test_rolling_shutter_slider_accepts_a_negative_measured_fraction(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    tab = window.stabilization_tab
+    _open(app, window, ui_video)
+    tab.rolling_shutter_slider.setValue(-35)
+    wait_for_preview(app, window)
+    settings = window.sequence.clips[0].settings.stabilization
+    assert settings.rolling_shutter == pytest.approx(-0.35)
+    assert settings.corrects_rolling_shutter_skew and settings.corrects_rolling_shutter
+    tab.apply(settings)
+    assert tab.rolling_shutter_slider.value() == -35, "a negative fraction survives the apply round-trip"
+
+
+def test_measure_button_fills_the_slider_with_the_signed_fraction(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    tab = window.stabilization_tab
+    _open(app, window, ui_video)
+    window._wobble_tracks.append(_track_with_fraction(-0.28, ui_video))  # stands in for a finished analysis
+    tab.readout_measure_button.click()
+    wait_for_preview(app, window)
+    assert tab.rolling_shutter_slider.value() == -28
+    settings = window.sequence.clips[0].settings.stabilization
+    assert settings.rolling_shutter == pytest.approx(-0.28)
+
+
+def test_wobble_is_unavailable_under_perspective_and_comes_back(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    tab = window.stabilization_tab
+    _open(app, window, ui_video)
+    tab.wobble_checkbox.setChecked(True)
+    wait_until(app, lambda: not window._wobble_pending and bool(window._wobble_tracks), what="wobble analysis")
+    wait_for_preview(app, window)
+
+    select_combo_data(tab.mode_combo, StabilizationMode.PERSPECTIVE.value)
+    wait_for_preview(app, window)
+    assert not tab.wobble_checkbox.isEnabled(), "perspective absorbs the wobble: the checkbox is moot"
+    settings = window.sequence.clips[0].settings.stabilization
+    assert settings.rolling_shutter_auto and not settings.applies_wobble
+    assert "absorvida" in tab.capture_info_label.text(), tab.capture_info_label.text()
+
+    select_combo_data(tab.mode_combo, StabilizationMode.SIMILARITY.value)
+    wait_for_preview(app, window)
+    assert tab.wobble_checkbox.isEnabled() and tab.wobble_checkbox.isChecked()
+    assert window.sequence.clips[0].settings.stabilization.applies_wobble

@@ -139,7 +139,9 @@ def unskew_rolling_shutter(
             gradient_x += displacement[0] * settings.rolling_shutter
             gradient_y += displacement[1] * settings.rolling_shutter
             contributions += 1
-    if settings.rolling_shutter_auto:
+    if settings.rolling_shutter_auto and not settings.applies_wobble:
+        note("rolling_shutter.wobble", "absorbed_by_perspective")
+    if settings.applies_wobble:
         wobble = None
         if wobble_track is not None and frame_index is not None:
             wobble = wobble_track.wobble_at(frame_index, settings.rolling_shutter, axis)
@@ -267,6 +269,10 @@ def follow_smoothed_path(
         delta = transforms.identity_like(previous)
     else:
         note("stabilization.path", "follow")
+        # The homography delta is followed 1:1 on purpose: damping its non-similarity part (tried once,
+        # time constant 12 frames) let the real fast keystone of walking footage through — the measured
+        # trapezoid of the output went from 1.9 back to 7.7 px/pair. The fast keystone is distortion,
+        # not estimator noise; what a global warp cannot fix is parallax (see docs/PLANO-MESHFLOW.md).
 
     base = previous if previous is not None else transforms.identity_like(delta)
     accumulated = transforms.compose(base, delta)

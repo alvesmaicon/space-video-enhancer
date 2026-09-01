@@ -24,6 +24,7 @@ from space_video_enhancer.settings import (
     DenoiseMode,
     FilterSettings,
     NormalizedRect,
+    ReadoutAxis,
     StabilizationKeyframe,
     StabilizationMode,
 )
@@ -574,7 +575,9 @@ class AdjustmentsSection(WindowState):
                 facts.append("rolling shutter: sem movimento mensurável neste frame (primeiro frame ou sem textura)")
             else:
                 facts.append("rolling shutter: aguardando o render")
-        if stabilization.rolling_shutter_auto:
+        if stabilization.rolling_shutter_auto and not stabilization.applies_wobble:
+            facts.append("oscilação: já absorvida pelo modo de perspectiva (a caixa fica sem efeito)")
+        elif stabilization.applies_wobble:
             facts.append(self._wobble_status_text(trace))
         if stabilization.corrects_rolling_shutter:
             facts.append(self._readout_axis_text(trace))
@@ -627,6 +630,28 @@ class AdjustmentsSection(WindowState):
         )
         self._update_capture_info()
         return None
+
+    def _measure_readout_fraction(self) -> None:
+        """Fill the rolling-shutter slider with the signed readout fraction the clip's analysis measured."""
+        clip = self.active_clip
+        if clip is None:
+            return
+        track = self._wobble_track_for(clip)
+        if track is None:  # queued (or just started): the progress shows below the slider
+            self.status.show_message("A análise do trecho precisa terminar primeiro — clique de novo quando acabar.")
+            return
+        settings = self._current_stabilization()
+        axis = settings.readout_axis if settings.readout_axis is not ReadoutAxis.AUTO else track.detected_axis
+        fraction = track.readout_fraction_estimate(axis)
+        if fraction == 0.0:
+            self.status.show_message("O trecho não tem movimento suficiente para medir a fração de leitura.")
+            return
+        log_event(LOG, "ui.readout_fraction_measured", clip=clip.name, axis=axis.value, fraction=round(fraction, 3))
+        self.stabilization_tab.rolling_shutter_slider.setValue(round(fraction * 100))  # emits captureChanged
+        self.status.show_message(
+            f"Fração de leitura medida no trecho: {fraction * 100:+.0f}%"
+            + (" (sensor lendo no sentido inverso do quadro)" if fraction < 0 else "")
+        )
 
     def _pending_analysis_for_active_clip(self) -> WobbleAnalysisRequest | None:
         clip = self.active_clip

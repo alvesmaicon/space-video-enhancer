@@ -54,7 +54,8 @@ MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
         "Como o automático, compensando também rotação leve e pequenas variações de escala."
     ),
     StabilizationMode.PERSPECTIVE: (
-        "Como o automático, com uma homografia global para parallax leve e pequenas mudanças de perspectiva."
+        "Como o automático, com uma homografia global para parallax leve e pequenas mudanças de perspectiva; "
+        "também absorve a inclinação/oscilação do rolling shutter."
     ),
     StabilizationMode.CAMERA_LOCK: (
         "Mantém a região verde (arraste-a no preview) presa a onde ela estava no frame de referência; "
@@ -131,11 +132,25 @@ WOBBLE_TOOLTIP = (
     "corrigido, sem precisar do percentual de leitura. Não corrige a inclinação constante de uma panorâmica — "
     "para essa, use o slider."
 )
+WOBBLE_PERSPECTIVE_TOOLTIP = (
+    "Indisponível com o modo de perspectiva: a homografia dele já absorve a mesma inclinação/oscilação a cada "
+    "frame — corrigir duas vezes deforma a imagem em vez de firmá-la."
+)
 ROLLING_SHUTTER_TOOLTIP = (
     "Desfaz a inclinação que o sensor deixa quando a câmera se move (postes que tombam, imagem que estica): "
     "cada linha é reposicionada pelo movimento medido entre frames. O valor é quanto do intervalo entre "
-    "frames o sensor gasta lendo a imagem — 60 a 80% é típico; ajuste até as verticais ficarem retas."
+    "frames o sensor gasta lendo a imagem — 60 a 80% é típico; negativo quando o sensor lê no sentido "
+    "contrário ao do quadro (alguns celulares gravando em pé). Use 'Medir do clipe' para preencher com o "
+    "valor que a análise do trecho encontrou, ou ajuste até as verticais ficarem retas."
 )
+READOUT_MEASURE_TOOLTIP = (
+    "Analisa o trecho do clipe (a mesma análise da oscilação) e preenche o slider com a fração de leitura "
+    "medida, com o sinal certo — a regressão da distorção contra a aceleração da câmera."
+)
+
+
+def _format_signed_percent(value: int) -> str:
+    return f"{value:+d}%" if value else "0%"
 
 
 class StabilizationTab(TabPage):
@@ -148,6 +163,8 @@ class StabilizationTab(TabPage):
     """Make the frame on screen the camera-lock reference; the focal region stays where it is."""
     captureChanged = Signal()
     """Deinterlacing or the rolling-shutter correction changed."""
+    readoutMeasureRequested = Signal()
+    """Fill the rolling-shutter slider with the readout fraction measured from the clip's analysis."""
     manualAdjustChanged = Signal()
     """An X/Y/rotation/zoom slider moved: set (or update) the keyframe at the current frame."""
     manualReferenceRequested = Signal()
@@ -253,8 +270,13 @@ class StabilizationTab(TabPage):
             self.deinterlace_combo.setItemData(
                 index, DEINTERLACE_DESCRIPTIONS[deinterlace_mode], Qt.ItemDataRole.ToolTipRole
             )
-        self.rolling_shutter_slider = LabeledSlider("Correção de rolling shutter", 0, 100, 0, display=format_percent)
+        self.rolling_shutter_slider = LabeledSlider(
+            "Correção de rolling shutter", -100, 100, 0, display=_format_signed_percent
+        )
         self.rolling_shutter_slider.setToolTip(ROLLING_SHUTTER_TOOLTIP)
+        self.readout_measure_button = QPushButton("Medir do clipe")
+        self.readout_measure_button.setObjectName("secondaryButton")
+        self.readout_measure_button.setToolTip(READOUT_MEASURE_TOOLTIP)
         self.wobble_checkbox = QCheckBox("Compensar a oscilação do rolling shutter (jello) automaticamente")
         self.wobble_checkbox.setToolTip(WOBBLE_TOOLTIP)
         self.readout_axis_combo = enum_combo(READOUT_AXIS_OPTIONS)
@@ -265,6 +287,8 @@ class StabilizationTab(TabPage):
         self.capture_info_label.setWordWrap(True)
         self.deinterlace_combo.currentIndexChanged.connect(self._handle_deinterlace_changed)
         self.rolling_shutter_slider.valueChanged.connect(lambda _value: self.captureChanged.emit())
+        self.rolling_shutter_slider.resetRequested.connect(lambda: self.rolling_shutter_slider.setValue(0))
+        self.readout_measure_button.clicked.connect(self.readoutMeasureRequested.emit)
         self.wobble_checkbox.toggled.connect(lambda _checked: self.captureChanged.emit())
         self.readout_axis_combo.currentIndexChanged.connect(self._handle_readout_axis_changed)
 
@@ -299,6 +323,9 @@ class StabilizationTab(TabPage):
         manual_fill_row = QHBoxLayout()
         manual_fill_row.addWidget(self.manual_fill_button)
         manual_fill_row.addStretch(1)
+        readout_measure_row = QHBoxLayout()
+        readout_measure_row.addWidget(self.readout_measure_button)
+        readout_measure_row.addStretch(1)
 
         self.add_sections(
             group_box(
@@ -330,6 +357,7 @@ class StabilizationTab(TabPage):
                 "Artefatos de captura",
                 form_rows(("Desentrelaçar", self.deinterlace_combo)),
                 self.rolling_shutter_slider,
+                readout_measure_row,
                 self.wobble_checkbox,
                 form_rows(("Leitura do sensor", self.readout_axis_combo)),
                 self.capture_info_label,
@@ -350,7 +378,7 @@ class StabilizationTab(TabPage):
             focus_rect=focus_rect,
             auto_crop=self.auto_crop_checkbox.isChecked(),
             zoom_out=self.zoom_out_checkbox.isChecked(),
-            rolling_shutter=clamp_unit(self.rolling_shutter_slider.value() / 100.0),
+            rolling_shutter=max(-1.0, min(1.0, self.rolling_shutter_slider.value() / 100.0)),
             rolling_shutter_auto=self.wobble_checkbox.isChecked(),
             readout_axis=self.readout_axis(),
         )
@@ -426,7 +454,12 @@ class StabilizationTab(TabPage):
             widget.setEnabled(manual_enabled)
         self.deinterlace_combo.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.rolling_shutter_slider.setEnabled(controls_enabled)
-        self.wobble_checkbox.setEnabled(controls_enabled)
+        self.readout_measure_button.setEnabled(controls_enabled)
+        wobble_available = controls_enabled and mode is not StabilizationMode.PERSPECTIVE
+        self.wobble_checkbox.setEnabled(wobble_available)
+        self.wobble_checkbox.setToolTip(
+            WOBBLE_TOOLTIP if mode is not StabilizationMode.PERSPECTIVE else WOBBLE_PERSPECTIVE_TOOLTIP
+        )
         self.readout_axis_combo.setEnabled(controls_enabled)
 
     def set_info(self, text: str) -> None:
@@ -488,6 +521,7 @@ class StabilizationTab(TabPage):
             self.manual_fill_button,
             self.deinterlace_combo,
             self.rolling_shutter_slider,
+            self.readout_measure_button,
             self.wobble_checkbox,
             self.readout_axis_combo,
         ):

@@ -285,10 +285,12 @@ class StabilizationSettings:
     keyframes: tuple[StabilizationKeyframe, ...] = ()
     """Manual mode only: the hand-set corrections, kept sorted by frame (see :meth:`__post_init__`)."""
     rolling_shutter: float = 0.0
-    """Rolling-shutter skew to undo, as the sensor readout time over the frame period (0 = off, 1 = a full frame)."""
+    """Rolling-shutter skew to undo, as the sensor readout time over the frame period (0 = off, ±1 = a full
+    frame). Negative when the sensor reads against the frame's axis — some phones recorded upright do."""
     rolling_shutter_auto: bool = False
     """Also undo the *wobble* (jello): the clip is analysed once (see :mod:`pipeline.stabilization.wobble`) and
-    each frame gets the distortion measured for it; needs no readout time."""
+    each frame gets the distortion measured for it; needs no readout time. Ignored under PERSPECTIVE
+    (see :attr:`applies_wobble`)."""
     readout_axis: ReadoutAxis = ReadoutAxis.AUTO
     """Along which axis of the frame the distortion varies (both corrections use it)."""
 
@@ -308,20 +310,24 @@ class StabilizationSettings:
         return self.mode is not StabilizationMode.OFF
 
     @property
+    def applies_wobble(self) -> bool:
+        """The wobble correction actually runs. PERSPECTIVE suppresses it: the homography already absorbs
+        the same shear/keystone each frame, and correcting it twice deforms (measured on real footage)."""
+        return self.rolling_shutter_auto and self.mode is not StabilizationMode.PERSPECTIVE
+
+    @property
     def corrects_rolling_shutter(self) -> bool:
-        return self.rolling_shutter > 0.0 or self.rolling_shutter_auto
+        return self.rolling_shutter != 0.0 or self.applies_wobble
 
     @property
     def corrects_rolling_shutter_skew(self) -> bool:
         """The slider part: needs the motion since the previous frame (the wobble comes from the clip's analysis)."""
-        return self.rolling_shutter > 0.0
+        return self.rolling_shutter != 0.0
 
     @property
     def needs_wobble_analysis(self) -> bool:
         """The clip must be tracked once: for the wobble itself, or to detect the readout axis the slider should use."""
-        return self.rolling_shutter_auto or (
-            self.corrects_rolling_shutter_skew and self.readout_axis is ReadoutAxis.AUTO
-        )
+        return self.applies_wobble or (self.corrects_rolling_shutter_skew and self.readout_axis is ReadoutAxis.AUTO)
 
     @property
     def requires_sequential_processing(self) -> bool:

@@ -26,6 +26,7 @@ from space_video_enhancer.pipeline.stabilization.stabilize import (
 )
 from space_video_enhancer.pipeline.stabilization.state import MAX_FRAME_GAP, StabilizationState, frame_gap
 from space_video_enhancer.pipeline.stabilization.wobble import (
+    WobbleTrack,
     analyze_wobble,
     detect_readout_axis,
     filter_wobble,
@@ -680,3 +681,55 @@ def test_filter_wobble_keeps_the_fast_jello_and_drops_drift_and_slow_skew() -> N
     with_skew = filter_wobble(changes, np.column_stack([np.zeros(count), slow / 0.7]), 0.7, wobble_window_frames(30.0))
     assert rms(with_skew[interior, 1] - fast[interior]) < 0.4 * rms(fast[interior]), "the slider part is taken out"
     assert filter_wobble(np.zeros((0, 2)), np.zeros((0, 2)), 0.0, 5).shape == (0, 2)
+
+
+# --- signed readout fraction --------------------------------------------------------------------
+
+
+def _synthetic_track(readout: float, axis: ReadoutAxis = ReadoutAxis.ROWS) -> WobbleTrack:
+    rng = np.random.default_rng(5)
+    count = 120
+    velocities = np.cumsum(rng.normal(0.0, 1.5, (count, 2)), axis=0)  # a wandering camera speed
+    changes = np.zeros((count, 2))
+    changes[1:] = readout * (velocities[1:] - velocities[:-1])
+    zeros = np.zeros((count, 2))
+    return WobbleTrack(
+        source=Path("clip.mp4"),
+        first_frame=0,
+        row_changes=changes if axis is ReadoutAxis.ROWS else zeros,
+        column_changes=changes if axis is ReadoutAxis.COLUMNS else zeros,
+        displacements=velocities,
+        measured=np.ones(count, dtype=bool),
+        analysis_size=(480, 270),
+        rotation=0,
+        window=15,
+        detected_axis=axis,
+    )
+
+
+def test_readout_fraction_estimate_recovers_the_signed_fraction() -> None:
+    assert _synthetic_track(-0.3).readout_fraction_estimate(ReadoutAxis.ROWS) == pytest.approx(-0.3, abs=0.02)
+    assert _synthetic_track(0.6).readout_fraction_estimate(ReadoutAxis.ROWS) == pytest.approx(0.6, abs=0.02)
+    assert _synthetic_track(0.5).readout_fraction_estimate(ReadoutAxis.COLUMNS) == pytest.approx(0.0), (
+        "the axis without gradients measures nothing"
+    )
+
+
+def test_filter_wobble_takes_out_a_negative_readout_skew() -> None:
+    count = 600
+    frames = np.arange(count)
+    slow = 0.05 * np.sin(2.0 * np.pi * frames / 240.0)
+    changes = np.column_stack([np.zeros(count), np.diff(slow, prepend=0.0)])
+    displacements = np.column_stack([np.zeros(count), slow / -0.7])  # the sensor reads against the axis
+    wobble = filter_wobble(changes, displacements, -0.7, wobble_window_frames(30.0))
+    assert float(np.abs(wobble[40:-40, 1]).max()) < 0.002, "a negative fraction takes out the inverted skew"
+
+
+def test_wobble_is_suppressed_under_perspective_but_the_slider_still_works() -> None:
+    both = StabilizationSettings(mode=StabilizationMode.PERSPECTIVE, rolling_shutter=-0.3, rolling_shutter_auto=True)
+    assert not both.applies_wobble and both.corrects_rolling_shutter_skew and both.corrects_rolling_shutter
+    assert both.needs_wobble_analysis, "the AUTO axis of the slider still needs the clip's analysis"
+    slider_off = replace(both, rolling_shutter=0.0)
+    assert not slider_off.needs_wobble_analysis and not slider_off.corrects_rolling_shutter
+    elsewhere = replace(both, mode=StabilizationMode.SIMILARITY)
+    assert elsewhere.applies_wobble and elsewhere.needs_wobble_analysis

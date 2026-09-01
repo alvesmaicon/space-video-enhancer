@@ -737,6 +737,7 @@ class MainWindow(
         self.stabilization_tab.modeChanged.connect(self._handle_stabilization_mode_changed)
         self.stabilization_tab.controlChanged.connect(self._handle_stabilization_control_change)
         self.stabilization_tab.captureChanged.connect(self._handle_stabilization_control_change)
+        self.stabilization_tab.readoutMeasureRequested.connect(self._measure_readout_fraction)
         self.stabilization_tab.resetRequested.connect(self._reset_stabilization_rect)
         self.stabilization_tab.referenceRequested.connect(self._set_stabilization_reference_here)
         self.stabilization_tab.manualAdjustChanged.connect(self._handle_manual_adjust)
