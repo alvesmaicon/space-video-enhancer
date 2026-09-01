@@ -36,29 +36,36 @@ from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 
 MODE_OPTIONS: list[tuple[str, StabilizationMode]] = [
     ("Desligada", StabilizationMode.OFF),
-    ("Suavizar tremor (só deslocamento)", StabilizationMode.AUTO),
-    ("Suavizar tremor + rotação e zoom", StabilizationMode.SIMILARITY),
-    ("Suavizar tremor + perspectiva", StabilizationMode.PERSPECTIVE),
-    ("Malha (paralaxe de caminhada)", StabilizationMode.MESH),
+    ("Automática", StabilizationMode.MESH),
     ("Travar uma região (camera lock)", StabilizationMode.CAMERA_LOCK),
     ("Travar uma região, suavizar se perder", StabilizationMode.HYBRID),
     ("Manual (keyframes)", StabilizationMode.MANUAL),
 ]
+LEGACY_MODE_OPTIONS: dict[StabilizationMode, str] = {
+    StabilizationMode.AUTO: "Suavizar tremor — só deslocamento (legado)",
+    StabilizationMode.SIMILARITY: "Suavizar tremor + rotação e zoom (legado)",
+    StabilizationMode.PERSPECTIVE: "Suavizar tremor + perspectiva (legado)",
+}
+"""Modes the Automática (malha) superseded. They stay in the engine so old projects render the same;
+the combo only shows the entry while the clip on screen uses it (see :meth:`StabilizationTab.apply`)."""
 MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
     StabilizationMode.OFF: "Nenhuma compensação de movimento.",
     StabilizationMode.AUTO: (
-        "Segue uma versão suavizada da trajetória da câmera (só translação): remove o tremor, preserva panorâmicas."
+        "Modo antigo, mantido para projetos salvos: segue uma versão suavizada da trajetória da câmera "
+        "(só translação). O modo Automática cobre este caso."
     ),
     StabilizationMode.SIMILARITY: (
-        "Como o automático, compensando também rotação leve e pequenas variações de escala."
+        "Modo antigo, mantido para projetos salvos: compensa também rotação leve e pequenas variações "
+        "de escala. O modo Automática cobre este caso."
     ),
     StabilizationMode.PERSPECTIVE: (
-        "Como o automático, com uma homografia global para parallax leve e pequenas mudanças de perspectiva; "
-        "também absorve a inclinação/oscilação do rolling shutter."
+        "Modo antigo, mantido para projetos salvos: homografia global para parallax leve e perspectiva. "
+        "O modo Automática cobre este caso."
     ),
     StabilizationMode.MESH: (
-        "Cada região do quadro segue o seu próprio caminho de câmera (MeshFlow): corrige a deformação de "
-        "paralaxe que os modos globais deixam ao caminhar. O clipe é analisado uma vez em segundo plano."
+        "Analisa o clipe uma vez em segundo plano e corrige cada região do quadro pelo seu próprio caminho "
+        "de câmera (MeshFlow): tremor, rotação, zoom, perspectiva e a paralaxe de caminhada. Enquanto a "
+        "análise roda, o preview usa uma suavização simples de deslocamento."
     ),
     StabilizationMode.CAMERA_LOCK: (
         "Mantém a região verde (arraste-a no preview) presa a onde ela estava no frame de referência; "
@@ -394,6 +401,7 @@ class StabilizationTab(TabPage):
         for widget in widgets:
             widget.blockSignals(True)
         try:
+            self._sync_legacy_mode_entry(settings.mode)
             select_combo_data(self.mode_combo, settings.mode.value)
             select_combo_data(self.readout_axis_combo, settings.readout_axis.value)
             self.intensity_slider.slider.setValue(round(settings.intensity * 100))
@@ -516,8 +524,28 @@ class StabilizationTab(TabPage):
         self.readout_axis_combo.setToolTip(READOUT_AXIS_DESCRIPTIONS[self.readout_axis()])
 
     def _handle_mode_changed(self, _index: int) -> None:
+        self._sync_legacy_mode_entry(self.mode())  # leaving a legacy mode removes its entry
         self._update_hint()
         self.modeChanged.emit()
+
+    def _sync_legacy_mode_entry(self, mode: StabilizationMode) -> None:
+        """Keep at most one legacy entry in the combo: ``mode``'s, when it is a legacy one.
+
+        The superseded automatic modes still render (old projects), but only the clip that uses one
+        shows it as a choice — everyone else sees the single "Automática".
+        """
+        was_blocked = self.mode_combo.blockSignals(True)  # apply() may already be blocking: restore, not unblock
+        try:
+            for legacy, label in LEGACY_MODE_OPTIONS.items():
+                index = self.mode_combo.findData(legacy.value)
+                if legacy is mode and index < 0:
+                    position = self.mode_combo.findData(StabilizationMode.MESH.value) + 1
+                    self.mode_combo.insertItem(position, label, legacy.value)
+                    self.mode_combo.setItemData(position, MODE_DESCRIPTIONS[legacy], Qt.ItemDataRole.ToolTipRole)
+                elif legacy is not mode and index >= 0:
+                    self.mode_combo.removeItem(index)
+        finally:
+            self.mode_combo.blockSignals(was_blocked)
 
     def _update_hint(self) -> None:
         description = MODE_DESCRIPTIONS[self.mode()]

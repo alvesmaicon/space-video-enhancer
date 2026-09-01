@@ -54,10 +54,14 @@ def test_scrubbing_without_denoise_keeps_the_full_size(app: QApplication, window
     assert not window._idle_refresh_timer.isActive()
 
 
-def test_motion_vectors_overlay_follows_the_toggle(app: QApplication, window: MainWindow, ui_video: Path) -> None:
+def test_motion_vectors_overlay_follows_the_toggle(
+    app: QApplication, window: MainWindow, ui_video: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     window._open_video(ui_video)
     wait_for_preview(app, window)
-    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.AUTO.value)
+    # Keep the Automática mode on its live fallback (the analysis never lands), which tracks every frame.
+    monkeypatch.setattr(MainWindow, "_mesh_track_for", lambda self, clip: None)
+    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.MESH.value)
     wait_for_preview(app, window)
     window.transport.set_value(window.transport.value() + 1)  # a second consecutive frame: motion is estimated
     wait_for_preview(app, window)

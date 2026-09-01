@@ -20,6 +20,7 @@ from space_video_enhancer.settings import (
     StabilizationMode,
     StabilizationSettings,
 )
+from space_video_enhancer.ui.tabs.base import select_combo_data
 from space_video_enhancer.ui.tabs.filters import FiltersTab
 from space_video_enhancer.ui.tabs.geometry import GeometryTab
 from space_video_enhancer.ui.tabs.grade import ColorGradeTab
@@ -70,6 +71,27 @@ def test_stabilization_tab_apply_round_trips_without_signals(app: QApplication) 
     tab.apply(StabilizationSettings(mode=StabilizationMode.OFF, zoom_out=True, auto_crop=True))
     assert tab.settings(rect).zoom_out and not tab.settings(rect).auto_crop, "zoom out excludes the automatic crop"
     assert emitted == []
+
+
+def test_stabilization_tab_shows_a_legacy_mode_only_while_a_clip_uses_it(app: QApplication) -> None:
+    tab = StabilizationTab()
+    base_count = tab.mode_combo.count()
+    assert tab.mode_combo.findData(StabilizationMode.SIMILARITY.value) < 0, "superseded modes are not offered"
+    assert tab.mode_combo.findData(StabilizationMode.MESH.value) >= 0
+
+    tab.apply(StabilizationSettings(mode=StabilizationMode.SIMILARITY))  # an old project's clip
+    assert tab.mode() is StabilizationMode.SIMILARITY
+    assert "legado" in tab.mode_combo.currentText()
+    assert tab.mode_combo.count() == base_count + 1
+
+    tab.apply(StabilizationSettings(mode=StabilizationMode.PERSPECTIVE))
+    assert tab.mode() is StabilizationMode.PERSPECTIVE
+    assert tab.mode_combo.count() == base_count + 1, "one legacy entry at a time"
+
+    select_combo_data(tab.mode_combo, StabilizationMode.MESH.value)  # the user picks the new mode
+    assert tab.mode() is StabilizationMode.MESH
+    assert tab.mode_combo.count() == base_count, "leaving the legacy mode removes its entry"
+    assert tab.mode_combo.findData(StabilizationMode.PERSPECTIVE.value) < 0
 
 
 def test_hsl_tab_apply_round_trips_without_signals(app: QApplication) -> None:

@@ -48,3 +48,24 @@ def test_mesh_mode_analyses_the_clip_and_stabilizes_the_preview(
     select_combo_data(tab.mode_combo, StabilizationMode.OFF.value)
     wait_for_preview(app, window)
     assert window._mesh_track_for(window.sequence.clips[0]) is track, "the track survives leaving the mode"
+
+
+def test_mesh_mode_stabilizes_with_the_live_fallback_while_unanalysed(
+    app: QApplication, window: MainWindow, ui_video: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_mesh_track_for", lambda self, clip: None)  # the analysis never lands
+    tab = window.stabilization_tab
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+
+    select_combo_data(tab.mode_combo, StabilizationMode.MESH.value)
+    assert tab.mode_combo.currentText() == "Automática"
+    wait_for_preview(app, window)
+    window.transport.set_value(window.transport.value() + 1)  # a second consecutive frame: motion is estimated
+    wait_for_preview(app, window)
+
+    trace = window._last_preview.trace
+    assert trace.get("stabilization.mode") == "mesh"
+    assert trace.get("stabilization.mesh") == "fallback", "the live path covers the wait for the analysis"
+    assert trace.get("stabilization.result") in ("applied", "negligible"), trace.get("stabilization.result")
+    assert "aguardando a análise" in tab.info_label.text(), tab.info_label.text()

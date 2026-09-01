@@ -41,6 +41,13 @@ class StabilizationState:
     """Which grid cells have been moving with the camera (see ``global_motion``); reset with the sequence."""
     last_vectors: Any = None
     """:class:`global_motion.MotionVectors` of the last inter-frame estimate, for the diagnostic overlay."""
+    mesh_handoff: float | None = None
+    """MESH: crossfade progress (0 -> 1) from the live fallback path onto the clip's analysed field.
+    ``0.0`` while the fallback renders (armed), advancing once the field arrives mid-sequence;
+    ``None`` when nothing is fading (fresh state, or the handoff finished)."""
+    mesh_handoff_index: int | None = None
+    """Frame the handoff last advanced on: a re-render of the same frame settles on the field instead
+    of advancing the fade again."""
 
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]

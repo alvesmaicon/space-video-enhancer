@@ -1,6 +1,6 @@
 # Plano: estabilização unificada (automática única + travar objeto multi-ponto)
 
-Estado: **planejado**. Motivação (Maicon, 2026-09-01): são modos demais para escolher; as
+Estado: **Wave 1 feita (2026-09-01)**; Waves 2-4 planejadas. Motivação (Maicon, 2026-09-01): são modos demais para escolher; as
 automáticas deveriam ser uma só, e o "travar objeto" deveria sobreviver à perda do alvo usando
 vários pontos de rastreio — inclusive em cantos opostos do quadro — combinado com o resto da
 máquina (malha, oscilação).
@@ -12,7 +12,7 @@ código com o tempo; o único custo novo é o fallback ao vivo da Wave 1.
 
 Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyframes).
 
-## Wave 1 — "Automática" única (consolidação)
+## Wave 1 — "Automática" única (consolidação) — FEITA (2026-09-01)
 
 - "Automática" = malha. Enquanto a análise do clipe roda em segundo plano, o preview cai num
   fallback ao vivo (a trajetória suavizada de translação de hoje, o modo AUTO) para o usuário já
@@ -20,9 +20,18 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   (~meio segundo) para o quadro não pular. O export sempre usa a malha (a análise roda antes).
 - AUTO/SIMILARITY/PERSPECTIVE saem do combo. O enum continua no motor: projeto antigo carrega e
   renderiza igual (o combo mostra a entrada legada apenas quando o clipe carregado a usa).
-- Riscos: a rampa de transição no preview (novo estado pequeno); nenhum no export.
-- Aceitação: comparador no vídeo real — a "Automática" nova ≥ malha atual em todas as métricas;
-  fallback visível em <1 s após escolher o modo.
+- Como ficou: `apply_stabilization` estima o caminho de translação (o AUTO) quando o campo da
+  malha ainda não existe e o funde no próprio campo durante o handoff
+  (`MESH_HANDOFF_FRAMES = 15`, um remap só — o campo é fração, a translação vira constante
+  somada). O handoff só arma quando o fallback rodou na mesma sequência (`state.mesh_handoff`);
+  estado novo (worker de export, scrub, frame pausado) aplica o campo inteiro de uma vez, então
+  o export paralelo não mudou (workers recebem `state=None`). Entrada legada no combo:
+  `LEGACY_MODE_OPTIONS` + `_sync_legacy_mode_entry` (insere no `apply()` de um clipe legado,
+  remove quando o usuário troca de modo).
+- Aceitação verificada em teste: o fallback corta o tremor pela metade já nos primeiros frames
+  (`test_mesh_mode_falls_back_to_the_live_path_until_the_field_arrives`), o campo entra em fade
+  sem pulo e satura no valor exato (`test_mesh_field_fades_in_from_the_live_path_when_it_lands`),
+  e estado novo/pausa aplicam o campo direto (`test_mesh_handoff_settles_on_the_field_when_paused_or_fresh`).
 
 ## Wave 2 — "Travar objeto" multi-ponto (funde camera lock + híbrido)
 

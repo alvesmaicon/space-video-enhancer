@@ -18,7 +18,8 @@ from space_video_enhancer.pipeline.stabilization.mesh import (
     mesh_correction,
     vertex_positions,
 )
-from space_video_enhancer.pipeline.stabilization.stabilize import apply_stabilization
+from space_video_enhancer.pipeline.stabilization.stabilize import MESH_HANDOFF_FRAMES, apply_stabilization
+from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.settings import StabilizationMode, StabilizationSettings
 from space_video_enhancer.telemetry import trace as tracing
 from space_video_enhancer.telemetry.trace import RenderTrace
@@ -179,6 +180,94 @@ def test_apply_stabilization_mesh_mode_warps_by_the_clip_field() -> None:
         outside = apply_stabilization(frame, settings, frame_index=99, mesh_corrections=corrections)
     assert trace.notes.get("stabilization.result") == "unanalysed"
     assert np.array_equal(outside, baseline), "a frame outside the track passes through (with the constant crop)"
+
+
+def _measured_shift(reference: np.ndarray, frame: np.ndarray) -> tuple[float, float]:
+    gray_a = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray_b = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    (shift_x, shift_y), _response = cv2.phaseCorrelate(gray_a, gray_b)
+    return float(shift_x), float(shift_y)
+
+
+def test_mesh_mode_falls_back_to_the_live_path_until_the_field_arrives() -> None:
+    """Unanalysed clip + sequential frames = the live translation fallback stabilizes at once."""
+    shake = [0.0, 9.0, -7.0, 8.0, -9.0, 7.0]
+
+    def displacement(index: int) -> np.ndarray:
+        field = np.zeros((HEIGHT, WIDTH, 2))
+        field[..., 0] = shake[index]
+        return field
+
+    frames = _frames_from_displacement(displacement, len(shake))
+    settings = StabilizationSettings(mode=StabilizationMode.MESH, temporal_smoothing=1.0)
+    state = StabilizationState()
+    stabilized_first = apply_stabilization(frames[0], settings, frame_index=0, state=state, mesh_corrections=None)
+    baseline_first = transforms.stabilization_crop(frames[0], None, settings.margin)
+    raw_shifts, corrected_shifts = [], []
+    for index, frame in enumerate(frames[1:], start=1):
+        trace = RenderTrace()
+        with tracing.active(trace):
+            stabilized = apply_stabilization(frame, settings, frame_index=index, state=state, mesh_corrections=None)
+        assert trace.notes.get("stabilization.mesh") == "fallback"
+        assert trace.notes.get("stabilization.result") == "applied", trace.notes
+        raw_shifts.append(abs(shake[index]))
+        corrected_shifts.append(abs(_measured_shift(stabilized_first, stabilized)[0]))
+        baseline = transforms.stabilization_crop(frame, None, settings.margin)
+        assert abs(_measured_shift(baseline_first, baseline)[0]) > 4.0, "sanity: the raw crop carries the shake"
+    assert max(corrected_shifts) < 0.5 * max(raw_shifts), f"{corrected_shifts} vs {raw_shifts}"
+
+
+def test_mesh_field_fades_in_from_the_live_path_when_it_lands() -> None:
+    """The field arriving mid-sequence crossfades in over the handoff instead of jumping."""
+    frame = _canvas(0)[:HEIGHT, :WIDTH]
+    settings = StabilizationSettings(mode=StabilizationMode.MESH, temporal_smoothing=1.0)
+    fields = np.zeros((60, VERTEX_ROWS, VERTEX_COLUMNS, 2), dtype=np.float32)
+    fields[..., 0] = 12.0 / WIDTH
+    corrections = MeshCorrections(first_frame=0, fields=fields)
+    baseline = apply_stabilization(frame, settings, frame_index=0, mesh_corrections=None)  # crop only
+
+    state = StabilizationState()
+    for index in range(3):  # the fallback renders (static clip: a near-identity live path) and arms the handoff
+        apply_stabilization(frame, settings, frame_index=index, state=state, mesh_corrections=None)
+    assert state.mesh_handoff == 0.0
+
+    trace = RenderTrace()
+    with tracing.active(trace):
+        first = apply_stabilization(frame, settings, frame_index=3, state=state, mesh_corrections=corrections)
+    assert trace.notes.get("stabilization.mesh") == "handoff"
+    first_shift = _measured_shift(baseline, first)[0]
+    assert abs(first_shift) < 3.0, "the field fades in: the first frame moves a fraction of the 12 px"
+
+    last = first
+    for index in range(4, 4 + MESH_HANDOFF_FRAMES):
+        trace = RenderTrace()
+        with tracing.active(trace):
+            last = apply_stabilization(frame, settings, frame_index=index, state=state, mesh_corrections=corrections)
+    assert trace.notes.get("stabilization.mesh") == "field", "the handoff ends on the full field"
+    assert state.mesh_handoff is None
+    assert _measured_shift(baseline, last)[0] == pytest.approx(12.0 / 0.9, abs=0.5)
+
+
+def test_mesh_handoff_settles_on_the_field_when_paused_or_fresh() -> None:
+    frame = _canvas(0)[:HEIGHT, :WIDTH]
+    settings = StabilizationSettings(mode=StabilizationMode.MESH, temporal_smoothing=1.0)
+    fields = np.zeros((10, VERTEX_ROWS, VERTEX_COLUMNS, 2), dtype=np.float32)
+    fields[..., 0] = 12.0 / WIDTH
+    corrections = MeshCorrections(first_frame=0, fields=fields)
+    baseline = apply_stabilization(frame, settings, frame_index=0, mesh_corrections=None)
+
+    # A fresh state (an export worker) never blends: the field applies at full strength at once.
+    fresh = apply_stabilization(
+        frame, settings, frame_index=5, state=StabilizationState(), mesh_corrections=corrections
+    )
+    assert _measured_shift(baseline, fresh)[0] == pytest.approx(12.0 / 0.9, abs=0.5)
+
+    # Paused on the frame that armed the handoff: the re-render settles instead of fading (no motion to hide in).
+    state = StabilizationState()
+    apply_stabilization(frame, settings, frame_index=2, state=state, mesh_corrections=None)
+    paused = apply_stabilization(frame, settings, frame_index=2, state=state, mesh_corrections=corrections)
+    assert state.mesh_handoff is None
+    assert _measured_shift(baseline, paused)[0] == pytest.approx(12.0 / 0.9, abs=0.5)
 
 
 def test_mesh_settings_flags() -> None:

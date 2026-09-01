@@ -247,7 +247,7 @@ def test_measure_button_fills_the_slider_with_the_signed_fraction(
     assert settings.rolling_shutter == pytest.approx(-0.28)
 
 
-def test_wobble_is_unavailable_under_perspective_and_comes_back(
+def test_wobble_is_unavailable_under_the_mesh_and_comes_back(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:
     tab = window.stabilization_tab
@@ -256,14 +256,14 @@ def test_wobble_is_unavailable_under_perspective_and_comes_back(
     wait_until(app, lambda: not window._wobble_pending and bool(window._wobble_tracks), what="wobble analysis")
     wait_for_preview(app, window)
 
-    select_combo_data(tab.mode_combo, StabilizationMode.PERSPECTIVE.value)
+    select_combo_data(tab.mode_combo, StabilizationMode.MESH.value)
     wait_for_preview(app, window)
-    assert not tab.wobble_checkbox.isEnabled(), "perspective absorbs the wobble: the checkbox is moot"
+    assert not tab.wobble_checkbox.isEnabled(), "the mesh absorbs the wobble: the checkbox is moot"
     settings = window.sequence.clips[0].settings.stabilization
     assert settings.rolling_shutter_auto and not settings.applies_wobble
     assert "absorvida" in tab.capture_info_label.text(), tab.capture_info_label.text()
 
-    select_combo_data(tab.mode_combo, StabilizationMode.SIMILARITY.value)
+    select_combo_data(tab.mode_combo, StabilizationMode.CAMERA_LOCK.value)
     wait_for_preview(app, window)
     assert tab.wobble_checkbox.isEnabled() and tab.wobble_checkbox.isChecked()
     assert window.sequence.clips[0].settings.stabilization.applies_wobble

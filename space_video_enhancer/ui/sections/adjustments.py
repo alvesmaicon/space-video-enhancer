@@ -871,7 +871,10 @@ class AdjustmentsSection(WindowState):
         pending = self._pending_mesh_for_active_clip()
         if pending is not None:
             done, total = self._mesh_progress.get(pending.generation, (0, pending.count))
-            return f"Analisando a malha: {done * 100 // max(1, total)}% ({done}/{total} frames)"
+            return (
+                f"Analisando a malha: {done * 100 // max(1, total)}% ({done}/{total} frames) — "
+                "estabilização simples de deslocamento enquanto isso"
+            )
         clip = self.active_clip
         if clip is not None:
             track = next(

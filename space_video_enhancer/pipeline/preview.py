@@ -26,7 +26,13 @@ from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.sequence import RetimeSample
-from space_video_enhancer.settings import GeometrySettings, ImageFilterSelection, RenderSettings, StabilizationSettings
+from space_video_enhancer.settings import (
+    GeometrySettings,
+    ImageFilterSelection,
+    RenderSettings,
+    StabilizationMode,
+    StabilizationSettings,
+)
 from space_video_enhancer.telemetry.trace import RenderTrace
 from space_video_enhancer.video import VideoSource
 
@@ -94,7 +100,8 @@ def motion_overlay(
     if state is None or not settings.enabled:
         return None
     vectors = state.last_vectors
-    if vectors is not None and settings.mode.uses_auto_motion:
+    live_tracking = settings.mode.uses_auto_motion or settings.mode is StabilizationMode.MESH
+    if vectors is not None and live_tracking:  # MESH tracks live only while its fallback/handoff runs
         width, height = vectors.size
         scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
         previous = normalized_through_geometry(vectors.previous * scale, geometry)

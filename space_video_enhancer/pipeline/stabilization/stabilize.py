@@ -24,6 +24,8 @@ found again it eases back onto the lock instead of snapping.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from space_video_enhancer.pipeline.stabilization import estimators, rolling_shutter, transforms
@@ -44,6 +46,9 @@ CORRECTION_BUDGET_FRACTION = 0.05
 HYBRID_RELEASE_FRAMES = 30.0
 HYBRID_REACQUIRE_WEIGHT = 0.5
 HYBRID_REACQUIRE_FRAMES = 6
+MESH_HANDOFF_FRAMES = 15
+"""MESH: frames the correction takes to crossfade from the live fallback onto the analysed field
+when it arrives mid-playback (~half a second at 30 fps), so the frame does not jump."""
 
 
 def smoothing_time_constant(smoothing: float) -> float:
@@ -84,9 +89,19 @@ def apply_stabilization(
         return frame
 
     correction: np.ndarray | None = None
+    mesh_field: np.ndarray | None = None
     if stabilizing:
         note("stabilization.mode", settings.mode.value)
-        if settings.mode is not StabilizationMode.MESH:
+        if settings.mode is StabilizationMode.MESH:
+            if mesh_corrections is not None and frame_index is not None:
+                mesh_field = mesh_corrections.at(frame_index)
+            if mesh_field is None or (state is not None and state.mesh_handoff is not None):
+                # The live fallback: until the clip's analysis lands, follow a smoothed translation path
+                # (the classic automatic mode) so choosing the mode stabilizes at once. It keeps being
+                # estimated through the handoff, so the crossfade onto the field has both ends.
+                fallback = replace(settings, mode=StabilizationMode.AUTO)
+                correction = estimate_correction(frame, fallback, frame_index, state, None)
+        else:
             correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
     if settings.corrects_rolling_shutter:
         # Uses the inter-frame motion estimated just above (or estimates a translation when no mode did).
@@ -94,7 +109,7 @@ def apply_stabilization(
     if not stabilizing:
         return frame
     if settings.mode is StabilizationMode.MESH:
-        return _apply_mesh_mode(frame, settings, frame_index, mesh_corrections)
+        return _apply_mesh_mode(frame, settings, frame_index, state, mesh_field, correction)
 
     applied: np.ndarray | None = None
     if correction is None:
@@ -130,26 +145,80 @@ def _apply_mesh_mode(
     frame: np.ndarray,
     settings: StabilizationSettings,
     frame_index: int | None,
-    mesh_corrections: MeshCorrections | None,
+    state: StabilizationState | None,
+    field: np.ndarray | None,
+    live_correction: np.ndarray | None,
 ) -> np.ndarray:
-    """The MESH branch: warp by the clip's analysed field (or pass through until the analysis lands).
+    """The MESH branch: warp by the clip's analysed field — or by the live fallback path until it lands.
 
-    The fields are already clamped to the crop margin, so the constant crop below always hides the
-    borders; the crop applies even while unanalysed so the zoom does not pop when the track arrives.
+    While the analysis runs, the frame follows the smoothed translation path already estimated in
+    :func:`apply_stabilization` (``live_correction``). When the field arrives mid-sequence, the
+    correction crossfades from that path onto the field over :data:`MESH_HANDOFF_FRAMES` so the
+    frame does not jump; a fresh sequence (an export worker, a scrub, a paused re-render) starts
+    straight on the field. Both parts are clamped to the margin, and the constant crop below applies
+    in every case — the zoom never pops.
     """
-    field = None
-    if mesh_corrections is not None and frame_index is not None:
-        field = mesh_corrections.at(frame_index)
     if field is None:
-        note("stabilization.result", "unanalysed")
-        stabilized = frame
+        note("stabilization.mesh", "fallback")
+        if state is not None:  # arm the handoff: the field, when it lands, fades in instead of jumping
+            state.mesh_handoff = 0.0
+            state.mesh_handoff_index = frame_index
+        stabilized = _warp_by_live_path(frame, settings, live_correction)
     else:
+        weight = 1.0
+        if state is not None and state.mesh_handoff is not None:
+            weight = _advance_handoff(state, frame_index, live_correction)
         note("stabilization.result", "applied")
-        scaled = field if settings.intensity >= 1.0 else field * settings.intensity
+        if weight >= 1.0:
+            note("stabilization.mesh", "field")
+            if state is not None:
+                state.last_vectors = None  # nothing is tracked live any more: drop the overlay's stale vectors
+            scaled = field if settings.intensity >= 1.0 else field * settings.intensity
+        else:
+            note("stabilization.mesh", "handoff")
+            assert live_correction is not None  # _advance_handoff settles on the field otherwise
+            height, width = frame.shape[:2]
+            scaled = field * weight  # a copy: the cached field must not change
+            scaled[..., 0] += (1.0 - weight) * float(live_correction[0, 2]) / width
+            scaled[..., 1] += (1.0 - weight) * float(live_correction[1, 2]) / height
+            if settings.intensity < 1.0:
+                scaled = scaled * settings.intensity
         stabilized = apply_mesh(frame, scaled)
     if settings.auto_crop:
         stabilized = transforms.stabilization_crop(stabilized, None, settings.margin)
     return stabilized
+
+
+def _warp_by_live_path(frame: np.ndarray, settings: StabilizationSettings, correction: np.ndarray | None) -> np.ndarray:
+    """The fallback warp: the live translation path, saturated at the margin like the automatic modes."""
+    if correction is None:
+        note("stabilization.result", "unanalysed")
+        return frame
+    blended = transforms.blend_with_identity(correction, settings.intensity)
+    blended = transforms.fit_within_margin(blended, frame.shape, settings.margin)
+    if transforms.is_negligible(blended):
+        note("stabilization.result", "negligible")
+        return frame
+    note("stabilization.result", "applied")
+    return transforms.warp(frame, blended)
+
+
+def _advance_handoff(state: StabilizationState, frame_index: int | None, live_correction: np.ndarray | None) -> float:
+    """This frame's crossfade weight of the field against the live path; ends the handoff at 1.0.
+
+    A broken live path (a jump restarted it) or a re-render of the frame that armed the handoff
+    (paused: no motion to hide the change in) settle on the field at once.
+    """
+    if live_correction is None or (frame_index is not None and frame_index == state.mesh_handoff_index):
+        state.mesh_handoff = None
+        return 1.0
+    weight = min(1.0, (state.mesh_handoff or 0.0) + 1.0 / MESH_HANDOFF_FRAMES)
+    if weight >= 1.0:
+        state.mesh_handoff = None
+    else:
+        state.mesh_handoff = weight
+        state.mesh_handoff_index = frame_index
+    return weight
 
 
 def unskew_rolling_shutter(
