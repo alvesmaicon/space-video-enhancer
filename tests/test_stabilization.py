@@ -326,6 +326,58 @@ def test_crop_rect_is_constant_for_corrections_within_the_margin() -> None:
     assert beyond != baseline and beyond[0] >= 60 - 1 and beyond[1] == baseline[1]
 
 
+def test_fit_within_margin_keeps_the_crop_rect_constant_for_geometric_corrections() -> None:
+    """Rotation/zoom/keystone escape the margin even with the translation capped: the fit must saturate them.
+
+    Measured on real walking footage before the fix: the correction escaped on 51% of the frames and the
+    crop fell back to that frame's valid area — the output size pulsed by up to 4% between frames.
+    """
+    shape = (270, 480, 3)
+    margin = CORRECTION_BUDGET_FRACTION
+    baseline = transforms.crop_rect_for(None, shape, margin)
+
+    fitting = [
+        transforms.translation_to_affine(3.0, 2.0),
+        cv2.getRotationMatrix2D((240.0, 135.0), 0.0, 1.12).astype(np.float32),  # zoom-in covers past the margin
+    ]
+    for transform in fitting:
+        assert transforms.fit_within_margin(transform, shape, margin) is transform, "a fitting correction passes"
+
+    keystone = np.array([[1.0, 0.05, 0.0], [0.0, 1.06, 0.0], [8e-4, 0.0, 1.0]], dtype=np.float32)
+    adversarial = [
+        cv2.getRotationMatrix2D((240.0, 135.0), 8.0, 1.0).astype(np.float32),  # rotation swings the corners
+        cv2.getRotationMatrix2D((240.0, 135.0), 0.0, 0.86).astype(np.float32),  # zoom-out reveals the border
+        keystone,
+        transforms.compose(keystone, transforms.translation_to_affine(20.0, -12.0)),
+    ]
+    for transform in adversarial:
+        fitted = transforms.fit_within_margin(transform, shape, margin)
+        assert fitted is not transform, "an escaping correction must be reduced"
+        assert transforms.crop_rect_for(fitted, shape, margin) == baseline, "the crop never grows"
+        assert not np.allclose(fitted, transforms.identity_like(fitted), atol=1e-4), (
+            "the fit saturates the correction, it does not discard it"
+        )
+
+
+def test_auto_crop_correction_saturates_instead_of_growing_the_crop(textured_frame: np.ndarray) -> None:
+    """End to end: a big rotated correction with auto crop on still comes out at the frame size, fitted."""
+    settings = StabilizationSettings(mode=StabilizationMode.SIMILARITY, temporal_smoothing=0.0, auto_crop=True)
+    state = StabilizationState()
+    rotated = cv2.warpAffine(
+        textured_frame,
+        cv2.getRotationMatrix2D((textured_frame.shape[1] / 2.0, textured_frame.shape[0] / 2.0), 9.0, 1.0),
+        (textured_frame.shape[1], textured_frame.shape[0]),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT,
+    )
+    trace = RenderTrace()
+    with tracing.active(trace):
+        apply_stabilization(textured_frame, settings, frame_index=0, state=state)
+        output = apply_stabilization(rotated, settings, frame_index=1, state=state)
+    assert output.shape == textured_frame.shape
+    assert trace.notes.get("stabilization.margin_fit") == 1, "the 9-degree correction had to saturate"
+
+
 def test_stabilization_crop_returns_same_size(textured_frame: np.ndarray) -> None:
     transform = transforms.translation_to_affine(12.0, 8.0)
     warped = transforms.warp(textured_frame, transform)

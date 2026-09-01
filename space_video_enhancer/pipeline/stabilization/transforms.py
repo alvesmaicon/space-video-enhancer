@@ -175,6 +175,38 @@ def fit_with_zoom_out(transform: np.ndarray, frame_shape: tuple[int, ...]) -> np
     return composed
 
 
+MARGIN_FIT_ITERATIONS = 20
+
+
+def fit_within_margin(transform: np.ndarray, frame_shape: tuple[int, ...], margin_fraction: float) -> np.ndarray:
+    """The largest identity-blend of ``transform`` whose warp still fills the fixed crop margin.
+
+    The automatic crop promises a constant zoom: the same inset on every frame. The translation cap
+    keeps pure shifts inside it, but rotation, zoom and keystone move the corners further — measured
+    on real walking footage the correction escaped the margin on half the frames, the crop fell back
+    to that frame's valid area and the output size pulsed by up to 4% between consecutive frames.
+    Instead, the correction saturates: blend toward the identity (which always fits) just enough to
+    fit again. Returns ``transform`` itself when it already fits.
+    """
+    height, width = frame_shape[:2]
+    if width <= 0 or height <= 0:
+        return transform
+    margin_x = round(width * margin_fraction)
+    margin_y = round(height * margin_fraction)
+    rect = (margin_x, margin_y, max(1, width - 2 * margin_x), max(1, height - 2 * margin_y))
+    if rect_inside_projection(rect, transform, width, height):
+        return transform
+    identity = identity_like(transform)
+    fits, escapes = 0.0, 1.0  # the identity always fits; the full correction just failed
+    for _ in range(MARGIN_FIT_ITERATIONS):
+        middle = (fits + escapes) / 2.0
+        if rect_inside_projection(rect, mix_transforms(identity, transform, middle), width, height):
+            fits = middle
+        else:
+            escapes = middle
+    return mix_transforms(identity, transform, fits)
+
+
 def warp(frame: np.ndarray, transform: np.ndarray) -> np.ndarray:
     height, width = frame.shape[:2]
     if is_affine(transform):

@@ -97,6 +97,13 @@ def apply_stabilization(
         blended = transforms.blend_with_identity(correction, settings.intensity)
         if settings.zoom_out:
             blended = transforms.fit_with_zoom_out(blended, frame.shape)
+        elif settings.auto_crop and not settings.uses_manual_keyframes:
+            # The crop below must never change size between frames (constant zoom), so the correction
+            # saturates at the margin — rotation/zoom/keystone can escape it even with the translation capped.
+            fitted = transforms.fit_within_margin(blended, frame.shape, CORRECTION_BUDGET_FRACTION)
+            if fitted is not blended:
+                note("stabilization.margin_fit", 1)
+                blended = fitted
         note("stabilization.translation_px", [round(float(blended[0, 2]), 2), round(float(blended[1, 2]), 2)])
         if transforms.is_negligible(blended):
             note("stabilization.result", "negligible")
