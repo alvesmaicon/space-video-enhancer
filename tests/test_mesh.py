@@ -8,6 +8,7 @@ import pytest
 
 from space_video_enhancer.pipeline.stabilization import transforms
 from space_video_enhancer.pipeline.stabilization.mesh import (
+    ANCHOR_SAMPLE_OFFSETS,
     CORRECTION_LIMIT_FRACTION,
     VERTEX_COLUMNS,
     VERTEX_ROWS,
@@ -373,6 +374,32 @@ def test_object_corrections_without_regions_match_the_plain_mesh() -> None:
     plain = corrections_for(path, 8.0, 0.08)
     degenerate = corrections_for_object(path, (), 8.0, limit=0.08, aspect=ASPECT)
     assert np.array_equal(plain.fields, degenerate.fields)
+
+
+def test_corrections_carry_what_the_analysis_measured_for_the_overlay() -> None:
+    """Once the field runs nothing is tracked live: the overlay shows the analysed motion instead."""
+
+    def displacement(index: int) -> np.ndarray:
+        field = np.zeros((VERTEX_ROWS, VERTEX_COLUMNS, 2))
+        field[..., 0] = 0.002 * index
+        field[..., 1] = 0.001 * index
+        return field
+
+    path = _path_from_vertex_displacement(displacement)
+    plain = corrections_for(path, 8.0, 0.08)
+    assert plain.anchor_points is None and plain.motion is not None
+    assert plain.motion.shape == plain.fields.shape
+    assert np.allclose(plain.motion[0], 0.0), "frame 0 has nothing before it"
+    assert np.allclose(plain.motion[1:, ..., 0], 0.002, atol=1e-6), "the per-frame step, not the cumulative path"
+    assert plain.motion_at(2) is not None and plain.motion_at(999) is None
+
+    tracked = corrections_for_object(path, (ANCHOR_REGION,), 8.0, limit=0.08, aspect=ASPECT)
+    anchors = tracked.anchors_at(10)
+    assert tracked.motion is not None and anchors is not None
+    assert anchors.shape == (len(ANCHOR_SAMPLE_OFFSETS), 2)
+    center_x, center_y = ANCHOR_REGION.center
+    assert anchors[0] == pytest.approx((center_x + 0.002 * 10, center_y + 0.001 * 10), abs=1e-5)
+    assert tracked.anchors_at(999) is None
 
 
 def test_apply_stabilization_object_mode_warps_by_the_field_and_falls_back_to_the_live_lock() -> None:

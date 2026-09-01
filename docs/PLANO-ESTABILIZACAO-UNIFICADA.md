@@ -78,6 +78,10 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   rotação: a correção ao vivo vira campo por vértice no crossfade). Export analisa antes e continua
   paralelo (`requires_sequential_processing` False); oscilação suprimida também no OBJECT (a malha
   absorve).
+- Overlay de diagnóstico (Ctrl+Shift+M): quando o campo assume, nada mais é rastreado ao vivo —
+  o overlay passa a mostrar o que a análise mediu (`MeshCorrections.motion`/`anchor_points`):
+  pontos das âncoras (5 por região, amostrados da trilha) no modo objeto, vetores por vértice na
+  Automática. Durante fallback/handoff continua o rastreio ao vivo, como antes.
 - Aceitação: sintético — âncora cai na trajetória suavizada (erro < 0,2% do quadro), rotação rápida
   de 1,5° cancelada (> 85%), paralaxe do fundo preservada. Vídeo real (caminhada, regiões do v8):
   alvo rápido 10,07 → 2,72 px (malha pura: 2,60 — empate no alvo estático), global 2,52 px (malha:

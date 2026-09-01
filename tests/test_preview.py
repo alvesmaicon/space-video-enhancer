@@ -12,10 +12,12 @@ from space_video_enhancer.pipeline.preview import (
     RenderMailbox,
     ThumbnailRequest,
     downscale_to_limit,
+    motion_overlay,
     render_preview,
     render_thumbnails,
 )
 from space_video_enhancer.pipeline.render import render_frame
+from space_video_enhancer.pipeline.stabilization.mesh import VERTEX_COLUMNS, VERTEX_ROWS, MeshCorrections
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble, wobble_window_frames
 from space_video_enhancer.settings import (
@@ -141,6 +143,40 @@ def test_render_preview_carries_the_stabilizer_motion_overlay(textured_frame: np
     assert np.all((second.motion.current >= -0.05) & (second.motion.current <= 1.05)), "normalized coordinates"
     off = render_preview(_preview_request(textured_frame, 3, frame_index=3), state, None)
     assert off.motion is None, "no overlay without stabilization"
+
+
+def test_motion_overlay_shows_the_analysed_track_once_the_field_runs(textured_frame: np.ndarray) -> None:
+    """With the field applied nothing is tracked live any more: the overlay comes from the analysis payload."""
+    fields = np.zeros((4, VERTEX_ROWS, VERTEX_COLUMNS, 2), dtype=np.float32)
+    motion = np.zeros_like(fields)
+    motion[..., 0] = 0.01
+    anchors = np.full((4, 5, 2), 0.25, dtype=np.float32)
+    corrections = MeshCorrections(0, fields, motion=motion, anchor_points=anchors)
+    geometry = GeometrySettings()
+
+    mesh = StabilizationSettings(mode=StabilizationMode.MESH)
+    flow = motion_overlay(StabilizationState(), mesh, geometry, corrections, 1)
+    assert flow is not None and flow.kind == "flow"
+    assert flow.count == VERTEX_ROWS * VERTEX_COLUMNS, "one vector per mesh vertex"
+    assert np.allclose(flow.current - flow.previous, (0.01, 0.0), atol=1e-6), "the measured per-frame motion"
+
+    lock = motion_overlay(None, StabilizationSettings(mode=StabilizationMode.OBJECT), geometry, corrections, 2)
+    assert lock is not None and lock.kind == "lock" and lock.count == 5, "the object mode shows its anchor samples"
+    assert np.allclose(lock.current, 0.25)
+
+    assert motion_overlay(None, mesh, geometry, corrections, 99) is None, "outside the analysed range"
+    auto = StabilizationSettings(mode=StabilizationMode.AUTO)
+    assert motion_overlay(StabilizationState(), auto, geometry, corrections, 1) is None, "not a mesh mode"
+
+    request = _preview_request(
+        textured_frame,
+        5,
+        frame_index=1,
+        settings=RenderSettings(stabilization=mesh),
+        mesh_corrections=corrections,
+    )
+    result = render_preview(request, StabilizationState(), None)
+    assert result.motion is not None and result.motion.kind == "flow", "render_preview hands the payload through"
 
 
 def test_render_preview_fetches_the_previous_frame_for_the_rolling_shutter_when_paused(ui_video: Path) -> None:

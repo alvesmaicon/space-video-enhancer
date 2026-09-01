@@ -256,24 +256,50 @@ class MeshCorrections:
 
     Computed once from a :class:`MeshPath` and the smoothing time constant (:func:`corrections_for`);
     every render — preview at any size, export in any worker — just indexes its source frame.
+    ``motion`` and ``anchor_points`` feed the diagnostic overlay only: once the field takes over
+    nothing is tracked live any more, so what the analysis measured is shown instead.
     """
 
     first_frame: int
     fields: np.ndarray
     """``(count, VERTEX_ROWS, VERTEX_COLUMNS, 2)`` float32 (see :func:`mesh_correction`)."""
+    motion: np.ndarray | None = None
+    """``(count, VERTEX_ROWS, VERTEX_COLUMNS, 2)`` float32 — the frame-to-frame motion the analysis
+    measured at every vertex (fractions), for the overlay's flow vectors."""
+    anchor_points: np.ndarray | None = None
+    """``(count, points, 2)`` float32 — where the object mode's anchor samples sit on each frame
+    (fractions), for the overlay's lock points. ``None`` outside the object mode."""
+
+    def _offset(self, frame_index: int) -> int | None:
+        offset = frame_index - self.first_frame
+        return offset if 0 <= offset < len(self.fields) else None
 
     def at(self, frame_index: int) -> np.ndarray | None:
-        offset = frame_index - self.first_frame
-        if offset < 0 or offset >= len(self.fields):
-            return None
-        return self.fields[offset]
+        offset = self._offset(frame_index)
+        return None if offset is None else self.fields[offset]
+
+    def motion_at(self, frame_index: int) -> np.ndarray | None:
+        offset = self._offset(frame_index)
+        return None if offset is None or self.motion is None else self.motion[offset]
+
+    def anchors_at(self, frame_index: int) -> np.ndarray | None:
+        offset = self._offset(frame_index)
+        return None if offset is None or self.anchor_points is None else self.anchor_points[offset]
+
+
+def _path_motion(path: MeshPath) -> np.ndarray:
+    """``(count, VERTEX_ROWS, VERTEX_COLUMNS, 2)`` frame-to-frame motion of every vertex (fractions)."""
+    stacked = np.stack([path.dx, path.dy], axis=-1).astype(np.float32)
+    return np.diff(stacked, axis=0, prepend=stacked[:1])
 
 
 def corrections_for(
     path: MeshPath, smoothing_frames: float, limit: float = CORRECTION_LIMIT_FRACTION
 ) -> MeshCorrections:
     """The clip's correction fields for one smoothing and margin (see :func:`mesh_correction`)."""
-    return MeshCorrections(path.first_frame, mesh_correction(path, smoothing_frames, limit=limit))
+    return MeshCorrections(
+        path.first_frame, mesh_correction(path, smoothing_frames, limit=limit), motion=_path_motion(path)
+    )
 
 
 ANCHOR_SAMPLE_OFFSETS = ((0.5, 0.5), (0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
@@ -299,6 +325,31 @@ def _sample_path_at(dx: np.ndarray, dy: np.ndarray, x: float, y: float) -> tuple
     return np.asarray(sample_x, dtype=np.float64), np.asarray(sample_y, dtype=np.float64)
 
 
+def _anchor_positions(regions: tuple[NormalizedRect, ...]) -> list[tuple[float, float]]:
+    """Fraction positions of every anchor sample point (:data:`ANCHOR_SAMPLE_OFFSETS` per region)."""
+    return [
+        (region.x + offset_x * region.width, region.y + offset_y * region.height)
+        for region in regions
+        for offset_x, offset_y in ANCHOR_SAMPLE_OFFSETS
+    ]
+
+
+def anchor_overlay_points(path: MeshPath, regions: tuple[NormalizedRect, ...]) -> np.ndarray:
+    """``(count, points, 2)`` fraction positions of the anchor samples on each frame, for the overlay.
+
+    Each sample point rides the vertex paths (:func:`_sample_path_at`): its reference position plus
+    the cumulative motion the mesh measured there — the exact signal the anchor pose is fitted from,
+    so the overlay shows what the stabilizer follows, not a separate tracker.
+    """
+    positions = _anchor_positions(regions)
+    points = np.empty((path.count, len(positions), 2), dtype=np.float32)
+    for index, (x, y) in enumerate(positions):
+        sampled_x, sampled_y = _sample_path_at(path.dx, path.dy, x, y)
+        points[:, index, 0] = x + sampled_x
+        points[:, index, 1] = y + sampled_y
+    return points
+
+
 def _anchor_similarities(path: MeshPath, regions: tuple[NormalizedRect, ...], aspect: float) -> np.ndarray:
     """``(count, 4)`` per-frame similarity ``(a, b, tx, ty)`` of the anchor content's cumulative motion.
 
@@ -307,10 +358,7 @@ def _anchor_similarities(path: MeshPath, regions: tuple[NormalizedRect, ...], as
     shape. The similarity maps a point's reference position onto its position in the frame:
     ``(X, Y) -> (a X - b Y + tx, b X + a Y + ty)``. Frame 0 is the identity (paths start at zero).
     """
-    positions = []
-    for region in regions:
-        for offset_x, offset_y in ANCHOR_SAMPLE_OFFSETS:
-            positions.append((region.x + offset_x * region.width, region.y + offset_y * region.height))
+    positions = _anchor_positions(regions)
     count = path.count
     base = np.array([(x * aspect, y) for x, y in positions])  # height units
     displaced_x = np.stack([_sample_path_at(path.dx, path.dy, x, y)[0] for x, y in positions], axis=1) * aspect
@@ -409,7 +457,9 @@ def corrections_for_object(
     adjusted = np.stack([path.dx, path.dy], axis=-1).astype(np.float64) + anchor
     residual = _centred_smooth(adjusted, half) - adjusted
     total = np.clip(anchor + residual, -limit, limit).astype(np.float32)
-    return MeshCorrections(path.first_frame, total)
+    return MeshCorrections(
+        path.first_frame, total, motion=_path_motion(path), anchor_points=anchor_overlay_points(path, regions)
+    )
 
 
 def apply_mesh(frame: np.ndarray, correction: np.ndarray) -> np.ndarray:

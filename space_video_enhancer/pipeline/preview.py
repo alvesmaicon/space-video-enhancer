@@ -21,7 +21,7 @@ from space_video_enhancer.pipeline import retime
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect, normalized_through_geometry
 from space_video_enhancer.pipeline.render import render_frame
-from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections
+from space_video_enhancer.pipeline.stabilization.mesh import VERTEX_COLUMNS, VERTEX_ROWS, MeshCorrections
 from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
@@ -94,32 +94,56 @@ class MotionOverlay:
 
 
 def motion_overlay(
-    state: StabilizationState | None, settings: StabilizationSettings, geometry: GeometrySettings
+    state: StabilizationState | None,
+    settings: StabilizationSettings,
+    geometry: GeometrySettings,
+    mesh_corrections: MeshCorrections | None = None,
+    frame_index: int | None = None,
 ) -> MotionOverlay | None:
-    """Overlay of the last estimate held by ``state``; ``None`` when nothing was tracked or stabilization is off."""
-    if state is None or not settings.enabled:
+    """Overlay of what the stabilizer follows on this frame; ``None`` when nothing is, or it is off.
+
+    Live estimates held by ``state`` win (they are what the frame is warped by during the mesh
+    modes' fallback and handoff); once the analysed field takes over nothing is tracked live any
+    more, so the overlay falls back to what the analysis measured (:class:`MeshCorrections`):
+    the anchor sample points for the object mode, the per-vertex motion vectors otherwise.
+    """
+    if not settings.enabled:
         return None
-    vectors = state.last_vectors
-    live_tracking = settings.mode.uses_auto_motion or settings.mode is StabilizationMode.MESH
-    if vectors is not None and live_tracking:  # MESH tracks live only while its fallback/handoff runs
-        width, height = vectors.size
-        scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
-        previous = normalized_through_geometry(vectors.previous * scale, geometry)
-        current = normalized_through_geometry(vectors.current * scale, geometry)
-        return MotionOverlay(previous, current, vectors.inliers.astype(bool), "flow")
-    track = state.lock
-    if track is not None and settings.mode.uses_focal_point:
-        height, width = track.prev_gray.shape[:2]
-        scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
-        current = normalized_through_geometry(track.current_points * scale, geometry)
+    if state is not None:
+        vectors = state.last_vectors
+        live_tracking = settings.mode.uses_auto_motion or settings.mode is StabilizationMode.MESH
+        if vectors is not None and live_tracking:  # MESH tracks live only while its fallback/handoff runs
+            width, height = vectors.size
+            scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
+            previous = normalized_through_geometry(vectors.previous * scale, geometry)
+            current = normalized_through_geometry(vectors.current * scale, geometry)
+            return MotionOverlay(previous, current, vectors.inliers.astype(bool), "flow")
+        track = state.lock
+        if track is not None and settings.mode.uses_focal_point:
+            height, width = track.prev_gray.shape[:2]
+            scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
+            current = normalized_through_geometry(track.current_points * scale, geometry)
+            return MotionOverlay(current, current, np.ones(len(current), dtype=bool), "lock")
+        if settings.mode.uses_focus_regions and state.region_locks:
+            tracks = list(state.region_locks.values())
+            points = np.concatenate([region.current_points for region in tracks])
+            height, width = tracks[0].prev_gray.shape[:2]
+            scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
+            current = normalized_through_geometry(points * scale, geometry)
+            return MotionOverlay(current, current, np.ones(len(current), dtype=bool), "lock")
+    if mesh_corrections is None or frame_index is None or not settings.needs_mesh_analysis:
+        return None
+    anchors = mesh_corrections.anchors_at(frame_index)
+    if anchors is not None and settings.mode.uses_focus_regions:
+        current = normalized_through_geometry(anchors, geometry)
         return MotionOverlay(current, current, np.ones(len(current), dtype=bool), "lock")
-    if settings.mode.uses_focus_regions and state.region_locks:
-        tracks = list(state.region_locks.values())
-        points = np.concatenate([region.current_points for region in tracks])
-        height, width = tracks[0].prev_gray.shape[:2]
-        scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
-        current = normalized_through_geometry(points * scale, geometry)
-        return MotionOverlay(current, current, np.ones(len(current), dtype=bool), "lock")
+    motion = mesh_corrections.motion_at(frame_index)
+    if motion is not None:
+        xs, ys = np.linspace(0.0, 1.0, VERTEX_COLUMNS), np.linspace(0.0, 1.0, VERTEX_ROWS)
+        grid = np.stack(np.meshgrid(xs, ys), axis=-1).reshape(-1, 2)
+        previous = normalized_through_geometry(grid, geometry)
+        current = normalized_through_geometry(grid + motion.reshape(-1, 2), geometry)
+        return MotionOverlay(previous, current, np.ones(len(previous), dtype=bool), "flow")
     return None
 
 
@@ -260,7 +284,13 @@ def render_preview(
         decode_sequential,
         seeks,
         sequential_reads,
-        motion_overlay(state, request.settings.stabilization, request.settings.geometry),
+        motion_overlay(
+            state,
+            request.settings.stabilization,
+            request.settings.geometry,
+            mesh_corrections=request.mesh_corrections,
+            frame_index=request.frame_index,
+        ),
     )
 
 
