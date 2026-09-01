@@ -1,6 +1,26 @@
 # Plano: estabilização por malha (MeshFlow)
 
-Estado: **planejado** (nenhum código ainda). Motivação: nos vídeos de caminhada, todos os modos
+Estado: **núcleo pronto** (`pipeline/stabilization/mesh.py`, Fases 1–3 como funções puras, validadas
+no vídeo real — tabela abaixo). Falta a Fase 4 (modo na UI, análise em segundo plano, export).
+
+Resultados no vídeo real de caminhada (VID_140049, 452 frames 4K):
+
+| variante | tremor RMS | rotação | zoom RMS | jello | trapézio |
+|---|---|---|---|---|---|
+| fonte | 1,58% | 0,389° | 0,52% | 21,7 px | 13,7 px |
+| perspectiva (global) | 1,54% | 0,189° | 0,40% | 16,5 px | 5,1 px |
+| rot+zoom + oscilação | 1,38% | 0,280° | 0,48% | **10,8 px** | 10,1 px |
+| **meshflow (núcleo)** | **0,92%** | 0,222° | **0,22%** | 16,7 px | **3,9 px** |
+
+Decisões medidas no caminho: (1) a máscara de inliers do estimador global NÃO entra na malha —
+paralaxe é outlier para uma similaridade e é exatamente o sinal (medianas locais bastam contra
+objetos em movimento, testado); (2) `GATHER_REACH = 1,0` célula — alcance maior achata o gradiente
+nas bordas; (3) `SPATIAL_PASSES = 0` — cada passada de blur no campo de correção destrói o keystone
+(trapézio 3,9 → 5,9 → 7,2 com 0/1/2 passadas) e o jello mal muda; a mediana f2 já dá a coerência;
+(4) malha + correção de oscilação (wobble) BRIGAM (jello 16,7 → 23,3) — mesmo overlap da homografia;
+um futuro modo MESH deve suprimir a oscilação como o modo Perspectiva faz; (5) o jello residual da
+malha (~16 px) é o piso do ruído por vértice — quem quiser menos jello usa rot+zoom+oscilação e
+aceita o dobro de trapézio. Motivação: nos vídeos de caminhada, todos os modos
 globais deixam deformação de paralaxe — objetos a distâncias diferentes se movem em velocidades
 diferentes, e nenhuma transformação única (nem homografia) explica o quadro inteiro. Resultado
 negativo já medido (2026-09-01): amortecer a parte não-similar da homografia (constante de tempo de
