@@ -9,7 +9,12 @@ from PySide6.QtCore import QRectF
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.grade import neutral_gains, white_patch_gains
 from space_video_enhancer.pipeline.stabilization.keyframes import interpolate_keyframes
-from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, MeshPath, corrections_for
+from space_video_enhancer.pipeline.stabilization.mesh import (
+    MeshCorrections,
+    MeshPath,
+    corrections_for,
+    corrections_for_object,
+)
 from space_video_enhancer.pipeline.stabilization.motion_path import MotionPath, fill_keyframes
 from space_video_enhancer.pipeline.stabilization.stabilize import smoothing_time_constant
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, wobble_window_frames
@@ -801,18 +806,43 @@ class AdjustmentsSection(WindowState):
         return None
 
     def _mesh_corrections_for(self, clip: Clip, stabilization: StabilizationSettings) -> MeshCorrections | None:
-        """The clip's correction fields for the current smoothing (cached; ``None`` until the analysis lands)."""
+        """The clip's correction fields for the current smoothing (cached; ``None`` until the analysis lands).
+
+        The OBJECT mode builds its fields from the same track — the anchors' pose is sampled from the
+        vertex paths — so dragging a region or moving a slider recomputes from the cache, never re-tracks.
+        """
         track = self._mesh_track_for(clip)
         if track is None:
             return None
-        key = (id(track), round(stabilization.temporal_smoothing * 1000), round(stabilization.margin * 1000))
+        regions: tuple[tuple[int, int, int, int], ...] = ()
+        if stabilization.mode is StabilizationMode.OBJECT:
+            regions = tuple(
+                (round(rect.x * 1000), round(rect.y * 1000), round(rect.width * 1000), round(rect.height * 1000))
+                for rect in stabilization.focus_regions
+            )
+        key = (
+            id(track),
+            round(stabilization.temporal_smoothing * 1000),
+            round(stabilization.margin * 1000),
+            stabilization.mode.value,
+            regions,
+        )
         corrections = self._mesh_corrections.get(key)
         if corrections is None:
             if len(self._mesh_corrections) > 8:
-                self._mesh_corrections.clear()  # slider sweeps must not hoard old fields
-            corrections = corrections_for(
-                track, smoothing_time_constant(stabilization.temporal_smoothing), stabilization.margin
-            )
+                self._mesh_corrections.clear()  # slider sweeps and region drags must not hoard old fields
+            smoothing = smoothing_time_constant(stabilization.temporal_smoothing)
+            if stabilization.mode is StabilizationMode.OBJECT:
+                width, height = self.source_size
+                corrections = corrections_for_object(
+                    track,
+                    stabilization.focus_regions,
+                    smoothing,
+                    limit=stabilization.margin,
+                    aspect=width / max(1, height),
+                )
+            else:
+                corrections = corrections_for(track, smoothing, stabilization.margin)
             self._mesh_corrections[key] = corrections
         return corrections
 
@@ -900,18 +930,13 @@ class AdjustmentsSection(WindowState):
             f"zoom out {'ligado' if settings.zoom_out else 'desligado'}",
             f"suavização {int(settings.temporal_smoothing * 100)}%",
         ]
-        if settings.mode is StabilizationMode.MESH:
-            facts = [self._mesh_status_text(), facts[0], facts[2]]  # zoom out não se aplica à malha
+        if settings.needs_mesh_analysis:
+            facts = [self._mesh_status_text(settings), facts[0], facts[2]]  # zoom out não se aplica à malha
         if settings.mode.uses_focus_regions:
             count = len(settings.focus_regions)
             regions = "1 região rastreada" if count == 1 else f"{count} regiões rastreadas"
-            facts = [
-                f"Referência: frame {self.stabilization_reference_frame_index + 1}",
-                f"{regions} (arraste os retângulos verdes no preview)",
-                facts[0],
-                facts[2],
-                "exportação sequencial",
-            ]
+            facts.insert(1, f"Referência: frame {self.stabilization_reference_frame_index + 1}")
+            facts.insert(2, f"{regions} (arraste os retângulos verdes no preview)")
         elif settings.mode.uses_focal_point:
             region = settings.focus_rect.to_pixels(*self.source_size)
             if region is None:
@@ -923,14 +948,17 @@ class AdjustmentsSection(WindowState):
             facts.append("exportação sequencial")
         self.stabilization_tab.set_info(" · ".join(facts) + ".")
 
-    def _mesh_status_text(self) -> str:
+    def _mesh_status_text(self, settings: StabilizationSettings) -> str:
         pending = self._pending_mesh_for_active_clip()
         if pending is not None:
             done, total = self._mesh_progress.get(pending.generation, (0, pending.count))
-            return (
-                f"Analisando a malha: {done * 100 // max(1, total)}% ({done}/{total} frames) — "
-                "estabilização simples de deslocamento enquanto isso"
+            fallback = (
+                "travamento ao vivo do alvo"
+                if settings.mode.uses_focus_regions
+                else "estabilização simples de deslocamento"
             )
+            percent = done * 100 // max(1, total)
+            return f"Analisando a malha: {percent}% ({done}/{total} frames) — {fallback} enquanto isso"
         clip = self.active_clip
         if clip is not None:
             track = next(

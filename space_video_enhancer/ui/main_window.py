@@ -222,7 +222,9 @@ class MainWindow(
         self._mesh_tracks: list[MeshPath] = []
         self._mesh_pending: list[MeshAnalysisRequest] = []
         self._mesh_progress: dict[int, tuple[int, int]] = {}
-        self._mesh_corrections: dict[tuple[int, int, int], MeshCorrections] = {}
+        self._mesh_corrections: dict[
+            tuple[int, int, int, str, tuple[tuple[int, int, int, int], ...]], MeshCorrections
+        ] = {}
         self._readout_measure_pending: set[tuple[Path, int, int]] = set()
         self._preview_controller.renderFailed.connect(self._on_render_failed)
         self._preview_generation = 0

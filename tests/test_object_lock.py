@@ -129,8 +129,10 @@ def test_object_settings_flags_and_project_round_trip() -> None:
     settings = StabilizationSettings(mode=StabilizationMode.OBJECT, focus_regions=(REGION_A, REGION_B))
     assert settings.enabled and settings.mode.uses_focus_regions and settings.mode.needs_reference_frame
     assert not settings.mode.uses_focal_point, "the legacy single-region flag stays with CAMERA_LOCK/HYBRID"
-    assert settings.requires_sequential_processing, "dead reckoning carries state frame to frame"
-    assert settings.applies_wobble is False  # wobble off by default; the checkbox stays available in this mode
+    assert settings.needs_mesh_analysis, "the object mode builds its fields from the same mesh track"
+    assert not settings.requires_sequential_processing, "per-frame fields keep the export parallel"
+    wobbling = StabilizationSettings(mode=StabilizationMode.OBJECT, rolling_shutter_auto=True)
+    assert not wobbling.applies_wobble, "the mesh under the object mode already absorbs the wobble"
 
     data = settings_to_dict(settings)
     loaded = settings_from_dict(StabilizationSettings, data)

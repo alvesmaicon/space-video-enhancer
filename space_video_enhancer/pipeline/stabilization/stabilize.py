@@ -30,7 +30,7 @@ import numpy as np
 
 from space_video_enhancer.pipeline.stabilization import estimators, rolling_shutter, transforms
 from space_video_enhancer.pipeline.stabilization.keyframes import manual_correction
-from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, apply_mesh
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, apply_mesh, vertex_positions
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.settings import ReadoutAxis, StabilizationMode, StabilizationSettings, clamp_unit
@@ -92,15 +92,19 @@ def apply_stabilization(
     mesh_field: np.ndarray | None = None
     if stabilizing:
         note("stabilization.mode", settings.mode.value)
-        if settings.mode is StabilizationMode.MESH:
+        if settings.mode in (StabilizationMode.MESH, StabilizationMode.OBJECT):
             if mesh_corrections is not None and frame_index is not None:
                 mesh_field = mesh_corrections.at(frame_index)
             if mesh_field is None or (state is not None and state.mesh_handoff is not None):
-                # The live fallback: until the clip's analysis lands, follow a smoothed translation path
-                # (the classic automatic mode) so choosing the mode stabilizes at once. It keeps being
-                # estimated through the handoff, so the crossfade onto the field has both ends.
-                fallback = replace(settings, mode=StabilizationMode.AUTO)
-                correction = estimate_correction(frame, fallback, frame_index, state, None)
+                # The live fallback: until the clip's analysis lands, MESH follows a smoothed translation
+                # path (the classic automatic mode) and OBJECT runs the live multi-region lock, so choosing
+                # the mode stabilizes at once. It keeps being estimated through the handoff, so the
+                # crossfade onto the field has both ends.
+                if settings.mode is StabilizationMode.MESH:
+                    fallback = replace(settings, mode=StabilizationMode.AUTO)
+                    correction = estimate_correction(frame, fallback, frame_index, state, None)
+                else:
+                    correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
         else:
             correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
     if settings.corrects_rolling_shutter:
@@ -108,7 +112,7 @@ def apply_stabilization(
         frame = unskew_rolling_shutter(frame, settings, frame_index, state, wobble_track)
     if not stabilizing:
         return frame
-    if settings.mode is StabilizationMode.MESH:
+    if settings.mode in (StabilizationMode.MESH, StabilizationMode.OBJECT):
         return _apply_mesh_mode(frame, settings, frame_index, state, mesh_field, correction)
 
     applied: np.ndarray | None = None
@@ -149,14 +153,16 @@ def _apply_mesh_mode(
     field: np.ndarray | None,
     live_correction: np.ndarray | None,
 ) -> np.ndarray:
-    """The MESH branch: warp by the clip's analysed field — or by the live fallback path until it lands.
+    """The mesh-backed branch (MESH and OBJECT): warp by the clip's analysed field — or by the live
+    fallback path until it lands.
 
-    While the analysis runs, the frame follows the smoothed translation path already estimated in
-    :func:`apply_stabilization` (``live_correction``). When the field arrives mid-sequence, the
-    correction crossfades from that path onto the field over :data:`MESH_HANDOFF_FRAMES` so the
-    frame does not jump; a fresh sequence (an export worker, a scrub, a paused re-render) starts
-    straight on the field. Both parts are clamped to the margin, and the constant crop below applies
-    in every case — the zoom never pops.
+    While the analysis runs, the frame follows the live path already estimated in
+    :func:`apply_stabilization` (``live_correction``): a smoothed translation for MESH, the Wave-2
+    multi-region lock for OBJECT. When the field arrives mid-sequence, the correction crossfades
+    from that path onto the field over :data:`MESH_HANDOFF_FRAMES` so the frame does not jump; a
+    fresh sequence (an export worker, a scrub, a paused re-render) starts straight on the field.
+    Both parts are clamped to the margin, and the constant crop below applies in every case — the
+    zoom never pops.
     """
     if field is None:
         note("stabilization.mesh", "fallback")
@@ -172,17 +178,18 @@ def _apply_mesh_mode(
         if weight >= 1.0:
             note("stabilization.mesh", "field")
             if state is not None:
-                state.last_vectors = None  # nothing is tracked live any more: drop the overlay's stale vectors
+                state.last_vectors = None  # nothing is tracked live any more: drop the overlay's stale points
+                state.region_locks = None
             scaled = field if settings.intensity >= 1.0 else field * settings.intensity
         else:
             note("stabilization.mesh", "handoff")
             assert live_correction is not None  # _advance_handoff settles on the field otherwise
-            height, width = frame.shape[:2]
-            scaled = field * weight  # a copy: the cached field must not change
-            scaled[..., 0] += (1.0 - weight) * float(live_correction[0, 2]) / width
-            scaled[..., 1] += (1.0 - weight) * float(live_correction[1, 2]) / height
+            # Crossfade in field space: the live correction (a translation for MESH, a similarity for
+            # OBJECT) is evaluated at the vertices, so its rotation/scale fade too instead of snapping.
+            scaled = field * weight + (1.0 - weight) * _transform_vertex_field(live_correction, frame.shape)
             if settings.intensity < 1.0:
                 scaled = scaled * settings.intensity
+            scaled = scaled.astype(np.float32)
         stabilized = apply_mesh(frame, scaled)
     if settings.auto_crop:
         stabilized = transforms.stabilization_crop(stabilized, None, settings.margin)
@@ -190,17 +197,37 @@ def _apply_mesh_mode(
 
 
 def _warp_by_live_path(frame: np.ndarray, settings: StabilizationSettings, correction: np.ndarray | None) -> np.ndarray:
-    """The fallback warp: the live translation path, saturated at the margin like the automatic modes."""
+    """The fallback warp: the live path (MESH: translation; OBJECT: the Wave-2 lock), saturated at the
+    margin when the constant crop must hide it."""
     if correction is None:
         note("stabilization.result", "unanalysed")
         return frame
     blended = transforms.blend_with_identity(correction, settings.intensity)
-    blended = transforms.fit_within_margin(blended, frame.shape, settings.margin)
+    if settings.auto_crop:
+        blended = transforms.fit_within_margin(blended, frame.shape, settings.margin)
     if transforms.is_negligible(blended):
         note("stabilization.result", "negligible")
         return frame
     note("stabilization.result", "applied")
     return transforms.warp(frame, blended)
+
+
+def _transform_vertex_field(transform: np.ndarray, frame_shape: tuple[int, ...]) -> np.ndarray:
+    """``transform`` (2x3 or 3x3, pixels) as per-vertex fraction displacements — a global warp in field form."""
+    height, width = frame_shape[:2]
+    xs, ys = vertex_positions(width, height)
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    moved_x = transform[0, 0] * grid_x + transform[0, 1] * grid_y + transform[0, 2]
+    moved_y = transform[1, 0] * grid_x + transform[1, 1] * grid_y + transform[1, 2]
+    if transform.shape[0] == 3:  # homography: projective divide
+        depth = transform[2, 0] * grid_x + transform[2, 1] * grid_y + transform[2, 2]
+        depth = np.where(np.abs(depth) < 1e-9, 1.0, depth)
+        moved_x = moved_x / depth
+        moved_y = moved_y / depth
+    field = np.empty((*grid_x.shape, 2))
+    field[..., 0] = (moved_x - grid_x) / max(1, width)
+    field[..., 1] = (moved_y - grid_y) / max(1, height)
+    return field
 
 
 def _advance_handoff(state: StabilizationState, frame_index: int | None, live_correction: np.ndarray | None) -> float:

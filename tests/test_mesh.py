@@ -13,14 +13,18 @@ from space_video_enhancer.pipeline.stabilization.mesh import (
     VERTEX_ROWS,
     MeshCorrections,
     MeshPath,
+    _centred_smooth,
+    _sample_path_at,
     analyze_mesh_path,
     apply_mesh,
+    corrections_for,
+    corrections_for_object,
     mesh_correction,
     vertex_positions,
 )
 from space_video_enhancer.pipeline.stabilization.stabilize import MESH_HANDOFF_FRAMES, apply_stabilization
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
-from space_video_enhancer.settings import StabilizationMode, StabilizationSettings
+from space_video_enhancer.settings import NormalizedRect, StabilizationMode, StabilizationSettings
 from space_video_enhancer.telemetry import trace as tracing
 from space_video_enhancer.telemetry.trace import RenderTrace
 
@@ -268,6 +272,133 @@ def test_mesh_handoff_settles_on_the_field_when_paused_or_fresh() -> None:
     paused = apply_stabilization(frame, settings, frame_index=2, state=state, mesh_corrections=corrections)
     assert state.mesh_handoff is None
     assert _measured_shift(baseline, paused)[0] == pytest.approx(12.0 / 0.9, abs=0.5)
+
+
+# --- the object mode's fields (Wave 3: the anchors become the mesh's reference path) ----------
+
+ANCHOR_REGION = NormalizedRect(0.1, 0.1, 0.3, 0.3)
+ASPECT = WIDTH / HEIGHT
+
+
+def _path_from_vertex_displacement(displacement) -> MeshPath:  # type: ignore[no-untyped-def]
+    """``displacement(t) -> (ROWS, COLS, 2)`` in fractions; frames 0..count-1 from calling it."""
+    count = 60
+    fields = np.stack([displacement(index) for index in range(count)])
+    return MeshPath(
+        Path("clip.mp4"),
+        0,
+        fields[..., 0].astype(np.float32),
+        fields[..., 1].astype(np.float32),
+        np.ones(count, dtype=bool),
+    )
+
+
+def test_object_corrections_put_the_anchor_on_its_smoothed_path() -> None:
+    """The anchor content lands exactly on its smoothed trajectory; the background keeps slow parallax."""
+    frames_axis = np.arange(60)
+    anchor_motion = 0.001 * frames_axis + 0.02 * np.sin(2.0 * np.pi * frames_axis / 6.0)  # drift + 5 Hz shake
+    parallax = 0.0015 * frames_axis  # background drifts away from the anchor, slowly
+
+    def displacement(index: int) -> np.ndarray:
+        field = np.zeros((VERTEX_ROWS, VERTEX_COLUMNS, 2))
+        field[..., 0] = anchor_motion[index]
+        field[:, VERTEX_COLUMNS // 2 :, 0] += parallax[index]  # right half = "background" at another depth
+        return field
+
+    path = _path_from_vertex_displacement(displacement)
+    corrections = corrections_for_object(path, (ANCHOR_REGION,), smoothing_frames=8.0, limit=0.15, aspect=ASPECT)
+
+    center = ANCHOR_REGION.center
+    sampled_x, _sampled_y = _sample_path_at(path.dx, path.dy, *center)
+    correction_x, _correction_y = _sample_path_at(corrections.fields[..., 0], corrections.fields[..., 1], *center)
+    corrected = sampled_x + correction_x
+    target = _centred_smooth(anchor_motion.reshape(-1, 1), 8)[:, 0]
+    interior = slice(10, 50)
+    assert np.abs(corrected[interior] - target[interior]).max() < 0.002, "the anchor follows its smoothed path"
+
+    # The background (right half) keeps its slow parallax: its corrected path still drifts relative
+    # to the anchor's, instead of being frozen onto it.
+    background = (0.9, 0.5)
+    back_x, _back_y = _sample_path_at(path.dx, path.dy, *background)
+    back_correction_x, _bcy = _sample_path_at(corrections.fields[..., 0], corrections.fields[..., 1], *background)
+    back_corrected = back_x + back_correction_x
+    relative = back_corrected[interior] - corrected[interior]
+    assert relative[-1] - relative[0] == pytest.approx(parallax[interior][-1] - parallax[interior][0], abs=0.004)
+
+
+def test_object_corrections_cancel_the_anchors_fast_rotation() -> None:
+    frames_axis = np.arange(60)
+    angle = np.deg2rad(1.5) * np.sin(2.0 * np.pi * frames_axis / 6.0)  # fast wobble in rotation only
+    center_x, center_y = ANCHOR_REGION.center
+    xs = np.linspace(0.0, 1.0, VERTEX_COLUMNS) * ASPECT
+    ys = np.linspace(0.0, 1.0, VERTEX_ROWS)
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    offset_x = grid_x - center_x * ASPECT
+    offset_y = grid_y - center_y
+
+    def displacement(index: int) -> np.ndarray:
+        cos, sin = np.cos(angle[index]), np.sin(angle[index])
+        field = np.zeros((VERTEX_ROWS, VERTEX_COLUMNS, 2))
+        field[..., 0] = (cos * offset_x - sin * offset_y - offset_x) / ASPECT
+        field[..., 1] = sin * offset_x + cos * offset_y - offset_y
+        return field
+
+    path = _path_from_vertex_displacement(displacement)
+    corrections = corrections_for_object(path, (ANCHOR_REGION,), smoothing_frames=8.0, limit=0.15, aspect=ASPECT)
+
+    # Probe two points of the anchor: the angle of the segment between them must stop wobbling.
+    probes = ((ANCHOR_REGION.x + 0.05, center_y), (ANCHOR_REGION.right - 0.05, center_y))
+    positions = []
+    for x, y in probes:
+        dx, dy = _sample_path_at(path.dx, path.dy, x, y)
+        cx, cy = _sample_path_at(corrections.fields[..., 0], corrections.fields[..., 1], x, y)
+        positions.append(((x + dx + cx) * ASPECT, y + dy + cy))
+    segment_x = positions[1][0] - positions[0][0]
+    segment_y = positions[1][1] - positions[0][1]
+    corrected_angle = np.arctan2(segment_y, segment_x)
+    interior = slice(10, 50)
+    residual = np.rad2deg(corrected_angle[interior] - np.median(corrected_angle[interior]))
+    raw = np.rad2deg(angle[interior])
+    worst = float(np.abs(residual).max())
+    assert worst < 0.15 * np.abs(raw).max(), f"fast rotation must be cancelled: {worst:.3f} deg"
+
+
+def test_object_corrections_without_regions_match_the_plain_mesh() -> None:
+    def displacement(index: int) -> np.ndarray:
+        field = np.zeros((VERTEX_ROWS, VERTEX_COLUMNS, 2))
+        field[..., 0] = 0.01 * np.sin(index)
+        return field
+
+    path = _path_from_vertex_displacement(displacement)
+    plain = corrections_for(path, 8.0, 0.08)
+    degenerate = corrections_for_object(path, (), 8.0, limit=0.08, aspect=ASPECT)
+    assert np.array_equal(plain.fields, degenerate.fields)
+
+
+def test_apply_stabilization_object_mode_warps_by_the_field_and_falls_back_to_the_live_lock() -> None:
+    frame = _canvas(0)[:HEIGHT, :WIDTH]
+    settings = StabilizationSettings(
+        mode=StabilizationMode.OBJECT, temporal_smoothing=1.0, focus_regions=(ANCHOR_REGION,)
+    )
+    fields = np.zeros((3, VERTEX_ROWS, VERTEX_COLUMNS, 2), dtype=np.float32)
+    fields[..., 0] = 12.0 / WIDTH
+    corrections = MeshCorrections(first_frame=0, fields=fields)
+
+    baseline = apply_stabilization(frame, settings, frame_index=1, mesh_corrections=None)  # crop only
+    trace = RenderTrace()
+    with tracing.active(trace):
+        moved = apply_stabilization(frame, settings, frame_index=1, mesh_corrections=corrections)
+    assert trace.notes.get("stabilization.mesh") == "field"
+    assert trace.notes.get("stabilization.result") == "applied"
+    assert _measured_shift(baseline, moved)[0] == pytest.approx(12.0 / 0.9, abs=0.5)
+
+    # Without the field (analysis still running) the live Wave-2 lock covers: reference given, state carried.
+    state = StabilizationState()
+    trace = RenderTrace()
+    with tracing.active(trace):
+        apply_stabilization(frame, settings, frame_index=1, state=state, reference_frame=frame, mesh_corrections=None)
+    assert trace.notes.get("stabilization.mesh") == "fallback"
+    assert trace.notes.get("stabilization.lock_regions") == [1, 1], "the live multi-region lock ran"
 
 
 def test_mesh_settings_flags() -> None:

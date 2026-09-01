@@ -263,7 +263,7 @@ def test_wobble_is_unavailable_under_the_mesh_and_comes_back(
     assert settings.rolling_shutter_auto and not settings.applies_wobble
     assert "absorvida" in tab.capture_info_label.text(), tab.capture_info_label.text()
 
-    select_combo_data(tab.mode_combo, StabilizationMode.OBJECT.value)
+    select_combo_data(tab.mode_combo, StabilizationMode.MANUAL.value)
     wait_for_preview(app, window)
     assert tab.wobble_checkbox.isEnabled() and tab.wobble_checkbox.isChecked()
     assert window.sequence.clips[0].settings.stabilization.applies_wobble

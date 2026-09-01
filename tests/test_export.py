@@ -447,6 +447,27 @@ def test_mesh_export_analyses_the_clip_first_and_renders_in_parallel(tmp_path: P
     assert "stabilize" in result.metrics["render"]["stages"]
 
 
+def test_object_export_analyses_the_mesh_first_and_renders_in_parallel(tmp_path: Path) -> None:
+    """An OBJECT clip uses the same mesh analysis; the anchored fields keep the export parallel."""
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source)
+    settings = RenderSettings(
+        stabilization=StabilizationSettings(
+            mode=StabilizationMode.OBJECT,
+            temporal_smoothing=1.0,
+            focus_regions=(NormalizedRect(0.1, 0.1, 0.3, 0.3), NormalizedRect(0.6, 0.6, 0.3, 0.3)),
+        )
+    )
+    request = _request(source, output, settings, 2)
+    assert request.effective_worker_count == 2, "the object fields are per-frame data: parallel export stays"
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event(), status=None)
+    assert result.success, result.message
+    assert result.processed_frames == 12 and int(_probe_video(output)["nb_read_frames"]) == 12
+    [analysis] = result.metrics["mesh_analysis"]
+    assert analysis["clip"] == 0 and analysis["frames"] == 12
+
+
 def test_wobble_export_analyses_the_clip_first_and_renders_in_parallel(tmp_path: Path) -> None:
     """Every frame knows its own wobble from the analysis pass, so the frames need no order; the pass reports status."""
     source = tmp_path / "source.mp4"

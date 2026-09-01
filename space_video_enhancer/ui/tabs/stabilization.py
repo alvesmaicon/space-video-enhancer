@@ -71,10 +71,10 @@ MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
         "análise roda, o preview usa uma suavização simples de deslocamento."
     ),
     StabilizationMode.OBJECT: (
-        "Mantém um alvo parado rastreando 1 a 4 regiões (arraste os retângulos verdes no preview; podem estar "
-        "em cantos opostos). Perder uma região não congela nada — as outras seguram o quadro enquanto ela é "
-        "reencontrada; duas regiões afastadas dão também a rotação e a escala do alvo. Com todas perdidas, "
-        "segue o movimento global até reencontrar."
+        "Mantém um alvo estável por 1 a 4 regiões (arraste os retângulos verdes no preview; podem estar em "
+        "cantos opostos): o alvo segue uma trajetória suavizada — como a Automática, mas centrada nele — e o "
+        "resto do quadro é corrigido por região em volta (paralaxe incluída). Usa a mesma análise da "
+        "Automática; enquanto ela roda, o preview trava o alvo ao vivo."
     ),
     StabilizationMode.CAMERA_LOCK: (
         "Modo antigo, mantido para projetos salvos: prende uma região só e segura a última posição se perder "
@@ -136,8 +136,9 @@ WOBBLE_TOOLTIP = (
     "para essa, use o slider."
 )
 WOBBLE_PERSPECTIVE_TOOLTIP = (
-    "Indisponível com os modos de perspectiva e malha: a correção deles já absorve a mesma "
-    "inclinação/oscilação a cada frame — corrigir duas vezes deforma a imagem em vez de firmá-la."
+    "Indisponível com os modos apoiados na malha (Automática e Travar objeto) e com a perspectiva legada: "
+    "a correção deles já absorve a mesma inclinação/oscilação a cada frame — corrigir duas vezes deforma "
+    "a imagem em vez de firmá-la."
 )
 ROLLING_SHUTTER_TOOLTIP = (
     "Desfaz a inclinação que o sensor deixa quando a câmera se move (postes que tombam, imagem que estica): "
@@ -501,7 +502,7 @@ class StabilizationTab(TabPage):
             widget.setEnabled(manual_enabled)
         self.rolling_shutter_slider.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.readout_measure_button.setEnabled(controls_enabled)
-        wobble_moot = mode in (StabilizationMode.PERSPECTIVE, StabilizationMode.MESH)
+        wobble_moot = mode in (StabilizationMode.PERSPECTIVE, StabilizationMode.MESH, StabilizationMode.OBJECT)
         self.wobble_checkbox.setEnabled(controls_enabled and not wobble_moot)
         self.wobble_checkbox.setToolTip(WOBBLE_PERSPECTIVE_TOOLTIP if wobble_moot else WOBBLE_TOOLTIP)
         self.readout_axis_combo.setEnabled(controls_enabled)

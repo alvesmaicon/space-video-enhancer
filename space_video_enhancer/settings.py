@@ -332,18 +332,22 @@ class StabilizationSettings:
 
     @property
     def applies_wobble(self) -> bool:
-        """The wobble correction actually runs. PERSPECTIVE and MESH suppress it: both already absorb the
-        same shear/keystone in their own warp, and correcting it twice deforms (measured on real footage:
-        jello 8,5 -> 13 px under the homography, 16,7 -> 23,3 px under the mesh)."""
+        """The wobble correction actually runs. The mesh-backed modes (MESH, OBJECT) and PERSPECTIVE
+        suppress it: their warp already absorbs the same shear/keystone, and correcting it twice deforms
+        (measured on real footage: jello 8,5 -> 13 px under the homography, 16,7 -> 23,3 px under the mesh)."""
         return self.rolling_shutter_auto and self.mode not in (
             StabilizationMode.PERSPECTIVE,
             StabilizationMode.MESH,
+            StabilizationMode.OBJECT,
         )
 
     @property
     def needs_mesh_analysis(self) -> bool:
-        """The clip must be tracked once into a mesh path (see :mod:`pipeline.stabilization.mesh`)."""
-        return self.mode is StabilizationMode.MESH
+        """The clip must be tracked once into a mesh path (see :mod:`pipeline.stabilization.mesh`).
+
+        OBJECT builds its fields from the same track (the anchors' pose is sampled from the vertex
+        paths), so one analysis serves both modes."""
+        return self.mode in (StabilizationMode.MESH, StabilizationMode.OBJECT)
 
     @property
     def corrects_rolling_shutter(self) -> bool:
@@ -364,11 +368,13 @@ class StabilizationSettings:
         """True when frame N depends on frame N-1 (inter-frame motion, temporal smoothing, rolling-shutter skew)."""
         if self.corrects_rolling_shutter_skew:
             return True
-        if self.mode in (StabilizationMode.MANUAL, StabilizationMode.MESH):
-            return False  # per-frame values come from the keyframes / the clip's mesh analysis, not from frame N-1
+        if self.mode in (StabilizationMode.MANUAL, StabilizationMode.MESH, StabilizationMode.OBJECT):
+            # Per-frame values come from the keyframes / the clip's mesh analysis, not from frame N-1.
+            # OBJECT's live fallback (the Wave-2 lock) is preview-only: the export analyses first.
+            return False
         return self.enabled and (
             self.mode.uses_auto_motion
-            or self.mode in (StabilizationMode.HYBRID, StabilizationMode.OBJECT)  # dead reckoning carries state
+            or self.mode is StabilizationMode.HYBRID  # dead reckoning carries state
             or self.temporal_smoothing > 0.0
         )
 

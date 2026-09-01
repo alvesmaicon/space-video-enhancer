@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QRectF
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer.project import load_project
@@ -48,6 +49,33 @@ def test_mesh_mode_analyses_the_clip_and_stabilizes_the_preview(
     select_combo_data(tab.mode_combo, StabilizationMode.OFF.value)
     wait_for_preview(app, window)
     assert window._mesh_track_for(window.sequence.clips[0]) is track, "the track survives leaving the mode"
+
+
+def test_object_mode_uses_the_mesh_analysis_and_the_anchored_fields(
+    app: QApplication, window: MainWindow, ui_video: Path
+) -> None:
+    tab = window.stabilization_tab
+    window._open_video(ui_video)
+    wait_for_preview(app, window)
+
+    select_combo_data(tab.mode_combo, StabilizationMode.OBJECT.value)
+    wait_for_preview(app, window)
+    assert not tab.wobble_checkbox.isEnabled(), "the mesh under the object mode absorbs the wobble"
+    assert window.focus_regions_norm, "entering the mode seeds the first region"
+
+    wait_until(app, lambda: not window._mesh_pending and bool(window._mesh_tracks), what="mesh analysis")
+    wait_for_preview(app, window)
+    trace = window._last_preview.trace
+    assert trace.get("stabilization.mode") == "object"
+    assert trace.get("stabilization.mesh") in ("field", "handoff"), trace.get("stabilization.mesh")
+    assert "Malha" in tab.info_label.text(), tab.info_label.text()
+    assert "região rastreada" in tab.info_label.text(), tab.info_label.text()
+
+    corrections = window._mesh_corrections_for(window.sequence.clips[0], window._current_stabilization())
+    window._handle_preview_focus_region_changed(0, QRectF(0.55, 0.55, 0.3, 0.3))
+    wait_for_preview(app, window)
+    moved = window._mesh_corrections_for(window.sequence.clips[0], window._current_stabilization())
+    assert moved is not corrections, "dragging a region rebuilds the fields from the cached track"
 
 
 def test_mesh_mode_stabilizes_with_the_live_fallback_while_unanalysed(

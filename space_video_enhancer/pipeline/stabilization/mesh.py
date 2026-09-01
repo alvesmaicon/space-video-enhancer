@@ -31,6 +31,7 @@ import numpy as np
 
 from space_video_enhancer.pipeline.stabilization.estimators import analysis_gray
 from space_video_enhancer.pipeline.stabilization.global_motion import grid_features, track_points
+from space_video_enhancer.settings import NormalizedRect
 
 VERTEX_ROWS = 6
 VERTEX_COLUMNS = 9
@@ -273,6 +274,142 @@ def corrections_for(
 ) -> MeshCorrections:
     """The clip's correction fields for one smoothing and margin (see :func:`mesh_correction`)."""
     return MeshCorrections(path.first_frame, mesh_correction(path, smoothing_frames, limit=limit))
+
+
+ANCHOR_SAMPLE_OFFSETS = ((0.5, 0.5), (0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
+"""Where each anchor region samples the vertex paths: its centre and four corners — five spread
+points per region, so even one region determines a similarity and regions in opposite corners pin
+the rotation and scale exactly (the Wave-2 idea, fed from the mesh instead of a live tracker)."""
+
+
+def _sample_path_at(dx: np.ndarray, dy: np.ndarray, x: float, y: float) -> tuple[np.ndarray, np.ndarray]:
+    """Per-frame displacement of the content at fraction position ``(x, y)``: bilinear over the vertex grid.
+
+    ``dx``/``dy`` are ``(count, VERTEX_ROWS, VERTEX_COLUMNS)``; returns two ``(count,)`` series.
+    """
+    column = min(max(x, 0.0), 1.0) * (VERTEX_COLUMNS - 1)
+    row = min(max(y, 0.0), 1.0) * (VERTEX_ROWS - 1)
+    c0, r0 = int(column), int(row)
+    c1, r1 = min(c0 + 1, VERTEX_COLUMNS - 1), min(r0 + 1, VERTEX_ROWS - 1)
+    wc, wr = column - c0, row - r0
+    weights = ((1 - wr) * (1 - wc), (1 - wr) * wc, wr * (1 - wc), wr * wc)
+    cells = ((r0, c0), (r0, c1), (r1, c0), (r1, c1))
+    sample_x = sum(weight * dx[:, r, c] for weight, (r, c) in zip(weights, cells))
+    sample_y = sum(weight * dy[:, r, c] for weight, (r, c) in zip(weights, cells))
+    return np.asarray(sample_x, dtype=np.float64), np.asarray(sample_y, dtype=np.float64)
+
+
+def _anchor_similarities(path: MeshPath, regions: tuple[NormalizedRect, ...], aspect: float) -> np.ndarray:
+    """``(count, 4)`` per-frame similarity ``(a, b, tx, ty)`` of the anchor content's cumulative motion.
+
+    Sampled from the vertex paths at each region's centre and corners and fitted per frame in
+    *height units* (x scaled by ``aspect``) so rotation and scale are metrically true on any frame
+    shape. The similarity maps a point's reference position onto its position in the frame:
+    ``(X, Y) -> (a X - b Y + tx, b X + a Y + ty)``. Frame 0 is the identity (paths start at zero).
+    """
+    positions = []
+    for region in regions:
+        for offset_x, offset_y in ANCHOR_SAMPLE_OFFSETS:
+            positions.append((region.x + offset_x * region.width, region.y + offset_y * region.height))
+    count = path.count
+    base = np.array([(x * aspect, y) for x, y in positions])  # height units
+    displaced_x = np.stack([_sample_path_at(path.dx, path.dy, x, y)[0] for x, y in positions], axis=1) * aspect
+    displaced_y = np.stack([_sample_path_at(path.dx, path.dy, x, y)[1] for x, y in positions], axis=1)
+
+    design = np.zeros((2 * len(positions), 4))
+    design[0::2, 0] = base[:, 0]
+    design[0::2, 1] = -base[:, 1]
+    design[0::2, 2] = 1.0
+    design[1::2, 0] = base[:, 1]
+    design[1::2, 1] = base[:, 0]
+    design[1::2, 3] = 1.0
+    pseudo_inverse = np.linalg.pinv(design)
+
+    similarities = np.zeros((count, 4))
+    similarities[:, 0] = 1.0
+    targets = np.empty(2 * len(positions))
+    for index in range(count):
+        targets[0::2] = base[:, 0] + displaced_x[index]
+        targets[1::2] = base[:, 1] + displaced_y[index]
+        similarities[index] = pseudo_inverse @ targets
+    return similarities
+
+
+def _similarity_matrices(params: np.ndarray) -> np.ndarray:
+    """``(count, 2, 3)`` affine matrices for ``(count, 4)`` similarity params ``(a, b, tx, ty)``."""
+    count = len(params)
+    matrices = np.zeros((count, 2, 3))
+    matrices[:, 0, 0] = params[:, 0]
+    matrices[:, 0, 1] = -params[:, 1]
+    matrices[:, 0, 2] = params[:, 2]
+    matrices[:, 1, 0] = params[:, 1]
+    matrices[:, 1, 1] = params[:, 0]
+    matrices[:, 1, 2] = params[:, 3]
+    return matrices
+
+
+def anchor_correction_field(
+    path: MeshPath, regions: tuple[NormalizedRect, ...], smoothing_frames: float, aspect: float
+) -> np.ndarray:
+    """Per-frame vertex displacements (fractions) that put the anchor content on its *smoothed* pose.
+
+    The anchors' pooled similarity path is smoothed entry-wise over time (similarities are closed
+    under averaging) and each frame's correction is ``smoothed ∘ current⁻¹`` — the exact transform
+    that maps where the anchors are onto where their smoothed trajectory says they should be —
+    evaluated at every vertex. Rotation and scale correct about the anchors themselves, not the
+    frame corner, because the pose fit carries the anchors' geometry.
+    """
+    half = max(1, round(smoothing_frames))
+    poses = _anchor_similarities(path, regions, aspect)
+    smoothed = _centred_smooth(poses, half)
+    current = _similarity_matrices(poses)
+    target = _similarity_matrices(smoothed)
+
+    xs = np.linspace(0.0, 1.0, VERTEX_COLUMNS) * aspect
+    ys = np.linspace(0.0, 1.0, VERTEX_ROWS)
+    grid_x, grid_y = np.meshgrid(xs, ys)  # (ROWS, COLUMNS), height units
+    points = np.stack([grid_x, grid_y, np.ones_like(grid_x)], axis=-1)  # (R, C, 3)
+
+    field = np.zeros((path.count, VERTEX_ROWS, VERTEX_COLUMNS, 2))
+    identity = np.eye(3)
+    for index in range(path.count):
+        forward = identity.copy()
+        forward[:2] = current[index]
+        inverse = np.linalg.inv(forward)[:2]
+        correction = target[index] @ np.vstack([inverse, [0.0, 0.0, 1.0]])  # smoothed ∘ current⁻¹, 2x3
+        moved = points @ correction.T  # (R, C, 2) height units
+        field[index, ..., 0] = (moved[..., 0] - grid_x) / aspect  # back to width fractions
+        field[index, ..., 1] = moved[..., 1] - grid_y
+    return field
+
+
+def corrections_for_object(
+    path: MeshPath,
+    regions: tuple[NormalizedRect, ...],
+    smoothing_frames: float,
+    *,
+    limit: float = CORRECTION_LIMIT_FRACTION,
+    aspect: float = 1.0,
+) -> MeshCorrections:
+    """The object mode's fields: the anchors follow their smoothed pose, the mesh corrects around them.
+
+    Assembly: the anchor correction (:func:`anchor_correction_field`) is applied to every vertex,
+    the vertex paths are re-expressed as they would move *after* that warp, and the standard mesh
+    smoothing runs on those adjusted paths — so the anchors land exactly on their smoothed
+    trajectory (smoothing an already-smooth path is a no-op there) while the rest of the frame
+    keeps its slow parallax relative to the anchors and loses only the fast part. With no regions
+    this degenerates to :func:`corrections_for`. ``aspect`` is the analysed frames' width/height —
+    it makes the pose's rotation and scale metrically true. The total is clamped to ``limit`` (the
+    margin) so the fixed crop always hides it.
+    """
+    if not regions:
+        return corrections_for(path, smoothing_frames, limit)
+    half = max(1, round(smoothing_frames))
+    anchor = anchor_correction_field(path, regions, smoothing_frames, aspect)
+    adjusted = np.stack([path.dx, path.dy], axis=-1).astype(np.float64) + anchor
+    residual = _centred_smooth(adjusted, half) - adjusted
+    total = np.clip(anchor + residual, -limit, limit).astype(np.float32)
+    return MeshCorrections(path.first_frame, total)
 
 
 def apply_mesh(frame: np.ndarray, correction: np.ndarray) -> np.ndarray:

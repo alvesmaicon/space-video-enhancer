@@ -37,6 +37,7 @@ from space_video_enhancer.pipeline.stabilization.mesh import (
     MeshPath,
     analyze_mesh_path,
     corrections_for,
+    corrections_for_object,
 )
 from space_video_enhancer.pipeline.stabilization.stabilize import (
     needs_previous_frame,
@@ -46,7 +47,7 @@ from space_video_enhancer.pipeline.stabilization.stabilize import (
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, analyze_wobble, wobble_window_frames
 from space_video_enhancer.sequence import Clip, ClipSource, ExportSegment, Sequence
-from space_video_enhancer.settings import RenderSettings
+from space_video_enhancer.settings import RenderSettings, StabilizationMode
 from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.telemetry.stats import Histogram, StageStats
 from space_video_enhancer.telemetry.trace import RenderTrace
@@ -363,8 +364,19 @@ class _ClipRenderer:
         self.wobble_track = wobble_track
         self.mesh_corrections: MeshCorrections | None = None
         if mesh_track is not None and clip.settings.stabilization.needs_mesh_analysis:
-            smoothing = smoothing_time_constant(clip.settings.stabilization.temporal_smoothing)
-            self.mesh_corrections = corrections_for(mesh_track, smoothing, clip.settings.stabilization.margin)
+            stabilization = clip.settings.stabilization
+            smoothing = smoothing_time_constant(stabilization.temporal_smoothing)
+            if stabilization.mode is StabilizationMode.OBJECT:
+                height, width = first_frame.shape[:2]  # the analysed frames' shape: the pose fit needs it
+                self.mesh_corrections = corrections_for_object(
+                    mesh_track,
+                    stabilization.focus_regions,
+                    smoothing,
+                    limit=stabilization.margin,
+                    aspect=width / max(1, height),
+                )
+            else:
+                self.mesh_corrections = corrections_for(mesh_track, smoothing, stabilization.margin)
 
 
 def _analyze_clip_wobble(

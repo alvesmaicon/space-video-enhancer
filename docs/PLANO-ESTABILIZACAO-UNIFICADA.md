@@ -1,6 +1,6 @@
 # Plano: estabilização unificada (automática única + travar objeto multi-ponto)
 
-Estado: **Waves 1 e 2 feitas (2026-09-01)**; Waves 3-4 planejadas. Motivação (Maicon, 2026-09-01): são modos demais para escolher; as
+Estado: **Waves 1, 2 e 3 feitas (2026-09-01)**; Wave 4 planejada. Motivação (Maicon, 2026-09-01): são modos demais para escolher; as
 automáticas deveriam ser uma só, e o "travar objeto" deveria sobreviver à perda do alvo usando
 vários pontos de rastreio — inclusive em cantos opostos do quadro — combinado com o resto da
 máquina (malha, oscilação).
@@ -59,17 +59,31 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   residual < 1,5 px durante as oclusões; duas regiões opostas recuperam rotação de 2° com erro
   < 0,3°; todas perdidas → "dead_reckoning"; round-trip do projeto.
 
-## Wave 3 — objeto + malha ("cadeia de pixels-chave")
+## Wave 3 — objeto + malha ("cadeia de pixels-chave") — FEITA (2026-09-01)
 
-- A fusão final: as regiões-âncora definem **o caminho de referência** (o que deve ficar parado) e
+- A fusão final: as regiões-âncora definem **o caminho de referência** (o que deve ficar estável) e
   a malha corrige o resto do quadro **em volta** dessa âncora (paralaxe e jello por região).
-- Implementação: hoje a correção da malha suaviza cada vértice contra o próprio caminho; nesta wave
-  o alvo do caminho passa a ser a trajetória (suavizada, ou fixa = lock) das âncoras, e cada
-  vértice corrige a diferença entre o seu caminho e esse alvo. Âncoras opostas dão escala/rotação
-  do alvo de graça (Wave 2).
-- A oscilação/rolling shutter continua implícita na malha (medido: correções extras brigam).
-- Aceitação: vídeo real seguindo um objeto — o objeto fica parado (métrica do lock) E o fundo não
-  "respira" (trapézio/jello do comparador) ao mesmo tempo, o que nenhum modo atual consegue.
+- Como ficou: o modo **Travar objeto passou a ser apoiado na malha** (`needs_mesh_analysis` cobre
+  OBJECT — uma análise serve os dois modos). O caminho das âncoras é **amostrado da própria trilha
+  da malha** (`_anchor_similarities`: 5 pontos por região — centro + cantos — ajustados numa
+  similaridade por frame, em unidades de altura para rotação/escala serem métricas), então arrastar
+  região ou mover slider recalcula do cache em ms, sem re-rastrear. A montagem
+  (`corrections_for_object`): correção da âncora = `pose_suavizada ∘ pose_atual⁻¹` avaliada em cada
+  vértice (rotação/escala giram em torno do alvo), caminhos ajustados = trilha + campo da âncora, e
+  a suavização padrão da malha roda sobre eles — a âncora cai EXATAMENTE na sua trajetória suavizada
+  (suavizar o já-suave é no-op ali) e o fundo mantém a paralaxe lenta relativa ao alvo. Sem regiões
+  degenera na malha pura (campos idênticos, testado). O v8 ensinou: pose FIXA satura em caminhada —
+  por isso o alvo segue a trajetória suavizada (slider de suavização controla o quão "travado").
+- Fallback ao vivo = o lock multi-região da Wave 2 (com handoff da Wave 1, agora ciente de
+  rotação: a correção ao vivo vira campo por vértice no crossfade). Export analisa antes e continua
+  paralelo (`requires_sequential_processing` False); oscilação suprimida também no OBJECT (a malha
+  absorve).
+- Aceitação: sintético — âncora cai na trajetória suavizada (erro < 0,2% do quadro), rotação rápida
+  de 1,5° cancelada (> 85%), paralaxe do fundo preservada. Vídeo real (caminhada, regiões do v8):
+  alvo rápido 10,07 → 2,72 px (malha pura: 2,60 — empate no alvo estático), global 2,52 px (malha:
+  2,85) e trapézio 5,04 px/par (malha: 6,40) — o objeto agora é ≥ malha nesse footage, em vez do
+  1,11% vs 0,71% do lock de pose fixa do v8. O caso diferenciador (alvo que se move independente do
+  fundo) está coberto pelos sintéticos; medir em footage de alvo real quando houver.
 
 ## Wave 4 — polimento e remoção do legado
 
