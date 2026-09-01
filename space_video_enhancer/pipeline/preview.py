@@ -113,6 +113,13 @@ def motion_overlay(
         scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
         current = normalized_through_geometry(track.current_points * scale, geometry)
         return MotionOverlay(current, current, np.ones(len(current), dtype=bool), "lock")
+    if settings.mode.uses_focus_regions and state.region_locks:
+        tracks = list(state.region_locks.values())
+        points = np.concatenate([region.current_points for region in tracks])
+        height, width = tracks[0].prev_gray.shape[:2]
+        scale = np.array([1.0 / max(1, width), 1.0 / max(1, height)])
+        current = normalized_through_geometry(points * scale, geometry)
+        return MotionOverlay(current, current, np.ones(len(current), dtype=bool), "lock")
     return None
 
 

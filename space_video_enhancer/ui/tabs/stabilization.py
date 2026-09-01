@@ -13,9 +13,10 @@ the lock holds on to is the one on screen when the mode is chosen or the region 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton, QWidget
 
 from space_video_enhancer.settings import (
+    MAX_FOCUS_REGIONS,
     NormalizedRect,
     ReadoutAxis,
     StabilizationMode,
@@ -37,17 +38,19 @@ from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
 MODE_OPTIONS: list[tuple[str, StabilizationMode]] = [
     ("Desligada", StabilizationMode.OFF),
     ("Automática", StabilizationMode.MESH),
-    ("Travar uma região (camera lock)", StabilizationMode.CAMERA_LOCK),
-    ("Travar uma região, suavizar se perder", StabilizationMode.HYBRID),
+    ("Travar objeto", StabilizationMode.OBJECT),
     ("Manual (keyframes)", StabilizationMode.MANUAL),
 ]
 LEGACY_MODE_OPTIONS: dict[StabilizationMode, str] = {
     StabilizationMode.AUTO: "Suavizar tremor — só deslocamento (legado)",
     StabilizationMode.SIMILARITY: "Suavizar tremor + rotação e zoom (legado)",
     StabilizationMode.PERSPECTIVE: "Suavizar tremor + perspectiva (legado)",
+    StabilizationMode.CAMERA_LOCK: "Travar uma região — camera lock (legado)",
+    StabilizationMode.HYBRID: "Travar uma região, suavizar se perder (legado)",
 }
-"""Modes the Automática (malha) superseded. They stay in the engine so old projects render the same;
-the combo only shows the entry while the clip on screen uses it (see :meth:`StabilizationTab.apply`)."""
+"""Modes the Automática (malha) and Travar objeto superseded. They stay in the engine so old projects
+render the same; the combo only shows the entry while the clip on screen uses it (see
+:meth:`StabilizationTab.apply`)."""
 MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
     StabilizationMode.OFF: "Nenhuma compensação de movimento.",
     StabilizationMode.AUTO: (
@@ -67,13 +70,19 @@ MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
         "de câmera (MeshFlow): tremor, rotação, zoom, perspectiva e a paralaxe de caminhada. Enquanto a "
         "análise roda, o preview usa uma suavização simples de deslocamento."
     ),
+    StabilizationMode.OBJECT: (
+        "Mantém um alvo parado rastreando 1 a 4 regiões (arraste os retângulos verdes no preview; podem estar "
+        "em cantos opostos). Perder uma região não congela nada — as outras seguram o quadro enquanto ela é "
+        "reencontrada; duas regiões afastadas dão também a rotação e a escala do alvo. Com todas perdidas, "
+        "segue o movimento global até reencontrar."
+    ),
     StabilizationMode.CAMERA_LOCK: (
-        "Mantém a região verde (arraste-a no preview) presa a onde ela estava no frame de referência; "
-        "segura a última posição se perder o alvo."
+        "Modo antigo, mantido para projetos salvos: prende uma região só e segura a última posição se perder "
+        "o alvo. O modo Travar objeto cobre este caso."
     ),
     StabilizationMode.HYBRID: (
-        "Prende a região verde (arraste-a no preview) com camera lock; se perder o alvo, segue o movimento "
-        "global até reencontrá-lo."
+        "Modo antigo, mantido para projetos salvos: prende uma região só; se perder o alvo, segue o movimento "
+        "global. O modo Travar objeto cobre este caso."
     ),
     StabilizationMode.MANUAL: (
         "Você alinha um frame de tempos em tempos (posição, rotação, zoom) contra a referência fantasma; "
@@ -151,6 +160,17 @@ def _format_margin(value: int) -> str:
     return f"{value}% (zoom {1.0 / (1.0 - 2.0 * value / 100.0):.2f}x)"
 
 
+def _row(*widgets: QWidget) -> QWidget:
+    """Buttons side by side in a hideable container (a bare layout cannot be hidden as one)."""
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    for widget in widgets:
+        layout.addWidget(widget)
+    layout.addStretch(1)
+    return container
+
+
 class StabilizationTab(TabPage):
     modeChanged = Signal()
     controlChanged = Signal()
@@ -159,6 +179,10 @@ class StabilizationTab(TabPage):
     """Put the focal region back at the centre (and take the reference on the current frame)."""
     referenceRequested = Signal()
     """Make the frame on screen the camera-lock reference; the focal region stays where it is."""
+    regionAddRequested = Signal()
+    """Object lock: add one more tracked region (up to MAX_FOCUS_REGIONS)."""
+    regionRemoveRequested = Signal()
+    """Object lock: remove the last tracked region (at least one remains)."""
     captureChanged = Signal()
     """Deinterlacing or the rolling-shutter correction changed."""
     readoutMeasureRequested = Signal()
@@ -202,11 +226,17 @@ class StabilizationTab(TabPage):
             "Prende o camera lock ao frame que está no preview, mantendo a região verde onde está. "
             "Escolha um frame nítido, com a região bem enquadrada."
         )
-        self.reset_button = QPushButton("Redefinir ponto focal")
+        self.reset_button = QPushButton("Redefinir regiões")
         self.reset_button.setObjectName("secondaryButton")
-        self.reset_button.setToolTip(
-            "Volta a região verde para o centro do quadro e usa o frame atual como referência."
+        self.reset_button.setToolTip("Volta a uma região só, no centro do quadro, e usa o frame atual como referência.")
+        self.add_region_button = QPushButton("Adicionar região")
+        self.add_region_button.setToolTip(
+            f"Mais um retângulo rastreado (até {MAX_FOCUS_REGIONS}). Regiões afastadas — até em cantos "
+            "opostos — dão também a rotação e a escala do alvo, e uma perdida não congela o quadro."
         )
+        self.remove_region_button = QPushButton("Remover última região")
+        self.remove_region_button.setObjectName("secondaryButton")
+        self._region_count = 1
         self.auto_crop_checkbox = QCheckBox("Crop automático para esconder bordas")
         self.auto_crop_checkbox.setChecked(True)
         self.auto_crop_checkbox.setToolTip(
@@ -299,6 +329,8 @@ class StabilizationTab(TabPage):
         self.zoom_out_checkbox.toggled.connect(self._handle_zoom_out_toggled)
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.reference_button.clicked.connect(self.referenceRequested.emit)
+        self.add_region_button.clicked.connect(self.regionAddRequested.emit)
+        self.remove_region_button.clicked.connect(self.regionRemoveRequested.emit)
         self.onion_slider.valueChanged.connect(lambda _value: self.onionOpacityChanged.emit())
         self.onion_slider.resetRequested.connect(lambda: self.onion_slider.setValue(50))
         self.manual_reference_button.clicked.connect(self.manualReferenceRequested.emit)
@@ -309,9 +341,8 @@ class StabilizationTab(TabPage):
         self.manual_prev_button.clicked.connect(lambda: self.manualNavigateRequested.emit(-1))
         self.manual_next_button.clicked.connect(lambda: self.manualNavigateRequested.emit(1))
         self.manual_fill_button.clicked.connect(self.manualFillRequested.emit)
-        reference_buttons = QHBoxLayout()
-        reference_buttons.addWidget(self.reference_button)
-        reference_buttons.addWidget(self.reset_button)
+        self.reference_row = _row(self.reference_button, self.reset_button)
+        self.region_row = _row(self.add_region_button, self.remove_region_button)
         manual_reference_row = QHBoxLayout()
         manual_reference_row.addWidget(self.manual_reference_button)
         manual_reference_row.addStretch(1)
@@ -327,6 +358,20 @@ class StabilizationTab(TabPage):
         readout_measure_row.addWidget(self.readout_measure_button)
         readout_measure_row.addStretch(1)
 
+        self.manual_group = group_box(
+            "Ajuste manual (keyframes)",
+            self.onion_slider,
+            manual_reference_row,
+            self.manual_x_slider,
+            self.manual_y_slider,
+            self.manual_rotation_slider,
+            self.manual_zoom_slider,
+            self.manual_shear_slider,
+            self.manual_stretch_slider,
+            manual_nav_row,
+            manual_fill_row,
+            self.manual_info_label,
+        )
         self.add_sections(
             group_box(
                 "Estabilização",
@@ -337,23 +382,11 @@ class StabilizationTab(TabPage):
                 self.margin_slider,
                 self.auto_crop_checkbox,
                 self.zoom_out_checkbox,
-                reference_buttons,
+                self.region_row,
+                self.reference_row,
                 self.info_label,
             ),
-            group_box(
-                "Ajuste manual (keyframes)",
-                self.onion_slider,
-                manual_reference_row,
-                self.manual_x_slider,
-                self.manual_y_slider,
-                self.manual_rotation_slider,
-                self.manual_zoom_slider,
-                self.manual_shear_slider,
-                self.manual_stretch_slider,
-                manual_nav_row,
-                manual_fill_row,
-                self.manual_info_label,
-            ),
+            self.manual_group,
             group_box(
                 "Artefatos de captura",
                 self.rolling_shutter_slider,
@@ -365,17 +398,21 @@ class StabilizationTab(TabPage):
         )
         self._update_hint()
         self._update_readout_axis_tooltip()
+        self.update_controls_state(False)  # hide what the initial mode (Desligada) does not use
 
     def mode(self) -> StabilizationMode:
         return combo_enum(self.mode_combo, StabilizationMode, StabilizationMode.OFF)
 
-    def settings(self, focus_rect: NormalizedRect) -> StabilizationSettings:
+    def settings(
+        self, focus_rect: NormalizedRect, focus_regions: tuple[NormalizedRect, ...] = ()
+    ) -> StabilizationSettings:
         return StabilizationSettings(
             mode=self.mode(),
             intensity=clamp_unit(self.intensity_slider.value() / 100.0),
             temporal_smoothing=clamp_unit(self.smoothing_slider.value() / 100.0),
             margin=max(0.05, min(0.15, self.margin_slider.value() / 100.0)),
             focus_rect=focus_rect,
+            focus_regions=focus_regions,
             auto_crop=self.auto_crop_checkbox.isChecked(),
             zoom_out=self.zoom_out_checkbox.isChecked(),
             rolling_shutter=max(-1.0, min(1.0, self.rolling_shutter_slider.value() / 100.0)),
@@ -417,13 +454,29 @@ class StabilizationTab(TabPage):
         self._update_hint()
         self._update_readout_axis_tooltip()
 
+    def set_region_count(self, count: int) -> None:
+        """How many object-lock regions the clip on screen has (drives the add/remove buttons)."""
+        self._region_count = count
+
     def update_controls_state(self, has_video: bool) -> None:
-        """Enable only what the current mode uses."""
+        """Show only what the current mode uses, and enable only what the clip allows."""
         mode = self.mode()
         controls_enabled = has_video and self.mode_combo.isEnabled()
         stabilization_enabled = controls_enabled and mode is not StabilizationMode.OFF
         manual = mode is StabilizationMode.MANUAL
         mesh = mode is StabilizationMode.MESH
+        target = mode.uses_focus_regions
+        automatic = mode is not StabilizationMode.OFF and not manual  # the estimated modes: the sliders apply
+
+        # Visibility first: each mode shows only its own controls (the capture group below is mode-free).
+        for control in (self.intensity_slider, self.smoothing_slider, self.margin_slider, self.auto_crop_checkbox):
+            control.setVisible(automatic)
+        self.zoom_out_checkbox.setVisible(automatic and not mesh and not target)  # a malha e o alvo usam o crop fixo
+        self.reference_row.setVisible(mode.needs_reference_frame)
+        self.region_row.setVisible(target)
+        self.manual_group.setVisible(manual)
+        self.info_label.setVisible(mode is not StabilizationMode.OFF)
+
         auto_enabled = stabilization_enabled and not manual  # intensity/smoothing/crop belong to the estimated modes
         self.intensity_slider.setEnabled(auto_enabled)
         self.smoothing_slider.setEnabled(auto_enabled)
@@ -431,8 +484,10 @@ class StabilizationTab(TabPage):
         zoom_out_enabled = auto_enabled and not mesh and self.zoom_out_checkbox.isChecked()
         self.auto_crop_checkbox.setEnabled(auto_enabled and not zoom_out_enabled)
         self.zoom_out_checkbox.setEnabled(auto_enabled and not mesh)  # a malha já é limitada à margem do crop
-        self.reset_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
-        self.reference_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
+        self.reset_button.setEnabled(stabilization_enabled and mode.needs_reference_frame)
+        self.reference_button.setEnabled(stabilization_enabled and mode.needs_reference_frame)
+        self.add_region_button.setEnabled(stabilization_enabled and target and self._region_count < MAX_FOCUS_REGIONS)
+        self.remove_region_button.setEnabled(stabilization_enabled and target and self._region_count > 1)
         manual_enabled = controls_enabled and manual
         for widget in (
             self.onion_slider,
@@ -500,6 +555,8 @@ class StabilizationTab(TabPage):
             self.margin_slider,
             self.reset_button,
             self.reference_button,
+            self.add_region_button,
+            self.remove_region_button,
             self.auto_crop_checkbox,
             self.zoom_out_checkbox,
             self.onion_slider,

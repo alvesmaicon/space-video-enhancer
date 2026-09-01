@@ -13,7 +13,7 @@ pixel (1.0 = 1:1) — per panel, so side by side is twice as wide — and lets t
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, Signal
@@ -377,6 +377,8 @@ class ComparePreview(QWidget):
     cropChanged = Signal(QRectF)
     sampleChanged = Signal(QRectF)
     stabilizationChanged = Signal(QRectF)
+    focusRegionChanged = Signal(int, QRectF)
+    """One of the object lock's numbered regions was moved/resized: ``(index, rect)``."""
     whiteBalanceChanged = Signal(QRectF)
     openRequested = Signal()
     """The empty-state "Abrir vídeo" button was clicked."""
@@ -413,11 +415,11 @@ class ComparePreview(QWidget):
         self.crop = SelectionOverlay(CROP_STYLE, QRectF(0.1, 0.1, 0.8, 0.8), self.cropChanged.emit)
         self.sample = SelectionOverlay(SAMPLE_STYLE, QRectF(0.33, 0.33, 0.34, 0.34), self.sampleChanged.emit)
         self.focus = SelectionOverlay(FOCUS_STYLE, QRectF(0.4, 0.3, 0.2, 0.2), self.stabilizationChanged.emit)
+        self.focus_regions: list[SelectionOverlay] = []
+        """The object lock's numbered regions (see :meth:`set_focus_regions_state`)."""
         self.white_balance = SelectionOverlay(
             WHITE_BALANCE_STYLE, QRectF(0.4, 0.4, 0.2, 0.2), self.whiteBalanceChanged.emit
         )
-        # Hit-testing priority: focus region, gray reference, noise sample, then crop.
-        self._overlays = (self.focus, self.white_balance, self.sample, self.crop)
 
         self.open_button = QPushButton(OPEN_BUTTON_TEXT, self)
         self.open_button.setObjectName("previewOpenButton")
@@ -595,6 +597,28 @@ class ComparePreview(QWidget):
         self.focus.set_state(enabled, stabilization_rect_norm, editing)
         self.update()
 
+    def set_focus_regions_state(self, enabled: bool, rects: list[QRectF], editing: bool) -> None:
+        """Show the object lock's numbered regions (one draggable overlay each); an empty list clears them."""
+        while len(self.focus_regions) > len(rects):
+            self.focus_regions.pop()
+        while len(self.focus_regions) < len(rects):
+            index = len(self.focus_regions)
+            style = replace(FOCUS_STYLE, label=f"Região {index + 1}")
+            self.focus_regions.append(SelectionOverlay(style, rects[index], self._region_callback(index)))
+        for overlay, rect in zip(self.focus_regions, rects):
+            overlay.set_state(enabled, rect, editing)
+        self.update()
+
+    def _region_callback(self, index: int) -> Callable[[QRectF], None]:
+        def emit(rect: QRectF) -> None:
+            self.focusRegionChanged.emit(index, rect)
+
+        return emit
+
+    def _active_overlays(self) -> tuple[SelectionOverlay, ...]:
+        """Hit-testing priority: the numbered regions, the focus region, gray reference, noise sample, crop."""
+        return (*self.focus_regions, self.focus, self.white_balance, self.sample, self.crop)
+
     def set_white_balance_state(self, enabled: bool, rect_norm: QRectF, editing: bool) -> None:
         self.white_balance.set_state(enabled, rect_norm, editing)
         self.update()
@@ -626,7 +650,7 @@ class ComparePreview(QWidget):
         painter.save()
         if self._onion is None and not self._compare_mode.is_split:
             painter.setClipRect(layout.after_panel)  # the zoomed frame may extend past its panel
-        for overlay in (self.crop, self.sample, self.focus, self.white_balance):
+        for overlay in (self.crop, self.sample, self.focus, *self.focus_regions, self.white_balance):
             if overlay.enabled:
                 overlay.paint(painter, self._image_rect)
         painter.restore()
@@ -708,7 +732,7 @@ class ComparePreview(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._image_rect.contains(event.position()) and self.after_panel_rect().contains(event.position()):
-            for overlay in self._overlays:
+            for overlay in self._active_overlays():
                 if not overlay.interactive:
                     continue
                 cursor = overlay.begin_drag(event.position(), self._image_rect)
@@ -730,13 +754,13 @@ class ComparePreview(QWidget):
         if self._pan_mode:
             return  # nothing else to hover or drag with the hand tool
         left_pressed = bool(event.buttons() & Qt.MouseButton.LeftButton)
-        for overlay in self._overlays:
+        for overlay in self._active_overlays():
             if overlay.interactive and overlay.dragging and left_pressed:
                 overlay.drag_to(event.position(), self._image_rect)
                 self.update()
                 return
 
-        for overlay in self._overlays:
+        for overlay in self._active_overlays():
             if overlay.interactive:
                 cursor = overlay.hover_cursor(event.position(), self._image_rect)
                 self.setCursor(cursor if cursor is not None else self._idle_cursor())
@@ -751,9 +775,9 @@ class ComparePreview(QWidget):
             self._pan_anchor = None
             self.setCursor(self._idle_cursor())
             return
-        for overlay in self._overlays:
+        for overlay in self._active_overlays():
             overlay.end_drag()
-        if any(overlay.enabled for overlay in self._overlays):
+        if any(overlay.enabled for overlay in self._active_overlays()):
             self.setCursor(self._idle_cursor())
 
     # --- helpers -------------------------------------------------------------------------

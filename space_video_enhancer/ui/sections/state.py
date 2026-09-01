@@ -107,6 +107,8 @@ class WindowState(QMainWindow):
     white_balance_rect_norm: QRectF
     white_balance_gains: tuple[float, float, float]
     stabilization_rect_norm: QRectF
+    focus_regions_norm: list[QRectF]
+    """The object lock's tracked regions (1..MAX_FOCUS_REGIONS), per-clip like the focal rect."""
     stabilization_reference_frame: np.ndarray | None
     stabilization_reference_frame_index: int
     _manual_keyframes: tuple[StabilizationKeyframe, ...]

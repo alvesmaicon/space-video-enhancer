@@ -35,6 +35,13 @@ from space_video_enhancer.ui.sections.state import WindowState
 from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisRequest
 
 LOG = get_logger("ui")
+REGION_SEED_RECTS = (
+    NormalizedRect(0.4, 0.3, 0.2, 0.2),
+    NormalizedRect(0.72, 0.65, 0.2, 0.2),  # opposite corner first: two spread regions pin rotation and scale
+    NormalizedRect(0.08, 0.65, 0.2, 0.2),
+    NormalizedRect(0.72, 0.08, 0.2, 0.2),
+)
+"""Where 'Adicionar região' places each new object-lock region (the user drags it from there)."""
 WOBBLE_ANALYSIS_MARGIN_SECONDS = 2.0
 """The wobble analysis covers this much beyond the clip's range, so trimming the in/out points a little reuses it."""
 MESH_ANALYSIS_MARGIN_FRAMES = 60
@@ -310,7 +317,9 @@ class AdjustmentsSection(WindowState):
     def _handle_stabilization_mode_changed(self) -> None:
         self._stabilization_epoch += 1
         mode = self.stabilization_tab.mode()
-        if mode.uses_focal_point:
+        if mode.uses_focus_regions and not self.focus_regions_norm:
+            self.focus_regions_norm = [norm_to_qrect(REGION_SEED_RECTS[0])]  # the object mode starts with one region
+        if mode.needs_reference_frame:
             self._capture_stabilization_reference_from_current_frame(label="ajuste de estabilização")
         if mode is StabilizationMode.MANUAL and self._onion_reference is None and self._last_preview is not None:
             self._onion_reference = self._last_preview.before  # start the ghost on the current frame
@@ -517,10 +526,42 @@ class AdjustmentsSection(WindowState):
 
     def _reset_stabilization_rect(self) -> None:
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
-        self._capture_stabilization_reference_from_current_frame(label="redefinir ponto focal")
+        self.focus_regions_norm = [norm_to_qrect(DEFAULT_STABILIZATION_RECT)]
+        self._capture_stabilization_reference_from_current_frame(label="redefinir regiões")
+        self._stabilization_epoch += 1
+        self._update_stabilization_controls_state()
+        self._schedule_preview_refresh()
+
+    def _handle_preview_focus_region_changed(self, index: int, rect: QRectF) -> None:
+        """One of the object lock's numbered rectangles moved: like the focal rect, it re-takes the reference."""
+        if not 0 <= index < len(self.focus_regions_norm):
+            return
+        self.focus_regions_norm[index] = QRectF(rect)
+        self._capture_stabilization_reference_from_current_frame(
+            label="mover região", key=("focus_region", index, self.active_clip_index)
+        )
         self._stabilization_epoch += 1
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
+        self._schedule_preview_refresh()
+
+    def _add_focus_region(self) -> None:
+        if len(self.focus_regions_norm) >= len(REGION_SEED_RECTS):
+            return
+        seed = REGION_SEED_RECTS[len(self.focus_regions_norm)]
+        self.focus_regions_norm.append(norm_to_qrect(seed))
+        self._capture_stabilization_reference_from_current_frame(label="adicionar região")
+        self._stabilization_epoch += 1
+        self._update_stabilization_controls_state()
+        self._schedule_preview_refresh()
+
+    def _remove_focus_region(self) -> None:
+        if len(self.focus_regions_norm) <= 1:
+            return
+        self.focus_regions_norm.pop()
+        self._capture_stabilization_reference_from_current_frame(label="remover região")
+        self._stabilization_epoch += 1
+        self._update_stabilization_controls_state()
         self._schedule_preview_refresh()
 
     def _set_stabilization_reference_here(self) -> None:
@@ -549,6 +590,7 @@ class AdjustmentsSection(WindowState):
         self._prune_reference_frames()
 
     def _update_stabilization_controls_state(self) -> None:
+        self.stabilization_tab.set_region_count(len(self.focus_regions_norm))
         self.stabilization_tab.update_controls_state(self.frame_count > 0)
         self._sync_stabilization_preview()
         self._update_stabilization_info_label()
@@ -826,6 +868,10 @@ class AdjustmentsSection(WindowState):
         self.preview.set_stabilization_state(
             active and mode.uses_focal_point, self.stabilization_rect_norm, editing=True
         )
+        regions_active = active and mode.uses_focus_regions
+        self.preview.set_focus_regions_state(
+            regions_active, [QRectF(rect) for rect in self.focus_regions_norm] if regions_active else [], editing=True
+        )
         show_ghost = active and mode is StabilizationMode.MANUAL and self._onion_reference is not None
         ghost = self._onion_reference if show_ghost else None
         self.preview.set_onion_skin(ghost, self.stabilization_tab.onion_opacity())
@@ -856,7 +902,17 @@ class AdjustmentsSection(WindowState):
         ]
         if settings.mode is StabilizationMode.MESH:
             facts = [self._mesh_status_text(), facts[0], facts[2]]  # zoom out não se aplica à malha
-        if settings.mode.uses_focal_point:
+        if settings.mode.uses_focus_regions:
+            count = len(settings.focus_regions)
+            regions = "1 região rastreada" if count == 1 else f"{count} regiões rastreadas"
+            facts = [
+                f"Referência: frame {self.stabilization_reference_frame_index + 1}",
+                f"{regions} (arraste os retângulos verdes no preview)",
+                facts[0],
+                facts[2],
+                "exportação sequencial",
+            ]
+        elif settings.mode.uses_focal_point:
             region = settings.focus_rect.to_pixels(*self.source_size)
             if region is None:
                 facts.insert(0, "Selecione a região focal no preview")

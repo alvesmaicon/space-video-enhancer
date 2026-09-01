@@ -345,7 +345,9 @@ def estimate_correction(
         correction = follow_smoothed_path(frame, settings, frame_index, state)
     elif mode is StabilizationMode.CAMERA_LOCK:
         correction = camera_lock(frame, settings, frame_index, state, reference_frame)
-    elif mode is StabilizationMode.HYBRID:
+    elif mode in (StabilizationMode.HYBRID, StabilizationMode.OBJECT):
+        # OBJECT is the hybrid flow with the multi-region estimate: lock while any region is alive,
+        # dead reckoning on the global motion while all are lost.
         correction = hybrid(frame, settings, frame_index, state, reference_frame)
     elif manual:
         note("stabilization.estimator", "manual")
@@ -395,6 +397,23 @@ def follow_smoothed_path(
     return correction
 
 
+def _lock_estimate(
+    frame: np.ndarray,
+    settings: StabilizationSettings,
+    frame_index: int | None,
+    state: StabilizationState | None,
+    reference_frame: np.ndarray | None,
+) -> np.ndarray | None:
+    """The absolute lock onto the reference this frame: single-region for the legacy modes, pooled for OBJECT."""
+    if reference_frame is None:
+        return None
+    if settings.mode is StabilizationMode.OBJECT:
+        return estimators.estimate_object_lock_transform(
+            frame, reference_frame, settings.focus_regions, state, frame_index
+        )
+    return estimators.estimate_camera_lock_transform(frame, reference_frame, settings.focus_rect, state, frame_index)
+
+
 def camera_lock(
     frame: np.ndarray,
     settings: StabilizationSettings,
@@ -402,11 +421,7 @@ def camera_lock(
     state: StabilizationState | None,
     reference_frame: np.ndarray | None,
 ) -> np.ndarray | None:
-    lock = None
-    if reference_frame is not None:
-        lock = estimators.estimate_camera_lock_transform(
-            frame, reference_frame, settings.focus_rect, state, frame_index
-        )
+    lock = _lock_estimate(frame, settings, frame_index, state, reference_frame)
     previous = state.previous_correction(frame_index, frame.shape[1]) if state is not None else None
     if lock is None:
         if previous is None:
@@ -430,11 +445,7 @@ def hybrid(
     if state is None:
         return None
 
-    lock = None
-    if reference_frame is not None:
-        lock = estimators.estimate_camera_lock_transform(
-            frame, reference_frame, settings.focus_rect, state, frame_index
-        )
+    lock = _lock_estimate(frame, settings, frame_index, state, reference_frame)
     delta = estimators.estimate_inter_frame_transform(
         frame, frame_index, state, StabilizationMode.SIMILARITY, translation_fallback=True
     )

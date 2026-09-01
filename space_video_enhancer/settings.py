@@ -31,10 +31,26 @@ class StabilizationMode(str, Enum):
     MESH = "mesh"
     """One camera path per region of the frame (MeshFlow): the clip is analysed once in the background
     and every render warps by that clip-wide field — parallax and region-dependent distortion included."""
+    OBJECT = "object"
+    """Hold a target still by 1-4 tracked regions (even in opposite corners): a similarity fitted over
+    the live regions' correspondences, so a lost region does not freeze anything and two spread regions
+    give the target's rotation and scale. All lost = dead reckoning on the global motion (see
+    :mod:`pipeline.stabilization.lock`). Supersedes CAMERA_LOCK and HYBRID."""
 
     @property
     def uses_focal_point(self) -> bool:
+        """The legacy single-region lock modes (one green rectangle, ``focus_rect``)."""
         return self in (StabilizationMode.CAMERA_LOCK, StabilizationMode.HYBRID)
+
+    @property
+    def uses_focus_regions(self) -> bool:
+        """The multi-region object lock (numbered rectangles, ``focus_regions``)."""
+        return self is StabilizationMode.OBJECT
+
+    @property
+    def needs_reference_frame(self) -> bool:
+        """The mode holds onto a reference frame the target is locked to."""
+        return self.uses_focal_point or self.uses_focus_regions
 
     @property
     def uses_auto_motion(self) -> bool:
@@ -155,6 +171,8 @@ class NormalizedRect:
 DEFAULT_CROP_RECT = NormalizedRect(0.1, 0.1, 0.8, 0.8)
 DEFAULT_DENOISE_SAMPLE_RECT = NormalizedRect(0.33, 0.33, 0.34, 0.34)
 DEFAULT_STABILIZATION_RECT = NormalizedRect(0.4, 0.3, 0.2, 0.2)
+MAX_FOCUS_REGIONS = 4
+"""How many tracked regions the object lock accepts (one similarity fit does not gain from more)."""
 
 
 @dataclass(frozen=True)
@@ -275,6 +293,10 @@ class StabilizationSettings:
     intensity: float = 1.0
     temporal_smoothing: float = 0.35
     focus_rect: NormalizedRect = DEFAULT_STABILIZATION_RECT
+    """The legacy single-region lock modes' rectangle (CAMERA_LOCK/HYBRID)."""
+    focus_regions: tuple[NormalizedRect, ...] = ()
+    """OBJECT mode: the tracked regions (1..``MAX_FOCUS_REGIONS``), each held to its place in the
+    reference frame; empty means the UI has not seeded them yet (it starts with one at the centre)."""
     auto_crop: bool = True
     zoom_out: bool = False
     keyframes: tuple[StabilizationKeyframe, ...] = ()
@@ -345,7 +367,9 @@ class StabilizationSettings:
         if self.mode in (StabilizationMode.MANUAL, StabilizationMode.MESH):
             return False  # per-frame values come from the keyframes / the clip's mesh analysis, not from frame N-1
         return self.enabled and (
-            self.mode.uses_auto_motion or self.mode is StabilizationMode.HYBRID or self.temporal_smoothing > 0.0
+            self.mode.uses_auto_motion
+            or self.mode in (StabilizationMode.HYBRID, StabilizationMode.OBJECT)  # dead reckoning carries state
+            or self.temporal_smoothing > 0.0
         )
 
 

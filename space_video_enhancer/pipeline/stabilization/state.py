@@ -37,6 +37,8 @@ class StabilizationState:
     """Hybrid: recent frames without a camera-lock match (capped); eases the re-acquisition."""
     lock: Any = None
     """:class:`lock.LockTrack`: reference correspondences carried across frames by the camera lock."""
+    region_locks: Any = None
+    """OBJECT mode: ``dict[int, lock.LockTrack]`` — one carried track per focus region still alive."""
     cell_memory: np.ndarray | None = None
     """Which grid cells have been moving with the camera (see ``global_motion``); reset with the sequence."""
     last_vectors: Any = None

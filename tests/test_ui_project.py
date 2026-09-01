@@ -52,9 +52,12 @@ def test_save_and_reopen_a_project_restores_the_document(
     window.color_tab.brightness_slider.setValue(70)
     wait_for_preview(app, window)
     window._add_cut(5, 6)
-    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.CAMERA_LOCK.value)
+    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.OBJECT.value)
     wait_for_preview(app, window)
     assert window.sequence.clips[0].stabilization_reference_frame == 3
+    window.stabilization_tab.add_region_button.click()
+    wait_for_preview(app, window)
+    assert len(window.sequence.clips[0].settings.stabilization.focus_regions) == 2
     _go_to(app, window, 15)
     window.color_tab.brightness_slider.setValue(30)
     wait_for_preview(app, window)
@@ -86,11 +89,11 @@ def test_save_and_reopen_a_project_restores_the_document(
     assert [clip.settings.filters.brightness for clip in window.sequence.clips] == [70, 40]
     assert window.cuts == [(5, 6)] and window.transport.timeline.cuts() == ((5, 6),)
     first = window.sequence.clips[0]
-    assert (
-        first.settings.stabilization.mode is StabilizationMode.CAMERA_LOCK and first.stabilization_reference_frame == 3
-    )
+    assert first.settings.stabilization.mode is StabilizationMode.OBJECT and first.stabilization_reference_frame == 3
+    assert len(first.settings.stabilization.focus_regions) == 2, "the tracked regions came back with the project"
     wait_until(app, lambda: (ui_video, 3) in window._reference_frames, what="reference frame decoded again")
     _go_to(app, window, 3)
+    assert len(window.focus_regions_norm) == 2, "the active clip's regions drive the overlay and the buttons"
     assert window.stabilization_reference_frame is not None and window.stabilization_reference_frame_index == 3
     assert "Referência: frame 4" in window.stabilization_tab.info_label.text()
     assert not window.undo_action.isEnabled(), "opening a project starts a fresh history"

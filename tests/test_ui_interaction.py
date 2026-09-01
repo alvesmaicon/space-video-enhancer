@@ -143,14 +143,15 @@ def test_overlays_are_editable_only_on_their_tab(app: QApplication, window: Main
     pump(app)
     assert not preview.sample.enabled
 
-    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.CAMERA_LOCK.value)
+    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.OBJECT.value)
     tabs.setCurrentWidget(window.stabilization_tab)
     pump(app)
-    assert preview.focus.enabled and preview.focus.interactive
+    assert preview.focus_regions and preview.focus_regions[0].enabled and preview.focus_regions[0].interactive
+    assert not preview.focus.enabled, "the legacy focal overlay stays off in the object mode"
     assert not preview.sample.enabled, "only one analysis region at a time"
     tabs.setCurrentWidget(window.noise_tab)
     pump(app)
-    assert preview.sample.enabled and not preview.focus.enabled
+    assert preview.sample.enabled and not preview.focus_regions
 
 
 # --- transport ---------------------------------------------------------------------------------

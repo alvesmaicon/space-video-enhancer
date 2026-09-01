@@ -312,6 +312,19 @@ def estimate_camera_lock_transform(
     return lock.lock_transform(frame, reference_frame, focus_rect, state, frame_index)
 
 
+def estimate_object_lock_transform(
+    frame: np.ndarray,
+    reference_frame: np.ndarray,
+    regions: tuple[NormalizedRect, ...],
+    state: StabilizationState | None = None,
+    frame_index: int | None = None,
+) -> np.ndarray | None:
+    """Transform that holds the union of the tracked regions to the reference (see :mod:`lock`)."""
+    from space_video_enhancer.pipeline.stabilization import lock  # noqa: PLC0415  (lock builds on this module)
+
+    return lock.object_lock_transform(frame, reference_frame, regions, state, frame_index)
+
+
 def orb_matches(
     reference: ReferenceFeatures, current_gray: np.ndarray, current_mask: np.ndarray | None
 ) -> tuple[np.ndarray, np.ndarray] | None:

@@ -94,6 +94,32 @@ def test_stabilization_tab_shows_a_legacy_mode_only_while_a_clip_uses_it(app: QA
     assert tab.mode_combo.findData(StabilizationMode.PERSPECTIVE.value) < 0
 
 
+def test_stabilization_tab_shows_only_the_selected_modes_controls(app: QApplication) -> None:
+    tab = StabilizationTab()
+
+    select_combo_data(tab.mode_combo, StabilizationMode.MESH.value)
+    tab.update_controls_state(True)
+    assert not tab.intensity_slider.isHidden() and not tab.margin_slider.isHidden()
+    assert tab.manual_group.isHidden(), "keyframe controls only exist in the manual mode"
+    assert tab.region_row.isHidden() and tab.reference_row.isHidden()
+    assert tab.zoom_out_checkbox.isHidden(), "the mesh is clamped to the crop margin"
+
+    select_combo_data(tab.mode_combo, StabilizationMode.OBJECT.value)
+    tab.update_controls_state(True)
+    assert not tab.region_row.isHidden() and not tab.reference_row.isHidden()
+    assert not tab.smoothing_slider.isHidden() and tab.manual_group.isHidden()
+
+    select_combo_data(tab.mode_combo, StabilizationMode.MANUAL.value)
+    tab.update_controls_state(True)
+    assert not tab.manual_group.isHidden()
+    assert tab.intensity_slider.isHidden() and tab.smoothing_slider.isHidden() and tab.margin_slider.isHidden()
+    assert tab.auto_crop_checkbox.isHidden() and tab.region_row.isHidden() and tab.reference_row.isHidden()
+
+    select_combo_data(tab.mode_combo, StabilizationMode.OFF.value)
+    tab.update_controls_state(True)
+    assert tab.intensity_slider.isHidden() and tab.manual_group.isHidden() and tab.info_label.isHidden()
+
+
 def test_hsl_tab_apply_round_trips_without_signals(app: QApplication) -> None:
     tab = ColorGradeTab()
     emitted: list[str] = []

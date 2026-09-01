@@ -71,7 +71,7 @@ def test_tabs_show_and_store_the_settings_of_the_clip_under_the_playhead(
     assert window.transport.delete_clip_button.isEnabled() and window.transport.move_left_button.isEnabled()
     assert window.color_tab.brightness_slider.value() == 50, "the second clip kept the look it was added with"
     window.color_tab.brightness_slider.setValue(30)
-    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.CAMERA_LOCK.value)
+    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.OBJECT.value)
     wait_for_preview(app, window)
     assert window.sequence.clips[1].settings.filters.brightness == 30
     assert window.sequence.clips[1].stabilization_reference_frame == 3, "captured on this clip's source frame"
@@ -82,7 +82,7 @@ def test_tabs_show_and_store_the_settings_of_the_clip_under_the_playhead(
     assert window.color_tab.brightness_slider.value() == 80
     assert window.stabilization_tab.mode() is StabilizationMode.OFF and window.stabilization_reference_frame is None
     _go_to(app, window, 14)
-    assert window.stabilization_tab.mode() is StabilizationMode.CAMERA_LOCK
+    assert window.stabilization_tab.mode() is StabilizationMode.OBJECT
     assert window.stabilization_reference_frame is not None, "the reference frame came back from the cache"
     assert "1.10" not in window.grade_tab.gains_label.text()
 

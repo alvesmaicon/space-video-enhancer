@@ -188,6 +188,7 @@ class MainWindow(
         self.white_balance_rect_norm = norm_to_qrect(DEFAULT_WHITE_BALANCE_RECT)
         self.white_balance_gains: tuple[float, float, float] = NEUTRAL_GAINS
         self.stabilization_rect_norm = norm_to_qrect(DEFAULT_STABILIZATION_RECT)
+        self.focus_regions_norm = []  # seeded when the object mode is chosen; faithful to the clip otherwise
         self.stabilization_reference_frame: np.ndarray | None = None
         self.stabilization_reference_frame_index = 0
         self._manual_keyframes: tuple[StabilizationKeyframe, ...] = ()  # the active clip's manual-mode keyframes
@@ -694,6 +695,7 @@ class MainWindow(
         self.preview.cropChanged.connect(self._handle_preview_crop_changed)
         self.preview.sampleChanged.connect(self._handle_preview_sample_changed)
         self.preview.stabilizationChanged.connect(self._handle_preview_stabilization_changed)
+        self.preview.focusRegionChanged.connect(self._handle_preview_focus_region_changed)
         self.preview.whiteBalanceChanged.connect(self._handle_preview_white_balance_changed)
         self.preview.openRequested.connect(self._select_video)
         self.preview.panRequested.connect(self._handle_preview_pan)
@@ -749,6 +751,8 @@ class MainWindow(
         self.stabilization_tab.captureChanged.connect(self._handle_stabilization_control_change)
         self.stabilization_tab.readoutMeasureRequested.connect(self._measure_readout_fraction)
         self.stabilization_tab.resetRequested.connect(self._reset_stabilization_rect)
+        self.stabilization_tab.regionAddRequested.connect(self._add_focus_region)
+        self.stabilization_tab.regionRemoveRequested.connect(self._remove_focus_region)
         self.stabilization_tab.referenceRequested.connect(self._set_stabilization_reference_here)
         self.stabilization_tab.manualAdjustChanged.connect(self._handle_manual_adjust)
         self.stabilization_tab.manualReferenceRequested.connect(self._capture_onion_reference)
@@ -820,7 +824,10 @@ class MainWindow(
         )
 
     def _current_stabilization(self) -> StabilizationSettings:
-        base = self.stabilization_tab.settings(qrect_to_norm(self.stabilization_rect_norm))
+        base = self.stabilization_tab.settings(
+            qrect_to_norm(self.stabilization_rect_norm),
+            tuple(qrect_to_norm(rect) for rect in self.focus_regions_norm),
+        )
         return replace(base, keyframes=self._manual_keyframes)  # keyframes are per-clip data, not a widget value
 
     def _current_render_settings(self) -> RenderSettings:

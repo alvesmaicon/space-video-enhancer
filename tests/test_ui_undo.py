@@ -168,16 +168,16 @@ def test_reference_button_retakes_the_lock_reference_where_the_region_is(
     _open(app, window, ui_video)
     _go_to(app, window, 2)
     assert not window.stabilization_tab.reference_button.isEnabled()
-    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.CAMERA_LOCK.value)
+    select_combo_data(window.stabilization_tab.mode_combo, StabilizationMode.OBJECT.value)
     wait_for_preview(app, window)
     assert window.stabilization_tab.reference_button.isEnabled()
     assert window.sequence.clips[0].stabilization_reference_frame == 2
     assert len(window._history) == 1 and window.undo_action.text() == "Desfazer ajuste de estabilização"
 
     region = QRectF(0.1, 0.1, 0.3, 0.3)
-    window._handle_preview_stabilization_changed(region)
+    window._handle_preview_focus_region_changed(0, region)
     wait_for_preview(app, window)
-    assert window.undo_action.text() == "Desfazer mover ponto focal"
+    assert window.undo_action.text() == "Desfazer mover região"
     _go_to(app, window, 7)
     assert window.sequence.clips[0].stabilization_reference_frame == 2, "scrubbing does not move the reference"
 
@@ -185,8 +185,8 @@ def test_reference_button_retakes_the_lock_reference_where_the_region_is(
     wait_for_preview(app, window)
     clip = window.sequence.clips[0]
     assert clip.stabilization_reference_frame == 7 and window.stabilization_reference_frame_index == 7
-    assert window.stabilization_rect_norm == region, "the focal region stayed where it was"
-    assert clip.settings.stabilization.focus_rect.x == pytest.approx(0.1)
+    assert window.focus_regions_norm[0] == region, "the tracked region stayed where it was"
+    assert clip.settings.stabilization.focus_regions[0].x == pytest.approx(0.1)
     assert "Referência: frame 8" in window.stabilization_tab.info_label.text()
     assert window.undo_action.text() == "Desfazer referência da estabilização"
     assert (ui_video, 7) in window._reference_frames and (ui_video, 2) in window._reference_frames
@@ -195,7 +195,7 @@ def test_reference_button_retakes_the_lock_reference_where_the_region_is(
     assert window.sequence.clips[0].stabilization_reference_frame == 2
     assert window.stabilization_reference_frame is not None and window.stabilization_reference_frame_index == 2
     assert "Referência: frame 3" in window.stabilization_tab.info_label.text()
-    assert window.stabilization_rect_norm == region
+    assert window.focus_regions_norm[0] == region
     _redo(app, window)
     assert window.sequence.clips[0].stabilization_reference_frame == 7
 

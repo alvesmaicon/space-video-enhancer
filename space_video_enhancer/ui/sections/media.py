@@ -102,7 +102,7 @@ class MediaSection(WindowState):
             base,
             crop=replace(base.crop, rect=qrect_to_norm(crop_rect)),
             denoise_sample_rect=DEFAULT_DENOISE_SAMPLE_RECT,
-            stabilization=replace(base.stabilization, focus_rect=DEFAULT_STABILIZATION_RECT),
+            stabilization=replace(base.stabilization, focus_rect=DEFAULT_STABILIZATION_RECT, focus_regions=()),
             grade=replace(base.grade, white_balance_gains=NEUTRAL_GAINS, region=DEFAULT_WHITE_BALANCE_RECT),
             exposure=replace(
                 base.exposure,
@@ -512,6 +512,9 @@ class MediaSection(WindowState):
         self.tempo_tab.apply_capture(settings.capture)  # speed / retiming / mute
         self.filters_tab.apply_anonymize(settings.anonymize)
         self.stabilization_rect_norm = norm_to_qrect(settings.stabilization.focus_rect)
+        # Faithful to the clip (empty when it has none): seeding a default here would dirty the document
+        # on open; the first region is seeded when the user enters the object mode instead.
+        self.focus_regions_norm = [norm_to_qrect(rect) for rect in settings.stabilization.focus_regions]
         self.white_balance_gains = settings.grade.white_balance_gains
         self.white_balance_rect_norm = norm_to_qrect(settings.grade.region)
         self.grade_tab.apply(settings.grade, settings.exposure, exposure_frame=clip.exposure_reference_frame)

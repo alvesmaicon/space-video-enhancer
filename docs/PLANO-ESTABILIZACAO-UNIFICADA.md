@@ -1,6 +1,6 @@
 # Plano: estabilização unificada (automática única + travar objeto multi-ponto)
 
-Estado: **Wave 1 feita (2026-09-01)**; Waves 2-4 planejadas. Motivação (Maicon, 2026-09-01): são modos demais para escolher; as
+Estado: **Waves 1 e 2 feitas (2026-09-01)**; Waves 3-4 planejadas. Motivação (Maicon, 2026-09-01): são modos demais para escolher; as
 automáticas deveriam ser uma só, e o "travar objeto" deveria sobreviver à perda do alvo usando
 vários pontos de rastreio — inclusive em cantos opostos do quadro — combinado com o resto da
 máquina (malha, oscilação).
@@ -33,7 +33,7 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   sem pulo e satura no valor exato (`test_mesh_field_fades_in_from_the_live_path_when_it_lands`),
   e estado novo/pausa aplicam o campo direto (`test_mesh_handoff_settles_on_the_field_when_paused_or_fresh`).
 
-## Wave 2 — "Travar objeto" multi-ponto (funde camera lock + híbrido)
+## Wave 2 — "Travar objeto" multi-ponto (funde camera lock + híbrido) — FEITA (2026-09-01)
 
 - O usuário marca **1 a 4 regiões** no preview (retângulos verdes numerados, podem estar em cantos
   opostos). Cada região vira um track independente (LK + re-âncora ORB periódica, o motor do lock
@@ -44,11 +44,20 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   movimento global (o comportamento do híbrido) até reencontrar qualquer uma.
 - Duas regiões em cantos opostos determinam também rotação e escala do alvo — hoje o lock só tem
   uma âncora e sofre com isso.
-- UI: clicar "Adicionar região" cria mais um retângulo; overlay numera; a lista não precisa de
-  painel (menu de contexto no retângulo remove). CAMERA_LOCK/HYBRID saem do combo (mesma regra de
-  legado da Wave 1).
-- Aceitação: cena sintética com alvo + oclusões alternadas (uma região sempre viva) → residual
-  contra a referência estável durante as oclusões (hoje o lock salta no "hold").
+- Como ficou: `lock.region_match` extrai a máquina de uma região (LK → re-âncora ORB/seed →
+  template como último recurso) devolvendo as correspondências; `lock.object_lock_transform`
+  reúne os pontos das regiões vivas e ajusta **uma similaridade** (RANSAC descarta pontos de uma
+  região que derivou; contagem de pontos pondera naturalmente; homografia desativada de propósito —
+  clusters pequenos condicionam mal). Um template-match vira **uma** correspondência (o centro),
+  que restringe só translação — nada de rotação fabricada. Fluxo de topo = o `hybrid` com o
+  estimador multi-região (`StabilizationMode.OBJECT`), dead-reckoning intacto. UI: botões
+  "Adicionar/Remover região" + overlays numerados (`focusRegionChanged(index, rect)`);
+  CAMERA_LOCK/HYBRID viraram entradas "(legado)". Regiões persistem no `.svep`
+  (`focus_regions`); a lista da UI é fiel ao clipe e a 1ª região é semeada só ao entrar no modo
+  (semear no load sujava o documento ao abrir).
+- Aceitação (tests/test_object_lock.py): oclusões alternadas com uma região sempre viva →
+  residual < 1,5 px durante as oclusões; duas regiões opostas recuperam rotação de 2° com erro
+  < 0,3°; todas perdidas → "dead_reckoning"; round-trip do projeto.
 
 ## Wave 3 — objeto + malha ("cadeia de pixels-chave")
 
