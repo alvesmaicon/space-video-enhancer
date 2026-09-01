@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -67,6 +68,7 @@ class MeshPath:
     export. ``measured[i]`` is ``False`` for a frame whose pair could not be tracked (the path holds).
     """
 
+    source: Path
     first_frame: int
     dx: np.ndarray
     dy: np.ndarray
@@ -149,6 +151,7 @@ def _vertex_motion(previous: np.ndarray, current: np.ndarray, size: tuple[int, i
 
 def analyze_mesh_path(
     read: Callable[[int], np.ndarray | None],
+    source: Path,
     first: int,
     last: int,
     *,
@@ -198,7 +201,7 @@ def analyze_mesh_path(
 
     if frames_read == 0:
         return MeshPathAnalysis(None, cancelled=False, frames_read=0, elapsed_ms=_ms(started))
-    track = MeshPath(first, dx[:frames_read], dy[:frames_read], measured[:frames_read])
+    track = MeshPath(source, first, dx[:frames_read], dy[:frames_read], measured[:frames_read])
     return MeshPathAnalysis(track, cancelled=False, frames_read=frames_read, elapsed_ms=_ms(started))
 
 
@@ -238,6 +241,30 @@ def mesh_correction(path: MeshPath, smoothing_frames: float, *, spatial_passes: 
         for _ in range(spatial_passes):
             correction[index] = cv2.blur(correction[index].astype(np.float32), (3, 3), borderType=cv2.BORDER_REPLICATE)
     return np.clip(correction, -CORRECTION_LIMIT_FRACTION, CORRECTION_LIMIT_FRACTION).astype(np.float32)
+
+
+@dataclass(frozen=True)
+class MeshCorrections:
+    """The per-frame correction fields of one clip, ready for :func:`apply_mesh` (fractions, size-free).
+
+    Computed once from a :class:`MeshPath` and the smoothing time constant (:func:`corrections_for`);
+    every render — preview at any size, export in any worker — just indexes its source frame.
+    """
+
+    first_frame: int
+    fields: np.ndarray
+    """``(count, VERTEX_ROWS, VERTEX_COLUMNS, 2)`` float32 (see :func:`mesh_correction`)."""
+
+    def at(self, frame_index: int) -> np.ndarray | None:
+        offset = frame_index - self.first_frame
+        if offset < 0 or offset >= len(self.fields):
+            return None
+        return self.fields[offset]
+
+
+def corrections_for(path: MeshPath, smoothing_frames: float) -> MeshCorrections:
+    """The clip's correction fields for one smoothing setting (see :func:`mesh_correction`)."""
+    return MeshCorrections(path.first_frame, mesh_correction(path, smoothing_frames))
 
 
 def apply_mesh(frame: np.ndarray, correction: np.ndarray) -> np.ndarray:

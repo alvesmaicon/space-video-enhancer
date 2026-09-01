@@ -28,6 +28,9 @@ class StabilizationMode(str, Enum):
     HYBRID = "hybrid"
     MANUAL = "manual"
     """Hand-set keyframes (position/rotation/zoom) interpolated between; no estimation, no warp surprises."""
+    MESH = "mesh"
+    """One camera path per region of the frame (MeshFlow): the clip is analysed once in the background
+    and every render warps by that clip-wide field — parallax and region-dependent distortion included."""
 
     @property
     def uses_focal_point(self) -> bool:
@@ -311,9 +314,18 @@ class StabilizationSettings:
 
     @property
     def applies_wobble(self) -> bool:
-        """The wobble correction actually runs. PERSPECTIVE suppresses it: the homography already absorbs
-        the same shear/keystone each frame, and correcting it twice deforms (measured on real footage)."""
-        return self.rolling_shutter_auto and self.mode is not StabilizationMode.PERSPECTIVE
+        """The wobble correction actually runs. PERSPECTIVE and MESH suppress it: both already absorb the
+        same shear/keystone in their own warp, and correcting it twice deforms (measured on real footage:
+        jello 8,5 -> 13 px under the homography, 16,7 -> 23,3 px under the mesh)."""
+        return self.rolling_shutter_auto and self.mode not in (
+            StabilizationMode.PERSPECTIVE,
+            StabilizationMode.MESH,
+        )
+
+    @property
+    def needs_mesh_analysis(self) -> bool:
+        """The clip must be tracked once into a mesh path (see :mod:`pipeline.stabilization.mesh`)."""
+        return self.mode is StabilizationMode.MESH
 
     @property
     def corrects_rolling_shutter(self) -> bool:
@@ -334,8 +346,8 @@ class StabilizationSettings:
         """True when frame N depends on frame N-1 (inter-frame motion, temporal smoothing, rolling-shutter skew)."""
         if self.corrects_rolling_shutter_skew:
             return True
-        if self.mode is StabilizationMode.MANUAL:
-            return False  # each frame's transform is interpolated from the keyframes, not from the previous frame
+        if self.mode in (StabilizationMode.MANUAL, StabilizationMode.MESH):
+            return False  # per-frame values come from the keyframes / the clip's mesh analysis, not from frame N-1
         return self.enabled and (
             self.mode.uses_auto_motion or self.mode is StabilizationMode.HYBRID or self.temporal_smoothing > 0.0
         )

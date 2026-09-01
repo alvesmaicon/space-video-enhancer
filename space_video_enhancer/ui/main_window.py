@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 from space_video_enhancer.export.ffmpeg import FfmpegProbe, find_ffmpeg
 from space_video_enhancer.export.worker import ExportController
 from space_video_enhancer.pipeline.filters import OpenCLBackend
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, MeshPath
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.project import (
     RecentProjects,
@@ -87,6 +88,7 @@ from space_video_enhancer.ui.audio_preview import (
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.history import EditHistory
 from space_video_enhancer.ui.icons import glyph_icon
+from space_video_enhancer.ui.mesh_analysis import MeshAnalysisController, MeshAnalysisRequest
 from space_video_enhancer.ui.monitor_window import MonitorWindow
 from space_video_enhancer.ui.motion_path_analysis import MotionPathController, MotionPathRequest
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages
@@ -207,12 +209,20 @@ class MainWindow(
         self._wobble_analysis = WobbleAnalysisController(self)  # tracks a clip's frames once for the wobble correction
         self._wobble_analysis.progress.connect(self._on_wobble_progress)
         self._wobble_analysis.finished.connect(self._on_wobble_finished)
+        self._mesh_analysis = MeshAnalysisController(self)  # tracks a clip once for the mesh stabilization
+        self._mesh_analysis.progress.connect(self._on_mesh_progress)
+        self._mesh_analysis.finished.connect(self._on_mesh_finished)
         self._motion_path_analysis = MotionPathController(self)  # tracks a clip once to fill manual keyframes (Phase 2)
         self._motion_path_analysis.progress.connect(self._on_motion_path_progress)
         self._motion_path_analysis.finished.connect(self._on_motion_path_finished)
         self._wobble_tracks: list[WobbleTrack] = []
         self._wobble_pending: list[WobbleAnalysisRequest] = []
         self._wobble_progress: dict[int, tuple[int, int]] = {}
+        self._mesh_tracks: list[MeshPath] = []
+        self._mesh_pending: list[MeshAnalysisRequest] = []
+        self._mesh_progress: dict[int, tuple[int, int]] = {}
+        self._mesh_corrections: dict[tuple[int, int], MeshCorrections] = {}
+        self._readout_measure_pending: set[tuple[Path, int, int]] = set()
         self._preview_controller.renderFailed.connect(self._on_render_failed)
         self._preview_generation = 0
         self._applied_preview_generation = -1
@@ -897,6 +907,7 @@ class MainWindow(
         self._waveform.stop()
         self._reference_loader.stop()
         self._wobble_analysis.stop()
+        self._mesh_analysis.stop()
         self._motion_path_analysis.stop()
         self._audio_player.stop()
         self._pcm_loader.stop()

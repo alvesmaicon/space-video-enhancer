@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -8,12 +10,17 @@ from space_video_enhancer.pipeline.stabilization.mesh import (
     CORRECTION_LIMIT_FRACTION,
     VERTEX_COLUMNS,
     VERTEX_ROWS,
+    MeshCorrections,
     MeshPath,
     analyze_mesh_path,
     apply_mesh,
     mesh_correction,
     vertex_positions,
 )
+from space_video_enhancer.pipeline.stabilization.stabilize import apply_stabilization
+from space_video_enhancer.settings import StabilizationMode, StabilizationSettings
+from space_video_enhancer.telemetry import trace as tracing
+from space_video_enhancer.telemetry.trace import RenderTrace
 
 WIDTH, HEIGHT = 480, 270
 
@@ -43,7 +50,9 @@ def _frames_from_displacement(displacement: object, count: int, margin: int = 80
 
 
 def _analyze(frames: list[np.ndarray]) -> MeshPath:
-    analysis = analyze_mesh_path(lambda index: frames[index] if 0 <= index < len(frames) else None, 0, len(frames) - 1)
+    analysis = analyze_mesh_path(
+        lambda index: frames[index] if 0 <= index < len(frames) else None, Path("clip.mp4"), 0, len(frames) - 1
+    )
     assert analysis.track is not None and not analysis.cancelled
     return analysis.track
 
@@ -120,7 +129,7 @@ def test_mesh_correction_cancels_the_fast_path_and_keeps_the_pan() -> None:
     pan = 0.0008 * frames_axis  # a slow, deliberate drift (fraction per frame)
     shake = 0.01 * np.sin(2.0 * np.pi * frames_axis / 6.0)  # 5 Hz at 30 fps
     dx = np.tile((pan + shake)[:, None, None], (1, VERTEX_ROWS, VERTEX_COLUMNS)).astype(np.float32)
-    path = MeshPath(0, dx, np.zeros_like(dx), np.ones(count, dtype=bool))
+    path = MeshPath(Path("clip.mp4"), 0, dx, np.zeros_like(dx), np.ones(count, dtype=bool))
 
     correction = mesh_correction(path, smoothing_frames=15.0)
     stabilized = dx + correction[..., 0]
@@ -143,3 +152,38 @@ def test_apply_mesh_moves_the_content_by_the_field() -> None:
     (shift_x, shift_y), _response = cv2.phaseCorrelate(reference, result)
     assert shift_x == pytest.approx(10.0, abs=0.3)
     assert shift_y == pytest.approx(-6.0, abs=0.3)
+
+
+def test_apply_stabilization_mesh_mode_warps_by_the_clip_field() -> None:
+
+    frame = _canvas(0)[:HEIGHT, :WIDTH]
+    settings = StabilizationSettings(mode=StabilizationMode.MESH, temporal_smoothing=1.0)
+    fields = np.zeros((3, VERTEX_ROWS, VERTEX_COLUMNS, 2), dtype=np.float32)
+    fields[..., 0] = 12.0 / WIDTH
+    corrections = MeshCorrections(first_frame=0, fields=fields)
+
+    baseline = apply_stabilization(frame, settings, frame_index=1, mesh_corrections=None)  # crop only
+    trace = RenderTrace()
+    with tracing.active(trace):
+        moved = apply_stabilization(frame, settings, frame_index=1, mesh_corrections=corrections)
+    assert trace.notes.get("stabilization.result") == "applied"
+    assert moved.shape == frame.shape == baseline.shape
+    reference = cv2.cvtColor(baseline, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    result = cv2.cvtColor(moved, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    (shift_x, _shift_y), _response = cv2.phaseCorrelate(reference, result)
+    assert shift_x == pytest.approx(12.0 / 0.9, abs=0.5), "the field moves the content (scaled by the fixed crop)"
+
+    trace = RenderTrace()
+    with tracing.active(trace):
+        outside = apply_stabilization(frame, settings, frame_index=99, mesh_corrections=corrections)
+    assert trace.notes.get("stabilization.result") == "unanalysed"
+    assert np.array_equal(outside, baseline), "a frame outside the track passes through (with the constant crop)"
+
+
+def test_mesh_settings_flags() -> None:
+
+    settings = StabilizationSettings(mode=StabilizationMode.MESH, temporal_smoothing=1.0, rolling_shutter_auto=True)
+    assert settings.enabled and settings.needs_mesh_analysis
+    assert not settings.requires_sequential_processing, "per-frame fields keep the export parallel"
+    assert not settings.applies_wobble, "the mesh already absorbs the wobble (measured: correcting twice deforms)"
+    assert not settings.mode.uses_auto_motion and not settings.mode.uses_focal_point

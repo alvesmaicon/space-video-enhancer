@@ -28,6 +28,7 @@ import numpy as np
 
 from space_video_enhancer.pipeline.stabilization import estimators, rolling_shutter, transforms
 from space_video_enhancer.pipeline.stabilization.keyframes import manual_correction
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, apply_mesh
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.settings import ReadoutAxis, StabilizationMode, StabilizationSettings, clamp_unit
@@ -69,12 +70,14 @@ def apply_stabilization(
     state: StabilizationState | None = None,
     reference_frame: np.ndarray | None = None,
     wobble_track: WobbleTrack | None = None,
+    mesh_corrections: MeshCorrections | None = None,
 ) -> np.ndarray:
     """Return ``frame`` stabilized according to ``settings`` (or unchanged when nothing applies).
 
     ``state`` carries the inter-frame memory (previous frame, accumulated correction);
     ``reference_frame`` is the locked reference for camera lock / hybrid; ``wobble_track`` is the
-    clip's rolling-shutter wobble analysis (see :mod:`wobble`).
+    clip's rolling-shutter wobble analysis (see :mod:`wobble`); ``mesh_corrections`` the clip's
+    mesh fields when the mode is MESH (see :mod:`mesh`).
     """
     stabilizing = settings.enabled and settings.intensity > 0.0
     if not stabilizing and not settings.corrects_rolling_shutter:
@@ -83,12 +86,15 @@ def apply_stabilization(
     correction: np.ndarray | None = None
     if stabilizing:
         note("stabilization.mode", settings.mode.value)
-        correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
+        if settings.mode is not StabilizationMode.MESH:
+            correction = estimate_correction(frame, settings, frame_index, state, reference_frame)
     if settings.corrects_rolling_shutter:
         # Uses the inter-frame motion estimated just above (or estimates a translation when no mode did).
         frame = unskew_rolling_shutter(frame, settings, frame_index, state, wobble_track)
     if not stabilizing:
         return frame
+    if settings.mode is StabilizationMode.MESH:
+        return _apply_mesh_mode(frame, settings, frame_index, mesh_corrections)
 
     applied: np.ndarray | None = None
     if correction is None:
@@ -117,6 +123,32 @@ def apply_stabilization(
         # is exempt: its corrections are not capped at the margin, so cropping to the valid area would zoom
         # and skew the frame away from the 1:1 ghost the user aligns against — it must move, not crop.
         stabilized = transforms.stabilization_crop(stabilized, applied, CORRECTION_BUDGET_FRACTION)
+    return stabilized
+
+
+def _apply_mesh_mode(
+    frame: np.ndarray,
+    settings: StabilizationSettings,
+    frame_index: int | None,
+    mesh_corrections: MeshCorrections | None,
+) -> np.ndarray:
+    """The MESH branch: warp by the clip's analysed field (or pass through until the analysis lands).
+
+    The fields are already clamped to the crop margin, so the constant crop below always hides the
+    borders; the crop applies even while unanalysed so the zoom does not pop when the track arrives.
+    """
+    field = None
+    if mesh_corrections is not None and frame_index is not None:
+        field = mesh_corrections.at(frame_index)
+    if field is None:
+        note("stabilization.result", "unanalysed")
+        stabilized = frame
+    else:
+        note("stabilization.result", "applied")
+        scaled = field if settings.intensity >= 1.0 else field * settings.intensity
+        stabilized = apply_mesh(frame, scaled)
+    if settings.auto_crop:
+        stabilized = transforms.stabilization_crop(stabilized, None, CORRECTION_BUDGET_FRACTION)
     return stabilized
 
 

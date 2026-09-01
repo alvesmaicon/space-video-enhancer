@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from space_video_enhancer.export.ffmpeg import FfmpegProbe
 from space_video_enhancer.export.worker import ExportController
 from space_video_enhancer.pipeline.filters import OpenCLBackend
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, MeshPath
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
 from space_video_enhancer.project import RecentProjects
 from space_video_enhancer.sequence import Clip, ClipSource
@@ -52,6 +53,7 @@ from space_video_enhancer.ui.audio_preview import (
 )
 from space_video_enhancer.ui.diagnostics_dialog import DiagnosticsDialog
 from space_video_enhancer.ui.history import EditHistory
+from space_video_enhancer.ui.mesh_analysis import MeshAnalysisController, MeshAnalysisRequest
 from space_video_enhancer.ui.monitor_window import MonitorWindow
 from space_video_enhancer.ui.motion_path_analysis import MotionPathController, MotionPathRequest
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages
@@ -122,6 +124,15 @@ class WindowState(QMainWindow):
     """Analyses queued or running (one per source range); a clip covered by one waits instead of re-queuing."""
     _wobble_progress: dict[int, tuple[int, int]]
     """``(frames done, total)`` per pending analysis generation, for the progress text."""
+    _mesh_analysis: MeshAnalysisController
+    _mesh_tracks: list[MeshPath]
+    """Mesh stabilization analyses done so far (one per source range); see ``_mesh_track_for``."""
+    _mesh_pending: list[MeshAnalysisRequest]
+    _mesh_progress: dict[int, tuple[int, int]]
+    _mesh_corrections: dict[tuple[int, int], MeshCorrections]
+    """Correction fields per ``(id(track), smoothing per mil)``: recomputed when the slider moves."""
+    _readout_measure_pending: set[tuple[Path, int, int]]
+    """Clip ranges whose 'Medir do clipe' waits for the wobble analysis; filled when it lands."""
     _motion_path_analysis: MotionPathController
     """Tracks a clip once to fill manual keyframes with the measured motion; see ``_fill_manual_keyframes``."""
     _motion_fill_request: MotionPathRequest | None
@@ -294,6 +305,15 @@ class WindowState(QMainWindow):
         raise NotImplementedError  # adjustments
 
     def _on_wobble_finished(self, request: object, track: object, elapsed_ms: float) -> None:
+        raise NotImplementedError  # adjustments
+
+    def _mesh_corrections_for(self, clip: Clip, stabilization: StabilizationSettings) -> MeshCorrections | None:
+        raise NotImplementedError  # adjustments
+
+    def _on_mesh_progress(self, request: object, done: int, total: int) -> None:
+        raise NotImplementedError  # adjustments
+
+    def _on_mesh_finished(self, request: object, track: object, elapsed_ms: float) -> None:
         raise NotImplementedError  # adjustments
 
     def _update_capture_info(self) -> None:

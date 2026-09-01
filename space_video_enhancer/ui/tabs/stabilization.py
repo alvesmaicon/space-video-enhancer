@@ -41,6 +41,7 @@ MODE_OPTIONS: list[tuple[str, StabilizationMode]] = [
     ("Suavizar tremor (só deslocamento)", StabilizationMode.AUTO),
     ("Suavizar tremor + rotação e zoom", StabilizationMode.SIMILARITY),
     ("Suavizar tremor + perspectiva", StabilizationMode.PERSPECTIVE),
+    ("Malha (paralaxe de caminhada)", StabilizationMode.MESH),
     ("Travar uma região (camera lock)", StabilizationMode.CAMERA_LOCK),
     ("Travar uma região, suavizar se perder", StabilizationMode.HYBRID),
     ("Manual (keyframes)", StabilizationMode.MANUAL),
@@ -56,6 +57,10 @@ MODE_DESCRIPTIONS: dict[StabilizationMode, str] = {
     StabilizationMode.PERSPECTIVE: (
         "Como o automático, com uma homografia global para parallax leve e pequenas mudanças de perspectiva; "
         "também absorve a inclinação/oscilação do rolling shutter."
+    ),
+    StabilizationMode.MESH: (
+        "Cada região do quadro segue o seu próprio caminho de câmera (MeshFlow): corrige a deformação de "
+        "paralaxe que os modos globais deixam ao caminhar. O clipe é analisado uma vez em segundo plano."
     ),
     StabilizationMode.CAMERA_LOCK: (
         "Mantém a região verde (arraste-a no preview) presa a onde ela estava no frame de referência; "
@@ -133,8 +138,8 @@ WOBBLE_TOOLTIP = (
     "para essa, use o slider."
 )
 WOBBLE_PERSPECTIVE_TOOLTIP = (
-    "Indisponível com o modo de perspectiva: a homografia dele já absorve a mesma inclinação/oscilação a cada "
-    "frame — corrigir duas vezes deforma a imagem em vez de firmá-la."
+    "Indisponível com os modos de perspectiva e malha: a correção deles já absorve a mesma "
+    "inclinação/oscilação a cada frame — corrigir duas vezes deforma a imagem em vez de firmá-la."
 )
 ROLLING_SHUTTER_TOOLTIP = (
     "Desfaz a inclinação que o sensor deixa quando a câmera se move (postes que tombam, imagem que estica): "
@@ -433,12 +438,13 @@ class StabilizationTab(TabPage):
         controls_enabled = has_video and self.mode_combo.isEnabled()
         stabilization_enabled = controls_enabled and mode is not StabilizationMode.OFF
         manual = mode is StabilizationMode.MANUAL
+        mesh = mode is StabilizationMode.MESH
         auto_enabled = stabilization_enabled and not manual  # intensity/smoothing/crop belong to the estimated modes
         self.intensity_slider.setEnabled(auto_enabled)
         self.smoothing_slider.setEnabled(auto_enabled)
-        zoom_out_enabled = auto_enabled and self.zoom_out_checkbox.isChecked()
+        zoom_out_enabled = auto_enabled and not mesh and self.zoom_out_checkbox.isChecked()
         self.auto_crop_checkbox.setEnabled(auto_enabled and not zoom_out_enabled)
-        self.zoom_out_checkbox.setEnabled(auto_enabled)
+        self.zoom_out_checkbox.setEnabled(auto_enabled and not mesh)  # a malha já é limitada à margem do crop
         self.reset_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
         self.reference_button.setEnabled(stabilization_enabled and mode.uses_focal_point)
         manual_enabled = controls_enabled and manual
@@ -455,11 +461,9 @@ class StabilizationTab(TabPage):
         self.deinterlace_combo.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.rolling_shutter_slider.setEnabled(controls_enabled)
         self.readout_measure_button.setEnabled(controls_enabled)
-        wobble_available = controls_enabled and mode is not StabilizationMode.PERSPECTIVE
-        self.wobble_checkbox.setEnabled(wobble_available)
-        self.wobble_checkbox.setToolTip(
-            WOBBLE_TOOLTIP if mode is not StabilizationMode.PERSPECTIVE else WOBBLE_PERSPECTIVE_TOOLTIP
-        )
+        wobble_moot = mode in (StabilizationMode.PERSPECTIVE, StabilizationMode.MESH)
+        self.wobble_checkbox.setEnabled(controls_enabled and not wobble_moot)
+        self.wobble_checkbox.setToolTip(WOBBLE_PERSPECTIVE_TOOLTIP if wobble_moot else WOBBLE_TOOLTIP)
         self.readout_axis_combo.setEnabled(controls_enabled)
 
     def set_info(self, text: str) -> None:

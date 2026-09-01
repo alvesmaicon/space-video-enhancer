@@ -276,3 +276,19 @@ def test_wobble_is_unavailable_under_perspective_and_comes_back(
     wait_for_preview(app, window)
     assert tab.wobble_checkbox.isEnabled() and tab.wobble_checkbox.isChecked()
     assert window.sequence.clips[0].settings.stabilization.applies_wobble
+
+
+def test_measure_button_arms_and_fills_itself_when_the_analysis_lands(
+    app: QApplication, window: MainWindow, ui_video: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(WobbleTrack, "readout_fraction_estimate", lambda self, axis: -0.28)
+    tab = window.stabilization_tab
+    _open(app, window, ui_video)
+
+    tab.readout_measure_button.click()  # no track yet: the click arms the measurement
+    assert window._readout_measure_pending
+    assert "medindo a fração de leitura" in tab.capture_info_label.text(), tab.capture_info_label.text()
+    wait_until(app, lambda: tab.rolling_shutter_slider.value() == -28, what="auto fill after the analysis")
+    assert not window._readout_measure_pending
+    wait_for_preview(app, window)
+    assert window.sequence.clips[0].settings.stabilization.rolling_shutter == pytest.approx(-0.28)

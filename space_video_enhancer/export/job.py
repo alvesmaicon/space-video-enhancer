@@ -33,7 +33,17 @@ from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend, ProcessingContext
 from space_video_enhancer.pipeline.geometry import ensure_even_size, fit_to_canvas
 from space_video_enhancer.pipeline.render import build_context, render_frame
-from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
+from space_video_enhancer.pipeline.stabilization.mesh import (
+    MeshCorrections,
+    MeshPath,
+    analyze_mesh_path,
+    corrections_for,
+)
+from space_video_enhancer.pipeline.stabilization.stabilize import (
+    needs_previous_frame,
+    prime_with_previous,
+    smoothing_time_constant,
+)
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, analyze_wobble, wobble_window_frames
 from space_video_enhancer.sequence import Clip, ClipSource, ExportSegment, Sequence
@@ -64,6 +74,8 @@ class ExportRequest:
     encoder: EncoderChoice
     wobble_tracks: tuple[WobbleTrack, ...] = ()
     """Rolling-shutter wobble analyses already done (the preview's); a clip none of them covers is analysed here."""
+    mesh_tracks: tuple[MeshPath, ...] = ()
+    """Mesh stabilization analyses already done (the preview's); a MESH clip none covers is analysed here."""
 
     @classmethod
     def single(
@@ -178,6 +190,8 @@ class _ExportMetrics:
         self.backend = backend.label if backend is not None else "CPU"
         self.wobble_analysis: list[dict[str, Any]] = []
         """One entry per clip whose wobble was analysed by this job (none when the preview's tracks served)."""
+        self.mesh_analysis: list[dict[str, Any]] = []
+        """One entry per MESH clip this job had to analyse itself."""
         self._lock = threading.Lock()
 
     def record(self, trace: RenderTrace) -> None:
@@ -210,6 +224,8 @@ class _ExportMetrics:
                 }
             if self.wobble_analysis:
                 summary["wobble_analysis"] = list(self.wobble_analysis)
+            if self.mesh_analysis:
+                summary["mesh_analysis"] = list(self.mesh_analysis)
         if output_path.exists():
             summary["output_bytes"] = output_path.stat().st_size
         return summary
@@ -333,7 +349,12 @@ class _ClipRenderer:
     """Per-clip processing state: settings, the denoise context (resolved once), the stabilization path, the wobble."""
 
     def __init__(
-        self, clip: Clip, first_frame: np.ndarray, reference: np.ndarray | None, wobble_track: WobbleTrack | None
+        self,
+        clip: Clip,
+        first_frame: np.ndarray,
+        reference: np.ndarray | None,
+        wobble_track: WobbleTrack | None,
+        mesh_track: MeshPath | None = None,
     ) -> None:
         self.settings = clip.settings
         # Denoise strength is resolved once, from the clip's first frame, so it stays constant across the clip.
@@ -341,6 +362,10 @@ class _ClipRenderer:
         self.state = StabilizationState()
         self.reference = reference
         self.wobble_track = wobble_track
+        self.mesh_corrections: MeshCorrections | None = None
+        if mesh_track is not None and clip.settings.stabilization.needs_mesh_analysis:
+            smoothing = smoothing_time_constant(clip.settings.stabilization.temporal_smoothing)
+            self.mesh_corrections = corrections_for(mesh_track, smoothing)
 
 
 def _analyze_clip_wobble(
@@ -407,6 +432,73 @@ def _wobble_tracks(
             tracks[index] = provided
             continue
         track, summary = _analyze_clip_wobble(readers, index, clip, cancel, status)
+        if summary is None:
+            return None
+        summaries.append(summary)
+        if track is not None:
+            tracks[index] = track
+    return tracks, summaries
+
+
+def _analyze_clip_mesh(
+    readers: _SourceReaders, index: int, clip: Clip, cancel: threading.Event, status: _StatusThrottle
+) -> tuple[MeshPath | None, dict[str, Any] | None]:
+    """Track the clip's range (plus the smoothing window on each side) into a mesh path; ``None`` when cancelled."""
+    path = clip.source.path
+    margin = round(smoothing_time_constant(clip.settings.stabilization.temporal_smoothing))
+    first = max(0, clip.range.start - margin)
+    last = min(clip.source.last_frame, clip.range.end + margin)
+
+    def read(frame_index: int) -> np.ndarray | None:
+        return readers.read(path, frame_index)
+
+    def report(done: int, total: int) -> None:
+        status(
+            f"Analisando a malha de {clip.name}: {done * 100 // max(1, total)}% ({done}/{total} frames)",
+            force=done == total,
+        )
+
+    analysis = analyze_mesh_path(read, path, first, last, progress=report, cancelled=cancel.is_set)
+    if analysis.cancelled:
+        return None, None
+    track = analysis.track
+    summary: dict[str, Any] = {
+        "clip": index,
+        "name": clip.name,
+        "first": first,
+        "last": last,
+        "frames": analysis.frames_read,
+        "measured": round(track.measured_fraction, 3) if track is not None else None,
+        "elapsed_ms": round(analysis.elapsed_ms, 1),
+    }
+    log_event(LOG, "export.mesh_analysis", **summary)
+    return analysis.track, summary
+
+
+def _mesh_tracks(
+    readers: _SourceReaders, request: ExportRequest, cancel: threading.Event, status: _StatusThrottle
+) -> tuple[dict[int, MeshPath], list[dict[str, Any]]] | None:
+    """A mesh path per MESH clip: the one handed in when it covers the clip, else analysed now.
+
+    ``None`` when the export was cancelled during an analysis.
+    """
+    tracks: dict[int, MeshPath] = {}
+    summaries: list[dict[str, Any]] = []
+    for index, clip in enumerate(request.sequence.clips):
+        if not clip.settings.stabilization.needs_mesh_analysis:
+            continue
+        provided = next(
+            (
+                track
+                for track in request.mesh_tracks
+                if track.source == clip.source.path and track.covers(clip.range.start, clip.range.end)
+            ),
+            None,
+        )
+        if provided is not None:
+            tracks[index] = provided
+            continue
+        track, summary = _analyze_clip_mesh(readers, index, clip, cancel, status)
         if summary is None:
             return None
         summaries.append(summary)
@@ -488,6 +580,10 @@ def _run_export(
     if analysed is None:
         return finish(ExportResult(False, CANCELLED_MESSAGE, 0, total, cancelled=True), "export.cancelled")
     wobble_tracks, metrics.wobble_analysis = analysed
+    mesh_analysed = _mesh_tracks(readers, request, cancel, status)
+    if mesh_analysed is None:
+        return finish(ExportResult(False, CANCELLED_MESSAGE, 0, total, cancelled=True), "export.cancelled")
+    mesh_tracks, metrics.mesh_analysis = mesh_analysed
 
     frames = _iter_frames(readers, request)
     first = next(frames, None)
@@ -503,7 +599,9 @@ def _run_export(
         renderer = renderers.get(clip_index)
         if renderer is None:
             clip = sequence.clips[clip_index]
-            renderer = _ClipRenderer(clip, frame, references.get(clip_index), wobble_tracks.get(clip_index))
+            renderer = _ClipRenderer(
+                clip, frame, references.get(clip_index), wobble_tracks.get(clip_index), mesh_tracks.get(clip_index)
+            )
             renderers[clip_index] = renderer
         return renderer
 
@@ -536,6 +634,7 @@ def _run_export(
             backend=backend,
             trace=trace,
             wobble_track=renderer.wobble_track,
+            mesh_corrections=renderer.mesh_corrections,
         )
         metrics.record(trace.finish())
         return np.ascontiguousarray(ensure_even_size(rendered))

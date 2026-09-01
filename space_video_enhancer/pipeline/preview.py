@@ -22,6 +22,7 @@ from space_video_enhancer.pipeline.deinterlace import prepare_source
 from space_video_enhancer.pipeline.filters import OpenCLBackend
 from space_video_enhancer.pipeline.geometry import apply_geometry, fit_to_aspect, normalized_through_geometry
 from space_video_enhancer.pipeline.render import render_frame
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections
 from space_video_enhancer.pipeline.stabilization.stabilize import needs_previous_frame, prime_with_previous
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
@@ -59,6 +60,8 @@ class PreviewRequest:
     """Width/height of the sequence's export canvas: the result is letterboxed to it like the export does."""
     wobble_track: WobbleTrack | None = None
     """The clip's rolling-shutter wobble analysis (``None`` until it is done, or when not asked for)."""
+    mesh_corrections: MeshCorrections | None = None
+    """The clip's mesh stabilization fields (``None`` until the analysis is done, or when not asked for)."""
     retime: RetimeSample | None = None
     """How to build the frame when the clip is retimed to the timeline fps; ``None`` or single = plain decode."""
 
@@ -233,6 +236,7 @@ def render_preview(
         trace=trace,
         source_prepared=True,
         wobble_track=request.wobble_track,
+        mesh_corrections=request.mesh_corrections,
     )
     if request.canvas_aspect is not None:
         with trace.stage("letterbox"):

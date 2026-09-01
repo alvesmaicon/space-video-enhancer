@@ -104,6 +104,7 @@ class ExportSection(WindowState):
             ffmpeg_path,
             encoder,
             wobble_tracks=tuple(self._wobble_tracks),  # clips these do not cover are analysed by the job itself
+            mesh_tracks=tuple(self._mesh_tracks),
         )
         self._export_backend_label = f"{self._backend.label} + {encoder.label}"
         self._export_output_path = Path(output_path)

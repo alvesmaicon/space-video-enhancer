@@ -216,6 +216,11 @@ class PreviewSection(WindowState):
             )
             return
         wobble_track = self._wobble_track_for(clip) if preview_settings.stabilization.needs_wobble_analysis else None
+        mesh_corrections = (
+            self._mesh_corrections_for(clip, preview_settings.stabilization)
+            if preview_settings.stabilization.needs_mesh_analysis
+            else None
+        )
         self._preview_generation += 1
         self.status.set_render_busy(True)
         self._preview_controller.submit_preview(
@@ -231,6 +236,7 @@ class PreviewSection(WindowState):
                 source_path=source_path,
                 canvas_aspect=self._canvas_aspect(),
                 wobble_track=wobble_track,
+                mesh_corrections=mesh_corrections,
                 retime=retime_sample,
             )
         )

@@ -1,7 +1,11 @@
 # Plano: estabilização por malha (MeshFlow)
 
-Estado: **núcleo pronto** (`pipeline/stabilization/mesh.py`, Fases 1–3 como funções puras, validadas
-no vídeo real — tabela abaixo). Falta a Fase 4 (modo na UI, análise em segundo plano, export).
+Estado: **integrado** (Fases 1–4). Núcleo em `pipeline/stabilization/mesh.py` (funções puras,
+validadas no vídeo real — tabela abaixo); modo "Malha (paralaxe de caminhada)" na aba Estabilizar,
+análise em segundo plano (`ui/mesh_analysis.py`, padrão da análise de oscilação), correções por
+(trilha, suavização) em cache, export analisa clipes sem trilha e continua paralelo. A oscilação
+automática fica sem efeito no modo, como no de perspectiva. Falta só a Fase 5 formal (validação de
+aceitação com export real do usuário).
 
 Resultados no vídeo real de caminhada (VID_140049, 452 frames 4K):
 

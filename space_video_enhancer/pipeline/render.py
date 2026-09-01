@@ -25,6 +25,7 @@ from space_video_enhancer.pipeline.filters import (
 )
 from space_video_enhancer.pipeline.geometry import apply_crop, apply_geometry
 from space_video_enhancer.pipeline.presets import apply_image_filter_preset
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections
 from space_video_enhancer.pipeline.stabilization.stabilize import apply_stabilization
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
@@ -52,6 +53,7 @@ def render_frame(
     trace: RenderTrace | None = None,
     source_prepared: bool = False,
     wobble_track: WobbleTrack | None = None,
+    mesh_corrections: MeshCorrections | None = None,
 ) -> np.ndarray:
     """Run the full pipeline on one frame.
 
@@ -63,6 +65,7 @@ def render_frame(
     - ``source_prepared``: the caller already ran the capture stage on the full-size frame (the
       preview does, before downscaling — deinterlacing must see the native rows).
     - ``wobble_track``: the clip's rolling-shutter wobble analysis, when the settings ask for that correction.
+    - ``mesh_corrections``: the clip's mesh stabilization fields, when the mode is MESH.
     """
     with tracing.active(trace):
         tracing.note("input_shape", list(frame.shape[:2]))
@@ -85,6 +88,7 @@ def render_frame(
                 state=stabilization_state,
                 reference_frame=stabilization_reference,
                 wobble_track=wobble_track,
+                mesh_corrections=mesh_corrections,
             )
 
         with tracing.stage("context"):

@@ -10,8 +10,9 @@ from space_video_enhancer.pipeline.deinterlace import likely_interlaced
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
 from space_video_enhancer.pipeline.grade import neutral_gains, white_patch_gains
 from space_video_enhancer.pipeline.stabilization.keyframes import interpolate_keyframes
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections, MeshPath, corrections_for
 from space_video_enhancer.pipeline.stabilization.motion_path import MotionPath, fill_keyframes
-from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION
+from space_video_enhancer.pipeline.stabilization.stabilize import CORRECTION_BUDGET_FRACTION, smoothing_time_constant
 from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack, wobble_window_frames
 from space_video_enhancer.sequence import Clip
 from space_video_enhancer.settings import (
@@ -27,8 +28,10 @@ from space_video_enhancer.settings import (
     ReadoutAxis,
     StabilizationKeyframe,
     StabilizationMode,
+    StabilizationSettings,
 )
 from space_video_enhancer.telemetry.log import get_logger, log_event
+from space_video_enhancer.ui.mesh_analysis import MeshAnalysisRequest
 from space_video_enhancer.ui.motion_path_analysis import MotionPathRequest
 from space_video_enhancer.ui.sections.state import WindowState
 from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisRequest
@@ -36,6 +39,8 @@ from space_video_enhancer.ui.wobble_analysis import WobbleAnalysisRequest
 LOG = get_logger("ui")
 WOBBLE_ANALYSIS_MARGIN_SECONDS = 2.0
 """The wobble analysis covers this much beyond the clip's range, so trimming the in/out points a little reuses it."""
+MESH_ANALYSIS_MARGIN_FRAMES = 60
+"""Frames analysed past each end of a MESH clip: the centred smoothing window at the slider's maximum."""
 
 
 def qrect_to_norm(rect: QRectF) -> NormalizedRect:
@@ -575,8 +580,15 @@ class AdjustmentsSection(WindowState):
                 facts.append("rolling shutter: sem movimento mensurável neste frame (primeiro frame ou sem textura)")
             else:
                 facts.append("rolling shutter: aguardando o render")
+        if self._readout_measure_pending_for_active_clip():
+            pending = self._pending_analysis_for_active_clip()
+            if pending is not None:
+                done, total = self._wobble_progress.get(pending.generation, (0, pending.count))
+                facts.append(f"medindo a fração de leitura: {done * 100 // max(1, total)}% ({done}/{total} frames)")
+            else:
+                facts.append("medindo a fração de leitura…")
         if stabilization.rolling_shutter_auto and not stabilization.applies_wobble:
-            facts.append("oscilação: já absorvida pelo modo de perspectiva (a caixa fica sem efeito)")
+            facts.append("oscilação: já absorvida pela correção do modo escolhido (a caixa fica sem efeito)")
         elif stabilization.applies_wobble:
             facts.append(self._wobble_status_text(trace))
         if stabilization.corrects_rolling_shutter:
@@ -632,14 +644,23 @@ class AdjustmentsSection(WindowState):
         return None
 
     def _measure_readout_fraction(self) -> None:
-        """Fill the rolling-shutter slider with the signed readout fraction the clip's analysis measured."""
+        """Fill the rolling-shutter slider with the signed readout fraction the clip's analysis measured.
+
+        Without a finished analysis the click *arms* the measurement: the progress shows in the capture
+        info and the slider fills itself when the track lands (see ``_complete_readout_measurements``).
+        """
         clip = self.active_clip
         if clip is None:
             return
         track = self._wobble_track_for(clip)
-        if track is None:  # queued (or just started): the progress shows below the slider
-            self.status.show_message("A análise do trecho precisa terminar primeiro — clique de novo quando acabar.")
+        if track is None:  # queued (or just started): the progress shows below the slider until it lands
+            self._readout_measure_pending.add((clip.source.path, clip.range.start, clip.range.end))
+            self.status.show_message("Medindo: o trecho está sendo analisado — o slider se preenche ao terminar.")
+            self._update_capture_info()
             return
+        self._fill_readout_from_track(clip, track)
+
+    def _fill_readout_from_track(self, clip: Clip, track: WobbleTrack) -> None:
         settings = self._current_stabilization()
         axis = settings.readout_axis if settings.readout_axis is not ReadoutAxis.AUTO else track.detected_axis
         fraction = track.readout_fraction_estimate(axis)
@@ -651,6 +672,26 @@ class AdjustmentsSection(WindowState):
         self.status.show_message(
             f"Fração de leitura medida no trecho: {fraction * 100:+.0f}%"
             + (" (sensor lendo no sentido inverso do quadro)" if fraction < 0 else "")
+        )
+
+    def _complete_readout_measurements(self, track: WobbleTrack) -> None:
+        """An armed 'Medir do clipe' fills the slider when its analysis lands (only for the clip on screen)."""
+        answered = {
+            key for key in self._readout_measure_pending if key[0] == track.source and track.covers(key[1], key[2])
+        }
+        if not answered:
+            return
+        self._readout_measure_pending -= answered
+        clip = self.active_clip
+        if clip is not None and (clip.source.path, clip.range.start, clip.range.end) in answered:
+            self._fill_readout_from_track(clip, track)
+        else:
+            self.status.show_message("Análise pronta — volte ao clipe e clique 'Medir do clipe' de novo.")
+
+    def _readout_measure_pending_for_active_clip(self) -> bool:
+        clip = self.active_clip
+        return (
+            clip is not None and (clip.source.path, clip.range.start, clip.range.end) in self._readout_measure_pending
         )
 
     def _pending_analysis_for_active_clip(self) -> WobbleAnalysisRequest | None:
@@ -701,7 +742,90 @@ class AdjustmentsSection(WindowState):
         self.status.show_message(
             f"Oscilação do rolling shutter analisada: {track.count} frames em {elapsed_ms / 1000.0:.1f} s."
         )
+        self._complete_readout_measurements(track)
         self._update_capture_info()
+        self._schedule_preview_refresh(immediate=True)
+
+    # --- mesh stabilization (MeshFlow) ---------------------------------------------------------
+    def _mesh_track_for(self, clip: Clip) -> MeshPath | None:
+        """The clip's mesh analysis when it is done; otherwise starts it (once) and returns ``None`` for now."""
+        first, last = clip.range.start, clip.range.end
+        for track in self._mesh_tracks:
+            if track.source == clip.source.path and track.covers(first, last):
+                return track
+        if any(request.covers(clip.source.path, first, last) for request in self._mesh_pending):
+            return None  # already queued or running: switching away and back does not restart it
+        if clip.source.path in self._missing_sources:
+            return None
+        margin = MESH_ANALYSIS_MARGIN_FRAMES  # room for the centred smoothing at any slider position
+        start = max(0, first - margin)
+        end = min(clip.source.last_frame, last + margin)
+        request = self._mesh_analysis.analyze(clip.source.path, start, end)
+        self._mesh_pending.append(request)
+        self._mesh_progress[request.generation] = (0, end - start + 1)
+        log_event(LOG, "ui.mesh_analysis_start", clip=clip.name, first=start, last=end)
+        self.status.show_message(f"Analisando a malha de {clip.name} ({end - start + 1} frames) em segundo plano…")
+        self._update_stabilization_info_label()
+        return None
+
+    def _mesh_corrections_for(self, clip: Clip, stabilization: StabilizationSettings) -> MeshCorrections | None:
+        """The clip's correction fields for the current smoothing (cached; ``None`` until the analysis lands)."""
+        track = self._mesh_track_for(clip)
+        if track is None:
+            return None
+        key = (id(track), round(stabilization.temporal_smoothing * 1000))
+        corrections = self._mesh_corrections.get(key)
+        if corrections is None:
+            if len(self._mesh_corrections) > 8:
+                self._mesh_corrections.clear()  # slider sweeps must not hoard old fields
+            corrections = corrections_for(track, smoothing_time_constant(stabilization.temporal_smoothing))
+            self._mesh_corrections[key] = corrections
+        return corrections
+
+    def _pending_mesh_for_active_clip(self) -> MeshAnalysisRequest | None:
+        clip = self.active_clip
+        if clip is None:
+            return None
+        first, last = clip.range.start, clip.range.end
+        return next((request for request in self._mesh_pending if request.covers(clip.source.path, first, last)), None)
+
+    def _on_mesh_progress(self, request: object, done: int, total: int) -> None:
+        if isinstance(request, MeshAnalysisRequest) and any(
+            request.generation == pending.generation for pending in self._mesh_pending
+        ):
+            self._mesh_progress[request.generation] = (done, total)
+            self._update_stabilization_info_label()
+
+    def _on_mesh_finished(self, request: object, track: object, elapsed_ms: float) -> None:
+        if not isinstance(request, MeshAnalysisRequest) or not any(
+            request.generation == pending.generation for pending in self._mesh_pending
+        ):
+            return  # answers a request from a document that is gone
+        self._mesh_pending = [pending for pending in self._mesh_pending if pending.generation != request.generation]
+        self._mesh_progress.pop(request.generation, None)
+        if not isinstance(track, MeshPath):
+            log_event(LOG, "ui.mesh_analysis_failed", name=request.source.name)
+            self.status.show_message(f"Não foi possível analisar a malha de {request.source.name}.")
+            self._update_stabilization_info_label()
+            return
+        sources = set(self.sequence.source_paths)
+        self._mesh_tracks = [
+            kept
+            for kept in self._mesh_tracks
+            if kept.source in sources
+            and not (kept.source == track.source and track.covers(kept.first_frame, kept.last_frame))
+        ]
+        self._mesh_tracks.append(track)
+        log_event(
+            LOG,
+            "ui.mesh_analysis_finish",
+            name=track.source.name,
+            frames=track.count,
+            measured=round(track.measured_fraction, 3),
+            elapsed_ms=round(elapsed_ms, 1),
+        )
+        self.status.show_message(f"Malha analisada: {track.count} frames em {elapsed_ms / 1000.0:.1f} s.")
+        self._update_stabilization_info_label()
         self._schedule_preview_refresh(immediate=True)
 
     def _sync_stabilization_preview(self) -> None:
@@ -738,6 +862,8 @@ class AdjustmentsSection(WindowState):
             f"zoom out {'ligado' if settings.zoom_out else 'desligado'}",
             f"suavização {int(settings.temporal_smoothing * 100)}%",
         ]
+        if settings.mode is StabilizationMode.MESH:
+            facts = [self._mesh_status_text(), facts[0], facts[2]]  # zoom out não se aplica à malha
         if settings.mode.uses_focal_point:
             region = settings.focus_rect.to_pixels(*self.source_size)
             if region is None:
@@ -745,9 +871,28 @@ class AdjustmentsSection(WindowState):
             else:
                 facts.insert(0, f"Referência: frame {self.stabilization_reference_frame_index + 1}")
                 facts.insert(1, f"região {region[2]}x{region[3]} px (arraste o retângulo verde no preview)")
-        else:
+        elif settings.requires_sequential_processing:
             facts.append("exportação sequencial")
         self.stabilization_tab.set_info(" · ".join(facts) + ".")
+
+    def _mesh_status_text(self) -> str:
+        pending = self._pending_mesh_for_active_clip()
+        if pending is not None:
+            done, total = self._mesh_progress.get(pending.generation, (0, pending.count))
+            return f"Analisando a malha: {done * 100 // max(1, total)}% ({done}/{total} frames)"
+        clip = self.active_clip
+        if clip is not None:
+            track = next(
+                (
+                    kept
+                    for kept in self._mesh_tracks
+                    if kept.source == clip.source.path and kept.covers(clip.range.start, clip.range.end)
+                ),
+                None,
+            )
+            if track is not None:
+                return f"Malha pronta ({track.count} frames, rastreado em {track.measured_fraction:.0%} dos pares)"
+        return "Malha: aguardando a análise"
 
     def _displayed_size(self) -> tuple[int, int]:
         """Frame size the crop rectangle refers to: source, scaled, then rotated."""

@@ -37,6 +37,7 @@ from space_video_enhancer.settings import (
     RenderSettings,
     RetimingMode,
     RotationMode,
+    StabilizationMode,
     StabilizationSettings,
 )
 from space_video_enhancer.timeline import FrameRange
@@ -425,6 +426,24 @@ def test_rolling_shutter_export_measures_motion_at_every_segment_start(tmp_path:
     result = run_export(request, progress=lambda *_: None, cancel=threading.Event())
     assert result.success, result.message
     assert result.processed_frames == 9 and int(_probe_video(output)["nb_read_frames"]) == 9
+    assert "stabilize" in result.metrics["render"]["stages"]
+
+
+def test_mesh_export_analyses_the_clip_first_and_renders_in_parallel(tmp_path: Path) -> None:
+    """A MESH clip is tracked into a mesh path before any frame renders; the warp itself is stateless."""
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source)
+    settings = RenderSettings(stabilization=StabilizationSettings(mode=StabilizationMode.MESH, temporal_smoothing=1.0))
+    request = _request(source, output, settings, 2)
+    assert request.effective_worker_count == 2, "the mesh warp is per-frame data: parallel export stays"
+    statuses: list[str] = []
+    result = run_export(request, progress=lambda *_: None, cancel=threading.Event(), status=statuses.append)
+    assert result.success, result.message
+    assert result.processed_frames == 12 and int(_probe_video(output)["nb_read_frames"]) == 12
+    [analysis] = result.metrics["mesh_analysis"]
+    assert analysis["clip"] == 0 and analysis["frames"] == 12
+    assert statuses and "malha" in statuses[-1].lower(), statuses
     assert "stabilize" in result.metrics["render"]["stages"]
 
 
