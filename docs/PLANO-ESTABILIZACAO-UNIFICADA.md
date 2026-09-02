@@ -89,6 +89,24 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   1,11% vs 0,71% do lock de pose fixa do v8. O caso diferenciador (alvo que se move independente do
   fundo) está coberto pelos sintéticos; medir em footage de alvo real quando houver.
 
+## Wave 3.5 — oscilação do resíduo (MEDIDA 2026-09-01, a implementar se aprovada)
+
+- Motivação: o "lago agitado" residual dos exports da malha (jello 23,8–25,9 px nos v7/v9 em 4K).
+  Medido no trecho real: a malha absorve só ~40% do jello da fonte (9,99 → 5,90 px em 720p).
+- **Empilhar cru (wobble da fonte + malha) RECONFIRMADO NEGATIVO** no código da Wave 3: jello
+  11,12 px — pior que a fonte; trapézio 6,40 → 8,86. A trava `applies_wobble` fica.
+- **Variante vencedora: medir o wobble NA SAÍDA da malha e corrigir só o resíduo** (unskew DEPOIS
+  do warp, com track analisado sobre frames já estabilizados): jello 5,90 → **1,63 px (−72%)** e
+  trapézio 6,40 → **4,11 px/par** (métrica independente), alvo/global intocados (2,58/2,80).
+- Eixo: os dois eixos medem a MESMA distorção em decomposições equivalentes (energias idênticas;
+  corrigir um zera o outro); corrigir os dois = dupla correção (jello volta a 0,47%). Corrigir só
+  um; rows venceu no trapézio (4,11 vs 5,07). Nota: `detect_readout_axis` usa correlação sem
+  módulo — leitura invertida (Motorola, corr −0,48) nunca é detectada; rever junto.
+- Implementação exigirá: 2º passe de análise sobre frames estabilizados (aplicar o campo durante o
+  tracking do wobble), unskew após o warp nos modos malha, e `rolling_shutter_auto` nos modos
+  malha passando a significar "resíduo" em vez de suprimido. Scripts: test_wobble_stack.py /
+  test_wobble_axis.py (scratchpad; lógica descrita aqui).
+
 ## Wave 4 — polimento e remoção do legado
 
 - Migração silenciosa dos enums legados ao salvar projeto (AUTO/SIMILARITY/PERSPECTIVE → MESH;
