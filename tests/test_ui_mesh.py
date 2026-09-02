@@ -27,7 +27,7 @@ def test_mesh_mode_analyses_the_clip_and_stabilizes_the_preview(
 
     select_combo_data(tab.mode_combo, StabilizationMode.MESH.value)
     wait_for_preview(app, window)
-    assert not tab.wobble_checkbox.isEnabled(), "the mesh absorbs the wobble: the checkbox is moot"
+    assert tab.wobble_checkbox.isEnabled(), "under the mesh the checkbox corrects the residual wobble"
     assert not tab.zoom_out_checkbox.isEnabled(), "the mesh field is clamped to the crop margin"
     assert tab.intensity_slider.isEnabled() and tab.smoothing_slider.isEnabled()
     assert window.sequence.clips[0].settings.stabilization.mode is StabilizationMode.MESH
@@ -60,7 +60,7 @@ def test_object_mode_uses_the_mesh_analysis_and_the_anchored_fields(
 
     select_combo_data(tab.mode_combo, StabilizationMode.OBJECT.value)
     wait_for_preview(app, window)
-    assert not tab.wobble_checkbox.isEnabled(), "the mesh under the object mode absorbs the wobble"
+    assert tab.wobble_checkbox.isEnabled(), "under the object mode the checkbox corrects the residual wobble"
     assert window.focus_regions_norm, "entering the mode seeds the first region"
 
     wait_until(app, lambda: not window._mesh_pending and bool(window._mesh_tracks), what="mesh analysis")

@@ -215,7 +215,11 @@ class PreviewSection(WindowState):
                 f"Mídia não encontrada: {source_path.name} — coloque o arquivo de volta no lugar e reabra o projeto."
             )
             return
-        wobble_track = self._wobble_track_for(clip) if preview_settings.stabilization.needs_wobble_analysis else None
+        wobble_track = (
+            self._wobble_track_for(clip, preview_settings.stabilization)
+            if preview_settings.stabilization.needs_wobble_analysis
+            else None
+        )
         mesh_corrections = (
             self._mesh_corrections_for(clip, preview_settings.stabilization)
             if preview_settings.stabilization.needs_mesh_analysis

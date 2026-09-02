@@ -624,11 +624,11 @@ class AdjustmentsSection(WindowState):
                 facts.append(f"medindo a fração de leitura: {done * 100 // max(1, total)}% ({done}/{total} frames)")
             else:
                 facts.append("medindo a fração de leitura…")
-        if stabilization.rolling_shutter_auto and not stabilization.applies_wobble:
+        if stabilization.applies_wobble or stabilization.applies_residual_wobble:
+            facts.append(self._wobble_status_text(trace, residual=stabilization.applies_residual_wobble))
+        elif stabilization.rolling_shutter_auto:
             facts.append("oscilação: já absorvida pela correção do modo escolhido (a caixa fica sem efeito)")
-        elif stabilization.applies_wobble:
-            facts.append(self._wobble_status_text(trace))
-        if stabilization.corrects_rolling_shutter:
+        if stabilization.corrects_rolling_shutter or stabilization.applies_residual_wobble:
             facts.append(self._readout_axis_text(trace))
         self.stabilization_tab.set_capture_info(" · ".join(facts) + ("." if facts else ""))
 
@@ -642,41 +642,68 @@ class AdjustmentsSection(WindowState):
         source = sources.get(str(trace.get("rolling_shutter.axis_source")))
         return f"leitura do sensor: {name}" + (f" ({source})" if source else "")
 
-    def _wobble_status_text(self, trace: dict[str, object]) -> str:
+    def _wobble_status_text(self, trace: dict[str, object], *, residual: bool = False) -> str:
+        label = "a oscilação residual" if residual else "a oscilação"
         pending = self._pending_analysis_for_active_clip()
         if pending is not None:
             done, total = self._wobble_progress.get(pending.generation, (0, pending.count))
-            return f"analisando a oscilação: {done * 100 // max(1, total)}% ({done}/{total} frames)"
+            return f"analisando {label}: {done * 100 // max(1, total)}% ({done}/{total} frames)"
         wobble = trace.get("rolling_shutter.wobble_px")
         if isinstance(wobble, (list, tuple)) and len(wobble) == 2:
-            return f"oscilação compensada {wobble[0]:+.1f}, {wobble[1]:+.1f} px (topo→base)"
+            suffix = " além da malha" if residual else ""
+            return f"oscilação compensada {wobble[0]:+.1f}, {wobble[1]:+.1f} px (topo→base){suffix}"
+        if residual:
+            return "oscilação residual: aguardando a análise da malha"
         return "oscilação: aguardando o render"
 
-    def _wobble_track_for(self, clip: Clip) -> WobbleTrack | None:
+    def _wobble_track_for(
+        self, clip: Clip, stabilization: StabilizationSettings, *, want_residual: bool | None = None
+    ) -> WobbleTrack | None:
         """The clip's wobble analysis when it is done; otherwise starts it (once) and returns ``None`` for now.
 
         The analysis runs on its own thread over the clip's range plus a margin; the preview renders
         without the wobble until ``_on_wobble_finished`` stores the track and asks for a refresh.
+        A mesh-backed mode gets a *residual* track (the frames are warped by the clip's fields before
+        tracking), which can only start once the mesh analysis has landed — returning ``None`` until
+        then re-arms it on the refresh that lands the fields. A residual track is kept until the clip
+        or its mesh track changes: slider moves do not re-measure it (measured: a stale one is
+        harmless — the export re-analyses with its own settings and stays exact).
         """
+        residual = stabilization.applies_residual_wobble if want_residual is None else want_residual
         first, last = clip.range.start, clip.range.end
         for track in self._wobble_tracks:
-            if track.source == clip.source.path and track.covers(first, last):
+            if track.residual == residual and track.source == clip.source.path and track.covers(first, last):
                 return track
-        if any(request.covers(clip.source.path, first, last) for request in self._wobble_pending):
+        if any(
+            request.residual == residual and request.covers(clip.source.path, first, last)
+            for request in self._wobble_pending
+        ):
             return None  # already queued or running: switching away and back does not restart it
         if clip.source.path in self._missing_sources:
             return None
+        corrections: MeshCorrections | None = None
+        if residual:
+            corrections = self._mesh_corrections_for(clip, stabilization)
+            if corrections is None:
+                return None  # the mesh analysis is still running: its landing refresh re-arms this
         window = wobble_window_frames(clip.fps)
         margin = max(window, round(WOBBLE_ANALYSIS_MARGIN_SECONDS * clip.fps))
         start = max(0, first - margin)
         end = min(clip.source.last_frame, last + margin)
-        request = self._wobble_analysis.analyze(clip.source.path, start, end, window)
+        if corrections is not None:
+            # A stabilized/unstabilized boundary inside the range would read as a fake jello step.
+            start = max(start, corrections.first_frame)
+            end = min(end, corrections.first_frame + len(corrections.fields) - 1)
+        request = self._wobble_analysis.analyze(
+            clip.source.path, start, end, window, corrections, stabilization if residual else None
+        )
         self._wobble_pending.append(request)
         self._wobble_progress[request.generation] = (0, end - start + 1)
-        log_event(LOG, "ui.wobble_analysis_start", clip=clip.name, first=start, last=end, window=window)
-        self.status.show_message(
-            f"Analisando a oscilação do rolling shutter de {clip.name} ({end - start + 1} frames) em segundo plano…"
+        log_event(
+            LOG, "ui.wobble_analysis_start", clip=clip.name, first=start, last=end, window=window, residual=residual
         )
+        label = "a oscilação residual" if residual else "a oscilação do rolling shutter"
+        self.status.show_message(f"Analisando {label} de {clip.name} ({end - start + 1} frames) em segundo plano…")
         self._update_capture_info()
         return None
 
@@ -689,7 +716,9 @@ class AdjustmentsSection(WindowState):
         clip = self.active_clip
         if clip is None:
             return
-        track = self._wobble_track_for(clip)
+        # The readout fraction is a property of the source footage: always the source-measured track,
+        # even when the mode's own wobble is the residual one.
+        track = self._wobble_track_for(clip, self._current_stabilization(), want_residual=False)
         if track is None:  # queued (or just started): the progress shows below the slider until it lands
             self._readout_measure_pending.add((clip.source.path, clip.range.start, clip.range.end))
             self.status.show_message("Medindo: o trecho está sendo analisado — o slider se preenche ao terminar.")
@@ -713,6 +742,8 @@ class AdjustmentsSection(WindowState):
 
     def _complete_readout_measurements(self, track: WobbleTrack) -> None:
         """An armed 'Medir do clipe' fills the slider when its analysis lands (only for the clip on screen)."""
+        if track.residual:
+            return  # the readout fraction is a property of the source: a residual track cannot answer it
         answered = {
             key for key in self._readout_measure_pending if key[0] == track.source and track.covers(key[1], key[2])
         }
@@ -765,7 +796,11 @@ class AdjustmentsSection(WindowState):
             kept
             for kept in self._wobble_tracks
             if kept.source in sources
-            and not (kept.source == track.source and track.covers(kept.first_frame, kept.last_frame))
+            and not (
+                kept.residual == track.residual  # a residual track must never evict a source one (nor vice versa)
+                and kept.source == track.source
+                and track.covers(kept.first_frame, kept.last_frame)
+            )
         ]
         self._wobble_tracks.append(track)
         log_event(

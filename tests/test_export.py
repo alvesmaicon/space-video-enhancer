@@ -468,6 +468,39 @@ def test_object_export_analyses_the_mesh_first_and_renders_in_parallel(tmp_path:
     assert analysis["clip"] == 0 and analysis["frames"] == 12
 
 
+def test_mesh_export_with_wobble_analyses_the_residual_over_the_stabilized_frames(tmp_path: Path) -> None:
+    """A mesh clip's wobble is *residual*: measured after the mesh analysis, over warped frames, never
+    reused from a provided (preview) track — the export must match exactly what it renders."""
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source)
+    settings = RenderSettings(
+        stabilization=StabilizationSettings(
+            mode=StabilizationMode.MESH, temporal_smoothing=1.0, rolling_shutter_auto=True
+        )
+    )
+    request = _request(source, output, settings, 2)
+    assert request.effective_worker_count == 2, "the residual track is per-frame data: parallel export stays"
+
+    video = VideoSource(source)
+    try:
+        preview_track = analyze_wobble(video.read_frame, source, 0, 11, wobble_window_frames(24.0)).track
+    finally:
+        video.release()
+    assert preview_track is not None and not preview_track.residual
+    provided = replace(request, wobble_tracks=(preview_track,))
+
+    statuses: list[str] = []
+    result = run_export(provided, progress=lambda *_: None, cancel=threading.Event(), status=statuses.append)
+    assert result.success, result.message
+    assert result.processed_frames == 12 and int(_probe_video(output)["nb_read_frames"]) == 12
+    [wobble] = result.metrics["wobble_analysis"]
+    assert wobble["residual"] is True, "the provided source track was not reused: the residual was measured"
+    [mesh] = result.metrics["mesh_analysis"]
+    assert mesh["clip"] == 0, "the mesh analysis ran first — the residual pass tracks its output"
+    assert any("residual" in status for status in statuses), statuses
+
+
 def test_wobble_export_analyses_the_clip_first_and_renders_in_parallel(tmp_path: Path) -> None:
     """Every frame knows its own wobble from the analysis pass, so the frames need no order; the pass reports status."""
     source = tmp_path / "source.mp4"

@@ -133,12 +133,13 @@ WOBBLE_TOOLTIP = (
     "aparece aqui embaixo): o movimento do topo e da base do quadro é comparado entre frames e a oscilação de "
     "cada frame é medida contra a média dos vizinhos — meio segundo antes e depois —, então só o tremor rápido é "
     "corrigido, sem precisar do percentual de leitura. Não corrige a inclinação constante de uma panorâmica — "
-    "para essa, use o slider."
+    "para essa, use o slider. Nos modos apoiados na malha (Automática e Travar objeto) a análise roda sobre os "
+    "frames JÁ estabilizados e corrige só o resíduo que a malha não absorveu — o efeito 'superfície de lago' "
+    "que sobra quando o tremor grande sai."
 )
 WOBBLE_PERSPECTIVE_TOOLTIP = (
-    "Indisponível com os modos apoiados na malha (Automática e Travar objeto) e com a perspectiva legada: "
-    "a correção deles já absorve a mesma inclinação/oscilação a cada frame — corrigir duas vezes deforma "
-    "a imagem em vez de firmá-la."
+    "Indisponível com o modo Perspectiva (legado): a homografia já absorve a mesma inclinação/oscilação a "
+    "cada frame — corrigir duas vezes deforma a imagem em vez de firmá-la."
 )
 ROLLING_SHUTTER_TOOLTIP = (
     "Desfaz a inclinação que o sensor deixa quando a câmera se move (postes que tombam, imagem que estica): "
@@ -502,7 +503,7 @@ class StabilizationTab(TabPage):
             widget.setEnabled(manual_enabled)
         self.rolling_shutter_slider.setEnabled(controls_enabled)  # capture fixes do not need a stabilization mode
         self.readout_measure_button.setEnabled(controls_enabled)
-        wobble_moot = mode in (StabilizationMode.PERSPECTIVE, StabilizationMode.MESH, StabilizationMode.OBJECT)
+        wobble_moot = mode is StabilizationMode.PERSPECTIVE  # the mesh modes correct the residual instead
         self.wobble_checkbox.setEnabled(controls_enabled and not wobble_moot)
         self.wobble_checkbox.setToolTip(WOBBLE_PERSPECTIVE_TOOLTIP if wobble_moot else WOBBLE_TOOLTIP)
         self.readout_axis_combo.setEnabled(controls_enabled)

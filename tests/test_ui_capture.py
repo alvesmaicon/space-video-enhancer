@@ -71,7 +71,9 @@ def test_capture_controls_flow_into_the_clip_settings_and_the_project(
     assert "rolling_shutter.wobble_px" in trace, "the analysed wobble reaches the render"
     assert trace["rolling_shutter.axis"] == "columns" and trace["rolling_shutter.axis_source"] == "forced"
     assert "leitura do sensor: colunas" in tab.capture_info_label.text(), tab.capture_info_label.text()
-    assert window._wobble_track_for(window.sequence.clips[0]) is track, "the same range is not analysed twice"
+    assert window._wobble_track_for(window.sequence.clips[0], window._current_stabilization()) is track, (
+        "the same range is not analysed twice"
+    )
 
     project_path = tmp_path / "capture.svep"
     assert window._write_project(project_path)
@@ -155,20 +157,25 @@ def test_switching_clips_does_not_restart_a_running_wobble_analysis(
     calls: list[tuple[int, int]] = []
     generation = [0]
 
-    def record(source_path: Path, first: int, last: int, analysis_window: int) -> WobbleAnalysisRequest:
+    def record(
+        source_path: Path, first: int, last: int, analysis_window: int, corrections=None, stabilization=None
+    ) -> WobbleAnalysisRequest:
         # Record the request instead of starting the real thread (which would need the frames decoded).
         generation[0] += 1
         calls.append((first, last))
-        return WobbleAnalysisRequest(generation[0], source_path, first, last, analysis_window)
+        return WobbleAnalysisRequest(
+            generation[0], source_path, first, last, analysis_window, corrections, stabilization
+        )
 
     monkeypatch.setattr(window._wobble_analysis, "analyze", record)  # the real controller stays alive for teardown
     window._wobble_pending.clear()
     window._wobble_tracks.clear()
 
-    assert window._wobble_track_for(clip_a) is None, "clip A has no track yet: it starts one"
-    assert window._wobble_track_for(clip_b) is None, "switching to B queues B without touching A"
-    assert window._wobble_track_for(clip_a) is None, "back on A: still pending, not restarted"
-    assert window._wobble_track_for(clip_b) is None
+    stabilization = settings.stabilization
+    assert window._wobble_track_for(clip_a, stabilization) is None, "clip A has no track yet: it starts one"
+    assert window._wobble_track_for(clip_b, stabilization) is None, "switching to B queues B without touching A"
+    assert window._wobble_track_for(clip_a, stabilization) is None, "back on A: still pending, not restarted"
+    assert window._wobble_track_for(clip_b, stabilization) is None
     assert len(calls) == 2, f"each clip is analysed once, not restarted on every visit: {calls}"
     assert {call[0] for call in calls} == {0, 250 - 60}, "one analysis per clip range (2 s margin at 30 fps)"
 
@@ -247,9 +254,11 @@ def test_measure_button_fills_the_slider_with_the_signed_fraction(
     assert settings.rolling_shutter == pytest.approx(-0.28)
 
 
-def test_wobble_is_unavailable_under_the_mesh_and_comes_back(
+def test_wobble_under_the_mesh_becomes_the_residual_correction(
     app: QApplication, window: MainWindow, ui_video: Path
 ) -> None:
+    """The mesh modes keep the checkbox working: the analysis reruns over the *stabilized* frames and
+    the correction undoes only what the mesh did not absorb (a pre-warp one would deform, measured)."""
     tab = window.stabilization_tab
     _open(app, window, ui_video)
     tab.wobble_checkbox.setChecked(True)
@@ -258,10 +267,25 @@ def test_wobble_is_unavailable_under_the_mesh_and_comes_back(
 
     select_combo_data(tab.mode_combo, StabilizationMode.MESH.value)
     wait_for_preview(app, window)
-    assert not tab.wobble_checkbox.isEnabled(), "the mesh absorbs the wobble: the checkbox is moot"
+    assert tab.wobble_checkbox.isEnabled(), "the checkbox now drives the residual correction"
     settings = window.sequence.clips[0].settings.stabilization
-    assert settings.rolling_shutter_auto and not settings.applies_wobble
-    assert "absorvida" in tab.capture_info_label.text(), tab.capture_info_label.text()
+    assert settings.rolling_shutter_auto and not settings.applies_wobble and settings.applies_residual_wobble
+    assert "absorvida" not in tab.capture_info_label.text(), tab.capture_info_label.text()
+
+    # The mesh analysis lands first; the refresh it triggers starts the residual analysis over the
+    # stabilized frames, and the source-measured track is left untouched next to it.
+    wait_until(app, lambda: not window._mesh_pending and bool(window._mesh_tracks), what="mesh analysis")
+    wait_until(
+        app,
+        lambda: not window._wobble_pending and any(track.residual for track in window._wobble_tracks),
+        what="residual wobble analysis",
+    )
+    wait_for_preview(app, window)
+    assert any(not track.residual for track in window._wobble_tracks), "the source track survives"
+    trace = window._last_preview.trace
+    assert trace.get("rolling_shutter.wobble") in ("residual_after_mesh", "outside_track"), trace.get(
+        "rolling_shutter.wobble"
+    )
 
     select_combo_data(tab.mode_combo, StabilizationMode.MANUAL.value)
     wait_for_preview(app, window)

@@ -113,7 +113,7 @@ def apply_stabilization(
     if not stabilizing:
         return frame
     if settings.mode in (StabilizationMode.MESH, StabilizationMode.OBJECT):
-        return _apply_mesh_mode(frame, settings, frame_index, state, mesh_field, correction)
+        return _apply_mesh_mode(frame, settings, frame_index, state, mesh_field, correction, wobble_track)
 
     applied: np.ndarray | None = None
     if correction is None:
@@ -152,6 +152,7 @@ def _apply_mesh_mode(
     state: StabilizationState | None,
     field: np.ndarray | None,
     live_correction: np.ndarray | None,
+    wobble_track: WobbleTrack | None = None,
 ) -> np.ndarray:
     """The mesh-backed branch (MESH and OBJECT): warp by the clip's analysed field — or by the live
     fallback path until it lands.
@@ -162,7 +163,9 @@ def _apply_mesh_mode(
     from that path onto the field over :data:`MESH_HANDOFF_FRAMES` so the frame does not jump; a
     fresh sequence (an export worker, a scrub, a paused re-render) starts straight on the field.
     Both parts are clamped to the margin, and the constant crop below applies in every case — the
-    zoom never pops.
+    zoom never pops. A *residual* ``wobble_track`` (measured on mesh-stabilized frames, see
+    :attr:`WobbleTrack.residual`) is applied last, after the crop — exactly where its frames were
+    measured — correcting the jello the mesh's grid did not absorb.
     """
     if field is None:
         note("stabilization.mesh", "fallback")
@@ -193,7 +196,46 @@ def _apply_mesh_mode(
         stabilized = apply_mesh(frame, scaled)
     if settings.auto_crop:
         stabilized = transforms.stabilization_crop(stabilized, None, settings.margin)
+    if field is not None and settings.applies_residual_wobble:
+        stabilized = _apply_residual_wobble(stabilized, settings, frame_index, wobble_track)
     return stabilized
+
+
+def _apply_residual_wobble(
+    frame: np.ndarray, settings: StabilizationSettings, frame_index: int | None, wobble_track: WobbleTrack | None
+) -> np.ndarray:
+    """``frame`` (already mesh-warped and cropped) with the residual wobble undone — one more remap.
+
+    Only a residual track counts: a source-measured one here would correct jello the mesh already
+    absorbed (measured: that *doubles* the deformation instead of removing it).
+    """
+    if wobble_track is None or not wobble_track.residual:
+        note("rolling_shutter.wobble", "unanalysed")
+        return frame
+    axis, axis_source = resolve_readout_axis(settings, wobble_track)
+    note("rolling_shutter.axis", axis.value)
+    note("rolling_shutter.axis_source", axis_source)
+    wobble = wobble_track.wobble_at(frame_index, 0.0, axis) if frame_index is not None else None
+    if wobble is None:
+        note("rolling_shutter.wobble", "outside_track")
+        return frame
+    note("rolling_shutter.wobble", "residual_after_mesh")
+    length = float(frame.shape[1] if axis is ReadoutAxis.COLUMNS else frame.shape[0])
+    note("rolling_shutter.wobble_px", [round(wobble[0] * length, 2), round(wobble[1] * length, 2)])
+    return rolling_shutter.correct(frame, (wobble[0] * length, wobble[1] * length), axis)
+
+
+def mesh_stabilized_for_analysis(
+    frame: np.ndarray, settings: StabilizationSettings, frame_index: int | None, corrections: MeshCorrections | None
+) -> np.ndarray:
+    """``frame`` exactly as the mesh modes will render it (field + constant crop), with no
+    rolling-shutter parts: what the residual wobble analysis must track.
+
+    Frames outside the fields' coverage get only the crop, so every analysed frame has the same size.
+    """
+    bare = replace(settings, rolling_shutter=0.0, rolling_shutter_auto=False)
+    field = corrections.at(frame_index) if corrections is not None and frame_index is not None else None
+    return _apply_mesh_mode(frame, bare, frame_index, None, field, None)
 
 
 def _warp_by_live_path(frame: np.ndarray, settings: StabilizationSettings, correction: np.ndarray | None) -> np.ndarray:
@@ -274,7 +316,7 @@ def unskew_rolling_shutter(
             gradient_x += displacement[0] * settings.rolling_shutter
             gradient_y += displacement[1] * settings.rolling_shutter
             contributions += 1
-    if settings.rolling_shutter_auto and not settings.applies_wobble:
+    if settings.rolling_shutter_auto and not settings.applies_wobble and not settings.applies_residual_wobble:
         note("rolling_shutter.wobble", "absorbed_by_perspective")
     if settings.applies_wobble:
         wobble = None

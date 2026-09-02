@@ -144,6 +144,9 @@ class WobbleTrack:
     """Frames on each side used by the zero-mean filter (see :func:`wobble_window_frames`)."""
     detected_axis: ReadoutAxis
     """What :func:`detect_readout_axis` concluded for this range (never ``AUTO``)."""
+    residual: bool = False
+    """``True`` when the tracked frames were already mesh-stabilized: this track holds only what the
+    mesh did not absorb, is applied *after* the warp, and must never serve as a source track."""
 
     @property
     def count(self) -> int:
@@ -226,6 +229,7 @@ def analyze_wobble(
     window: int,
     *,
     rotation: int = 0,
+    residual: bool = False,
     progress: Callable[[int, int], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> WobbleAnalysis:
@@ -235,7 +239,8 @@ def analyze_wobble(
     there). The frames are only tracked, never rendered, at the estimator's analysis size.
     Both readout axes are measured; ``rotation`` (the
     file's, in degrees) breaks the tie when neither carries wobble. ``progress(done, total)`` is called
-    after every frame; ``cancelled()`` is polled between frames.
+    after every frame; ``cancelled()`` is polled between frames. ``residual`` marks the track as made
+    from mesh-stabilized frames (the caller's ``read`` warps them): see :attr:`WobbleTrack.residual`.
     """
     started = time.perf_counter()
     count = max(0, last - first + 1)
@@ -290,5 +295,6 @@ def analyze_wobble(
         rotation,
         window,
         detect_readout_axis(row_correlation, column_correlation, rotation),
+        residual,
     )
     return WobbleAnalysis(track, frames_read, elapsed_ms)

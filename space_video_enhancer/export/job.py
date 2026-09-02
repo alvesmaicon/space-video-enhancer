@@ -40,6 +40,7 @@ from space_video_enhancer.pipeline.stabilization.mesh import (
     corrections_for_object,
 )
 from space_video_enhancer.pipeline.stabilization.stabilize import (
+    mesh_stabilized_for_analysis,
     needs_previous_frame,
     prime_with_previous,
     smoothing_time_constant,
@@ -362,44 +363,75 @@ class _ClipRenderer:
         self.state = StabilizationState()
         self.reference = reference
         self.wobble_track = wobble_track
-        self.mesh_corrections: MeshCorrections | None = None
-        if mesh_track is not None and clip.settings.stabilization.needs_mesh_analysis:
-            stabilization = clip.settings.stabilization
-            smoothing = smoothing_time_constant(stabilization.temporal_smoothing)
-            if stabilization.mode is StabilizationMode.OBJECT:
-                height, width = first_frame.shape[:2]  # the analysed frames' shape: the pose fit needs it
-                self.mesh_corrections = corrections_for_object(
-                    mesh_track,
-                    stabilization.focus_regions,
-                    smoothing,
-                    limit=stabilization.margin,
-                    aspect=width / max(1, height),
-                )
-            else:
-                self.mesh_corrections = corrections_for(mesh_track, smoothing, stabilization.margin)
+        self.mesh_corrections = _clip_mesh_corrections(clip, mesh_track, first_frame.shape)
+
+
+def _clip_mesh_corrections(
+    clip: Clip, mesh_track: MeshPath | None, first_frame_shape: tuple[int, ...]
+) -> MeshCorrections | None:
+    """The clip's mesh fields for its own settings; ``None`` when the mode needs none (or no track yet)."""
+    if mesh_track is None or not clip.settings.stabilization.needs_mesh_analysis:
+        return None
+    stabilization = clip.settings.stabilization
+    smoothing = smoothing_time_constant(stabilization.temporal_smoothing)
+    if stabilization.mode is StabilizationMode.OBJECT:
+        height, width = first_frame_shape[:2]  # the analysed frames' shape: the pose fit needs it
+        return corrections_for_object(
+            mesh_track,
+            stabilization.focus_regions,
+            smoothing,
+            limit=stabilization.margin,
+            aspect=width / max(1, height),
+        )
+    return corrections_for(mesh_track, smoothing, stabilization.margin)
 
 
 def _analyze_clip_wobble(
-    readers: _SourceReaders, index: int, clip: Clip, cancel: threading.Event, status: _StatusThrottle
+    readers: _SourceReaders,
+    index: int,
+    clip: Clip,
+    cancel: threading.Event,
+    status: _StatusThrottle,
+    corrections: MeshCorrections | None = None,
 ) -> tuple[WobbleTrack | None, dict[str, Any] | None]:
-    """Track the clip's range (plus the filter window on each side) on the export thread; ``None`` when cancelled."""
+    """Track the clip's range (plus the filter window on each side) on the export thread; ``None`` when cancelled.
+
+    With ``corrections`` the analysis is *residual*: every frame is mesh-stabilized before tracking
+    (see :func:`mesh_stabilized_for_analysis`), so the track holds only what the mesh did not absorb.
+    The range is then clamped to the fields' coverage — a stabilized/unstabilized boundary inside the
+    range would read as a fake jello step.
+    """
     path = clip.source.path
     window = wobble_window_frames(clip.fps)
     first = max(0, clip.range.start - window)
     last = min(clip.source.last_frame, clip.range.end + window)
+    if corrections is not None:
+        first = max(first, corrections.first_frame)
+        last = min(last, corrections.first_frame + len(corrections.fields) - 1)
 
     def read(frame_index: int) -> np.ndarray | None:
-        return readers.read(path, frame_index)
+        frame = readers.read(path, frame_index)
+        if frame is None or corrections is None:
+            return frame
+        return mesh_stabilized_for_analysis(frame, clip.settings.stabilization, frame_index, corrections)
 
     def report(done: int, total: int) -> None:
+        label = "a oscilação residual" if corrections is not None else "a oscilação do rolling shutter"
         status(
-            f"Analisando a oscilação do rolling shutter de {clip.name}: {done * 100 // max(1, total)}% "
-            f"({done}/{total} frames)",
+            f"Analisando {label} de {clip.name}: {done * 100 // max(1, total)}% ({done}/{total} frames)",
             force=done == total,
         )
 
     analysis = analyze_wobble(
-        read, path, first, last, window, rotation=readers.rotation(path), progress=report, cancelled=cancel.is_set
+        read,
+        path,
+        first,
+        last,
+        window,
+        rotation=readers.rotation(path),
+        residual=corrections is not None,
+        progress=report,
+        cancelled=cancel.is_set,
     )
     if analysis.cancelled:
         return None, None
@@ -412,6 +444,7 @@ def _analyze_clip_wobble(
         "frames": analysis.frames_read,
         "measured": round(track.measured_fraction, 3) if track is not None else None,
         "axis": track.detected_axis.value if track is not None else None,
+        "residual": corrections is not None,
         "elapsed_ms": round(analysis.elapsed_ms, 1),
     }
     log_event(LOG, "export.wobble_analysis", **summary)
@@ -419,10 +452,18 @@ def _analyze_clip_wobble(
 
 
 def _wobble_tracks(
-    readers: _SourceReaders, request: ExportRequest, cancel: threading.Event, status: _StatusThrottle
+    readers: _SourceReaders,
+    request: ExportRequest,
+    cancel: threading.Event,
+    status: _StatusThrottle,
+    mesh_tracks: dict[int, MeshPath],
 ) -> tuple[dict[int, WobbleTrack], list[dict[str, Any]]] | None:
     """A wobble track per clip that needs one (wobble, or the readout axis): the one handed in when it covers the
     clip, else analysed now.
+
+    A clip in a mesh mode gets a *residual* track — always analysed here, with the export's own
+    fields, never reused from the preview: the preview's residual may have been measured against
+    older slider values (harmless there, but the export must match exactly what it renders).
 
     ``None`` when the export was cancelled during an analysis.
     """
@@ -431,18 +472,30 @@ def _wobble_tracks(
     for index, clip in enumerate(request.sequence.clips):
         if not clip.settings.stabilization.needs_wobble_analysis:
             continue
-        provided = next(
-            (
-                track
-                for track in request.wobble_tracks
-                if track.source == clip.source.path and track.covers(clip.range.start, clip.range.end)
-            ),
-            None,
-        )
-        if provided is not None:
-            tracks[index] = provided
-            continue
-        track, summary = _analyze_clip_wobble(readers, index, clip, cancel, status)
+        corrections: MeshCorrections | None = None
+        if clip.settings.stabilization.applies_residual_wobble:
+            mesh_track = mesh_tracks.get(index)
+            if mesh_track is None:
+                continue  # no mesh path (unreadable clip): there is no residual to measure
+            probe = readers.read(clip.source.path, clip.range.start)
+            if probe is None:
+                continue
+            corrections = _clip_mesh_corrections(clip, mesh_track, probe.shape)
+        else:
+            provided = next(
+                (
+                    track
+                    for track in request.wobble_tracks
+                    if not track.residual
+                    and track.source == clip.source.path
+                    and track.covers(clip.range.start, clip.range.end)
+                ),
+                None,
+            )
+            if provided is not None:
+                tracks[index] = provided
+                continue
+        track, summary = _analyze_clip_wobble(readers, index, clip, cancel, status, corrections)
         if summary is None:
             return None
         summaries.append(summary)
@@ -585,16 +638,16 @@ def _run_export(
         for index, clip in enumerate(sequence.clips)
         if clip.stabilization_reference_frame is not None
     }
-    # The wobble of a clip is measured over its whole range before any of it is rendered (or the preview's
-    # track is reused): every frame then knows its own distortion, and the clip can render in parallel.
-    analysed = _wobble_tracks(readers, request, cancel, status)
-    if analysed is None:
-        return finish(ExportResult(False, CANCELLED_MESSAGE, 0, total, cancelled=True), "export.cancelled")
-    wobble_tracks, metrics.wobble_analysis = analysed
+    # Analyses run before any frame is rendered, so every clip can render in parallel. The mesh goes
+    # first: a mesh clip's wobble is *residual* — measured over its frames already warped by the fields.
     mesh_analysed = _mesh_tracks(readers, request, cancel, status)
     if mesh_analysed is None:
         return finish(ExportResult(False, CANCELLED_MESSAGE, 0, total, cancelled=True), "export.cancelled")
     mesh_tracks, metrics.mesh_analysis = mesh_analysed
+    analysed = _wobble_tracks(readers, request, cancel, status, mesh_tracks)
+    if analysed is None:
+        return finish(ExportResult(False, CANCELLED_MESSAGE, 0, total, cancelled=True), "export.cancelled")
+    wobble_tracks, metrics.wobble_analysis = analysed
 
     frames = _iter_frames(readers, request)
     first = next(frames, None)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
-from space_video_enhancer.pipeline.stabilization import transforms
+from space_video_enhancer.pipeline.stabilization import rolling_shutter, transforms
 from space_video_enhancer.pipeline.stabilization.mesh import (
     ANCHOR_SAMPLE_OFFSETS,
     CORRECTION_LIMIT_FRACTION,
@@ -23,9 +24,14 @@ from space_video_enhancer.pipeline.stabilization.mesh import (
     mesh_correction,
     vertex_positions,
 )
-from space_video_enhancer.pipeline.stabilization.stabilize import MESH_HANDOFF_FRAMES, apply_stabilization
+from space_video_enhancer.pipeline.stabilization.stabilize import (
+    MESH_HANDOFF_FRAMES,
+    apply_stabilization,
+    mesh_stabilized_for_analysis,
+)
 from space_video_enhancer.pipeline.stabilization.state import StabilizationState
-from space_video_enhancer.settings import NormalizedRect, StabilizationMode, StabilizationSettings
+from space_video_enhancer.pipeline.stabilization.wobble import WobbleTrack
+from space_video_enhancer.settings import NormalizedRect, ReadoutAxis, StabilizationMode, StabilizationSettings
 from space_video_enhancer.telemetry import trace as tracing
 from space_video_enhancer.telemetry.trace import RenderTrace
 
@@ -434,7 +440,62 @@ def test_mesh_settings_flags() -> None:
     assert settings.enabled and settings.needs_mesh_analysis
     assert not settings.requires_sequential_processing, "per-frame fields keep the export parallel"
     assert not settings.applies_wobble, "the mesh already absorbs the wobble (measured: correcting twice deforms)"
+    assert settings.applies_residual_wobble and settings.needs_wobble_analysis, "the residual correction instead"
     assert not settings.mode.uses_auto_motion and not settings.mode.uses_focal_point
+
+
+def test_residual_wobble_applies_after_the_field_and_only_from_a_residual_track() -> None:
+    """The mesh modes' wobble is measured on the stabilized frames and applied after the warp and crop.
+
+    A source-measured track must be ignored there: it holds jello the mesh already absorbed, and
+    correcting it again doubles the deformation (measured on real footage).
+    """
+    frame = _canvas(0)[:HEIGHT, :WIDTH]
+    settings = StabilizationSettings(mode=StabilizationMode.MESH, temporal_smoothing=1.0, rolling_shutter_auto=True)
+    corrections = MeshCorrections(first_frame=0, fields=np.zeros((3, VERTEX_ROWS, VERTEX_COLUMNS, 2), dtype=np.float32))
+    count = 3
+    changes = np.zeros((count, 2))
+    changes[1] = (6.0, 0.0)  # frame 1 leans relative to its neighbours: pure residual jello
+    residual_track = WobbleTrack(
+        source=Path("clip.mp4"),
+        first_frame=0,
+        row_changes=changes,
+        column_changes=np.zeros((count, 2)),
+        displacements=np.zeros((count, 2)),
+        measured=np.ones(count, dtype=bool),
+        analysis_size=(WIDTH, HEIGHT),
+        rotation=0,
+        window=1,
+        detected_axis=ReadoutAxis.ROWS,
+        residual=True,
+    )
+
+    baseline = apply_stabilization(frame, settings, frame_index=1, mesh_corrections=corrections)
+    trace = RenderTrace()
+    with tracing.active(trace):
+        corrected = apply_stabilization(
+            frame, settings, frame_index=1, mesh_corrections=corrections, wobble_track=residual_track
+        )
+    assert trace.notes.get("rolling_shutter.wobble") == "residual_after_mesh"
+    wobble = residual_track.wobble_at(1, 0.0, ReadoutAxis.ROWS)
+    assert wobble is not None
+    gradient = (wobble[0] * baseline.shape[0], wobble[1] * baseline.shape[0])
+    assert np.array_equal(corrected, rolling_shutter.correct(baseline, gradient, ReadoutAxis.ROWS))
+    assert not np.array_equal(corrected, baseline), "the residual wobble bent the frame back"
+
+    source_track = dataclass_replace(residual_track, residual=False)
+    trace = RenderTrace()
+    with tracing.active(trace):
+        ignored = apply_stabilization(
+            frame, settings, frame_index=1, mesh_corrections=corrections, wobble_track=source_track
+        )
+    assert np.array_equal(ignored, baseline), "a source track after the mesh would correct twice: ignored"
+    assert trace.notes.get("rolling_shutter.wobble") == "unanalysed"
+
+    analysed = mesh_stabilized_for_analysis(frame, settings, 1, corrections)
+    assert np.array_equal(analysed, baseline), "the analysis tracks exactly what the render produces (sans wobble)"
+    outside = mesh_stabilized_for_analysis(frame, settings, 99, corrections)
+    assert outside.shape == baseline.shape, "outside the fields only the crop applies: every frame has one size"
 
 
 def test_margin_setting_widens_the_mesh_budget_and_the_crop() -> None:

@@ -132,7 +132,9 @@ def test_object_settings_flags_and_project_round_trip() -> None:
     assert settings.needs_mesh_analysis, "the object mode builds its fields from the same mesh track"
     assert not settings.requires_sequential_processing, "per-frame fields keep the export parallel"
     wobbling = StabilizationSettings(mode=StabilizationMode.OBJECT, rolling_shutter_auto=True)
-    assert not wobbling.applies_wobble, "the mesh under the object mode already absorbs the wobble"
+    assert not wobbling.applies_wobble, "the pre-warp wobble would correct what the mesh already absorbs"
+    assert wobbling.applies_residual_wobble, "the mesh modes correct the residual instead, after the warp"
+    assert wobbling.needs_wobble_analysis and not wobbling.requires_sequential_processing
 
     data = settings_to_dict(settings)
     loaded = settings_from_dict(StabilizationSettings, data)

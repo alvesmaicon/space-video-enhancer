@@ -332,14 +332,24 @@ class StabilizationSettings:
 
     @property
     def applies_wobble(self) -> bool:
-        """The wobble correction actually runs. The mesh-backed modes (MESH, OBJECT) and PERSPECTIVE
-        suppress it: their warp already absorbs the same shear/keystone, and correcting it twice deforms
-        (measured on real footage: jello 8,5 -> 13 px under the homography, 16,7 -> 23,3 px under the mesh)."""
+        """The pre-warp wobble correction (a source-measured track) actually runs. PERSPECTIVE and the
+        mesh-backed modes (MESH, OBJECT) suppress it: their warp already absorbs the same shear/keystone,
+        and correcting it twice deforms (measured on real footage: jello 8,5 -> 13 px under the
+        homography, 11,1 px — worse than the source's 10,0 — under the mesh). The mesh modes get the
+        *residual* correction instead (:attr:`applies_residual_wobble`)."""
         return self.rolling_shutter_auto and self.mode not in (
             StabilizationMode.PERSPECTIVE,
             StabilizationMode.MESH,
             StabilizationMode.OBJECT,
         )
+
+    @property
+    def applies_residual_wobble(self) -> bool:
+        """The mesh modes' wobble correction: measured on the *stabilized* output (the analysis warps
+        each frame by the clip's fields before tracking) and applied after the warp, so only what the
+        mesh did not absorb is corrected. Measured on real walking footage: jello 5,9 -> 1,6 px and
+        trapezoid 6,4 -> 4,1 px/pair, with the tremor untouched."""
+        return self.rolling_shutter_auto and self.needs_mesh_analysis
 
     @property
     def needs_mesh_analysis(self) -> bool:
@@ -360,8 +370,14 @@ class StabilizationSettings:
 
     @property
     def needs_wobble_analysis(self) -> bool:
-        """The clip must be tracked once: for the wobble itself, or to detect the readout axis the slider should use."""
-        return self.applies_wobble or (self.corrects_rolling_shutter_skew and self.readout_axis is ReadoutAxis.AUTO)
+        """The clip must be tracked once: for the wobble itself (source or residual), or to detect the
+        readout axis the slider should use. A residual analysis additionally needs the mesh fields first
+        — it tracks the *stabilized* frames."""
+        return (
+            self.applies_wobble
+            or self.applies_residual_wobble
+            or (self.corrects_rolling_shutter_skew and self.readout_axis is ReadoutAxis.AUTO)
+        )
 
     @property
     def requires_sequential_processing(self) -> bool:

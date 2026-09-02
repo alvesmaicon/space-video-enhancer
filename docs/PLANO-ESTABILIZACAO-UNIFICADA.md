@@ -89,7 +89,7 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   1,11% vs 0,71% do lock de pose fixa do v8. O caso diferenciador (alvo que se move independente do
   fundo) está coberto pelos sintéticos; medir em footage de alvo real quando houver.
 
-## Wave 3.5 — oscilação do resíduo (MEDIDA 2026-09-01, a implementar se aprovada)
+## Wave 3.5 — oscilação do resíduo — FEITA (2026-09-01)
 
 - Motivação: o "lago agitado" residual dos exports da malha (jello 23,8–25,9 px nos v7/v9 em 4K).
   Medido no trecho real: a malha absorve só ~40% do jello da fonte (9,99 → 5,90 px em 720p).
@@ -102,10 +102,24 @@ Alvo final de UI: **3 modos** — Automática · Travar objeto · Manual (keyfra
   corrigir um zera o outro); corrigir os dois = dupla correção (jello volta a 0,47%). Corrigir só
   um; rows venceu no trapézio (4,11 vs 5,07). Nota: `detect_readout_axis` usa correlação sem
   módulo — leitura invertida (Motorola, corr −0,48) nunca é detectada; rever junto.
-- Implementação exigirá: 2º passe de análise sobre frames estabilizados (aplicar o campo durante o
-  tracking do wobble), unskew após o warp nos modos malha, e `rolling_shutter_auto` nos modos
-  malha passando a significar "resíduo" em vez de suprimido. Scripts: test_wobble_stack.py /
-  test_wobble_axis.py (scratchpad; lógica descrita aqui).
+- Composição ANALÍTICA do resíduo (wobble da fonte + gradiente do campo) TESTADA E DESCARTADA:
+  correlação 0,086 com o medido e trapézio piorou (7,97) — o ajuste robusto do wobble separa
+  rotação/zoom do gradiente; o slope simples do campo não. Fica o 2º passe medido.
+- Track stale (suavização 0,6↔1,0) medido INOFENSIVO mas sem o ganho → o preview mede o resíduo
+  UMA vez por clipe (após a malha; sliders não re-rastreiam) e o EXPORT sempre re-analisa com as
+  settings finais (exato, nunca reusa o track do preview).
+- Como ficou: `WobbleTrack.residual` (um track de resíduo nunca serve de fonte, e vice-versa);
+  `applies_residual_wobble` = auto + modo malha (o `applies_wobble` pré-warp segue False);
+  `mesh_stabilized_for_analysis` (campo + crop, sem rolling shutter) alimenta o tracking nos dois
+  analisadores (export reordenado: malha antes do wobble; worker da UI ganha corrections no
+  request); `_apply_residual_wobble` roda por último em `_apply_mesh_mode` (depois do crop, onde
+  os frames foram medidos) e ignora track não-residual. Checkbox de oscilação reativado nos modos
+  malha ("(legado)" Perspectiva continua moot); "Medir do clipe" sempre usa o track da fonte.
+- Validado pelo caminho real do pipeline no vídeo de caminhada: jello 5,90 → **1,63 px (−72%)**,
+  trapézio 6,40 → **4,11 px/par**, global 2,85 → 2,80 (intocado). Gate 446 testes.
+- Nota do eixo: neste arquivo (rotation −90) o fallback do detector escolhe columns (trapézio
+  5,07); rows mediu melhor (4,11) — o combo "Leitura do sensor" permite forçar. Rever
+  `detect_readout_axis` (correlação sem módulo ignora leitura invertida) num passo futuro.
 
 ## Wave 4 — polimento e remoção do legado
 

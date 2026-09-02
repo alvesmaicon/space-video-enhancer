@@ -300,7 +300,9 @@ class WindowState(QMainWindow):
     # --- methods one section calls on another; each is implemented by the section named in its body ---
 
     # implemented by adjustments.py
-    def _wobble_track_for(self, clip: Clip) -> WobbleTrack | None:
+    def _wobble_track_for(
+        self, clip: Clip, stabilization: StabilizationSettings, *, want_residual: bool | None = None
+    ) -> WobbleTrack | None:
         raise NotImplementedError  # adjustments
 
     def _on_wobble_progress(self, request: object, done: int, total: int) -> None:

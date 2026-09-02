@@ -17,7 +17,10 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections
+from space_video_enhancer.pipeline.stabilization.stabilize import mesh_stabilized_for_analysis
 from space_video_enhancer.pipeline.stabilization.wobble import analyze_wobble
+from space_video_enhancer.settings import StabilizationSettings
 from space_video_enhancer.telemetry.log import get_logger, log_event
 from space_video_enhancer.video import VideoOpenError, VideoSource
 
@@ -33,10 +36,19 @@ class WobbleAnalysisRequest:
     last: int
     """Inclusive source frame indices."""
     window: int
+    corrections: MeshCorrections | None = None
+    """When given, the analysis is *residual*: each frame is warped by these mesh fields (with
+    ``stabilization``'s margin and intensity) before tracking, so the track holds only what the mesh
+    did not absorb."""
+    stabilization: StabilizationSettings | None = None
 
     @property
     def count(self) -> int:
         return self.last - self.first + 1
+
+    @property
+    def residual(self) -> bool:
+        return self.corrections is not None
 
     def covers(self, source: Path, first: int, last: int) -> bool:
         return self.source == source and self.first <= first and last <= self.last
@@ -97,14 +109,21 @@ class WobbleAnalysisWorker(QObject):
                 last_report = now
                 self.progress.emit(request, done, total)
 
+        def read(frame_index: int) -> object:
+            frame = video.read_frame(frame_index)
+            if frame is None or request.corrections is None or request.stabilization is None:
+                return frame
+            return mesh_stabilized_for_analysis(frame, request.stabilization, frame_index, request.corrections)
+
         try:
             analysis = analyze_wobble(
-                video.read_frame,
+                read,  # type: ignore[arg-type]
                 request.source,
                 request.first,
                 request.last,
                 request.window,
                 rotation=video.rotation,
+                residual=request.residual,
                 progress=report,
                 cancelled=lambda: request.generation <= self._cancel_floor,
             )
@@ -125,6 +144,7 @@ class WobbleAnalysisWorker(QObject):
             LOG,
             "wobble.analysis",
             name=request.source.name,
+            residual=request.residual,
             first=request.first,
             last=request.last,
             frames=analysis.frames_read,
@@ -155,10 +175,22 @@ class WobbleAnalysisController(QObject):
         self._worker.finished.connect(self.finished)
         self._thread.start()
 
-    def analyze(self, source: Path, first: int, last: int, window: int) -> WobbleAnalysisRequest:
-        """Queue one range without disturbing a running analysis; returns the request the results will carry."""
+    def analyze(
+        self,
+        source: Path,
+        first: int,
+        last: int,
+        window: int,
+        corrections: MeshCorrections | None = None,
+        stabilization: StabilizationSettings | None = None,
+    ) -> WobbleAnalysisRequest:
+        """Queue one range without disturbing a running analysis; returns the request the results will carry.
+
+        With ``corrections`` (and the ``stabilization`` they were built for) the analysis is residual:
+        see :class:`WobbleAnalysisRequest`.
+        """
         self._generation += 1
-        request = WobbleAnalysisRequest(self._generation, source, first, last, window)
+        request = WobbleAnalysisRequest(self._generation, source, first, last, window, corrections, stabilization)
         self._worker.post(request)
         self._wake.emit()
         return request
