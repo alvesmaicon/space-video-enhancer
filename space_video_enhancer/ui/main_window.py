@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QStyleOptionTabWidgetFrame,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -625,11 +626,20 @@ class MainWindow(
             child.ensurePolished()
         tab_bar = self.settings_tabs.tabBar()
         tab_bar.ensurePolished()
-        needed = tab_bar.sizeHint().width() + 8
-        for _title, tab in self._tabs:
-            needed = max(needed, tab.content_min_width())
+        content = max(tab.content_min_width() for _title, tab in self._tabs)
+        needed = max(tab_bar.sizeHint().width() + 8, content + self._tab_pane_frame_width())
         self.settings_tabs.setMinimumWidth(needed)
         self.splitter.setSizes([10_000, needed])  # relative weights: the panel gets its minimum, preview the rest
+
+    def _tab_pane_frame_width(self) -> int:
+        """What the tab widget's pane (its QSS border) takes around a page, as Qt lays the page out."""
+        option = QStyleOptionTabWidgetFrame()
+        self.settings_tabs.initStyleOption(option)
+        option.rect = QRect(0, 0, 1000, 600)
+        contents = self.settings_tabs.style().subElementRect(
+            QStyle.SubElement.SE_TabWidgetTabContents, option, self.settings_tabs
+        )
+        return option.rect.width() - contents.width()
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
