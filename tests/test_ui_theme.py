@@ -1,4 +1,4 @@
-"""The stylesheet is a template over the palette: every token resolves and every icon it points at exists."""
+"""The stylesheet and its icons are templates over the palette: every token resolves, every icon exists."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from space_video_enhancer.ui import palette
-from space_video_enhancer.ui.theme import load_stylesheet
+from space_video_enhancer.ui.theme import load_stylesheet, themed_icons_dir
 
 
 def test_every_token_resolves() -> None:
@@ -24,6 +24,13 @@ def test_every_icon_url_exists() -> None:
     assert urls
     for url in urls:
         assert Path(url).is_file(), url
+
+
+def test_icons_get_the_palette_colours() -> None:
+    icons = themed_icons_dir()
+    assert palette.ON_ACCENT in (icons / "check.svg").read_text(encoding="utf-8")
+    assert palette.TEXT_MUTED in (icons / "chevron-down.svg").read_text(encoding="utf-8")
+    assert not any("$" in path.read_text(encoding="utf-8") for path in icons.glob("*.svg"))
 
 
 def test_tokens_are_hex_colours() -> None:

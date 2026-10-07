@@ -6,6 +6,8 @@ filled shapes; the timeline tools (markers, scissors, trash, arrows) are stroked
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
@@ -28,6 +30,7 @@ STROKED_GLYPHS = frozenset(
         "hand",
         "metrics",
         "vectors",
+        "reset",
     }
 )
 
@@ -178,6 +181,31 @@ def _draw_stroked(painter: QPainter, kind: str, size: float, color: QColor) -> N
             x = palm.left() + size * offset + size * 0.01
             painter.drawLine(QPointF(x, palm.top()), QPointF(x, top + size * tip))
         painter.drawLine(QPointF(palm.left(), palm.center().y()), QPointF(left, middle - size * 0.16))
+    elif kind == "reset":
+        # An arc turning counter-clockwise with the gap at the top: back to where it was.
+        radius = (right - left) * 0.42
+        circle = QRectF(middle - radius, middle - radius, 2 * radius, 2 * radius)
+        start_deg, span_deg = 120.0, 290.0  # Qt arc angles run counter-clockwise from 3 o'clock
+        arc = QPainterPath()
+        arc.arcMoveTo(circle, start_deg)
+        arc.arcTo(circle, start_deg, span_deg)
+        painter.drawPath(arc)
+        heading = math.radians(start_deg + span_deg)
+        tip_at = QPointF(middle + radius * math.cos(heading), middle - radius * math.sin(heading))
+        along = QPointF(-math.sin(heading), -math.cos(heading))  # direction of travel on screen
+        outward = QPointF(math.cos(heading), -math.sin(heading))
+        length, half_width = size * 0.2, size * 0.17
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    tip_at + along * (length * 0.6),
+                    tip_at - along * (length * 0.4) + outward * half_width,
+                    tip_at - along * (length * 0.4) - outward * half_width,
+                ]
+            )
+        )
     elif kind in ("move_left", "move_right"):
         head = right if kind == "move_right" else left
         tail = left if kind == "move_right" else right

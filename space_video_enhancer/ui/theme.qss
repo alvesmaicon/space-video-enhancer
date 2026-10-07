@@ -119,6 +119,17 @@ QToolButton {
 QToolButton:hover {
     background: $SURFACE_HOVER;
 }
+QToolButton#resetButton {
+    background: transparent;
+    border: none;
+    padding: 3px;
+}
+QToolButton#resetButton:hover {
+    background: $SURFACE_HOVER;
+}
+QToolButton#resetButton:pressed {
+    background: $SURFACE_PRESSED;
+}
 QToolButton#filterPresetButton {
     background: $SURFACE;
     border: 1px solid $BORDER;

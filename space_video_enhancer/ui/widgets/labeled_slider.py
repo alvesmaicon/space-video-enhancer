@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSlider, QStyle, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSlider, QToolButton, QVBoxLayout, QWidget
 
 from space_video_enhancer.ui import palette
+from space_video_enhancer.ui.icons import glyph_icon
+from space_video_enhancer.ui.palette import qcolor
 
 VALUE_LABEL_MIN_WIDTH = 40
+RESET_ICON_SIZE = 14
 
 
 class LabeledSlider(QWidget):
@@ -38,7 +41,9 @@ class LabeledSlider(QWidget):
         self._reset_button = QToolButton()
         self._reset_button.setAutoRaise(True)
         self._reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._reset_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self._reset_button.setObjectName("resetButton")
+        self._reset_button.setIcon(glyph_icon("reset", qcolor(palette.TEXT_MUTED), RESET_ICON_SIZE))
+        self._reset_button.setIconSize(QSize(RESET_ICON_SIZE, RESET_ICON_SIZE))
         self._reset_button.setToolTip("Voltar este controle ao valor do preset ativo")
         self._reset_button.clicked.connect(self.resetRequested.emit)
         self.slider = QSlider(Qt.Orientation.Horizontal)
