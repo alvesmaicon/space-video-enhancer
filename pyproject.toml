@@ -26,11 +26,15 @@ dependencies = [
   "PySide6>=6.8,<7",
 ]
 
+[project.urls]
+Homepage = "https://github.com/alvesmaicon/space-video-enhancer"
+Issues = "https://github.com/alvesmaicon/space-video-enhancer/issues"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
-  "ruff>=0.6",
-  "mypy>=1.11",
+  "ruff>=0.16,<0.17",  # minor releases add rules and change formatting: bump on purpose
+  "mypy>=1.11,<2",     # mypy 2 drops Python 3.9 as a target (python_version below)
 ]
 
 [project.scripts]

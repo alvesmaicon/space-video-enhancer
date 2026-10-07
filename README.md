@@ -2,7 +2,7 @@
 
 Editor de vídeo offline para desktop, **multiplataforma** (macOS, Linux e Windows): abre arquivos locais, mostra **antes e depois** lado a lado enquanto você ajusta estabilização, ruído, cor e geometria, monta uma sequência de clipes com cortes, e exporta no seu computador. Nada sai da máquina.
 
-[![CI](https://github.com/OWNER/space-video-enhancer/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/space-video-enhancer/actions/workflows/ci.yml)
+[![CI](https://github.com/alvesmaicon/space-video-enhancer/actions/workflows/ci.yml/badge.svg)](https://github.com/alvesmaicon/space-video-enhancer/actions/workflows/ci.yml)
 ![Plataformas](https://img.shields.io/badge/plataformas-macOS%20%7C%20Linux%20%7C%20Windows-555)
 ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
 ![PySide6](https://img.shields.io/badge/UI-PySide6-41cd52)
@@ -60,7 +60,7 @@ winget install --id Gyan.FFmpeg -e
 Clone e rode:
 
 ```bash
-git clone https://github.com/OWNER/space-video-enhancer.git
+git clone https://github.com/alvesmaicon/space-video-enhancer.git
 cd space-video-enhancer
 ./run.sh        # macOS e Linux
 .\run.ps1       # Windows (PowerShell) — ou clique duas vezes em run.cmd
