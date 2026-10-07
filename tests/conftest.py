@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import cv2
@@ -58,6 +60,31 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             qt_modules[path] = "PySide6" in text or "space_video_enhancer.ui" in text
         if qt_modules[path]:
             item.add_marker(pytest.mark.ui)
+
+
+_session: pytest.Session | None = None
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    global _session  # noqa: PLW0603  (read back in pytest_unconfigure, after the summary is printed)
+    _session = session
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """On Python 3.9, leave without interpreter finalization once Qt is loaded, keeping pytest's exit status.
+
+    With PySide6 6.10 on Linux, Python 3.9's module cleanup (``_PyImport_Cleanup`` -> ``type_clear``) frees
+    an invalid pointer after a full UI run — ``free(): invalid size``, SIGABRT, exit 134 — although every test
+    passed. Nothing of ours is on the stack (it happens with no Python frame left, and ``gc.collect()`` or
+    ``QApplication.shutdown()`` at session end don't avoid it); 3.12 and macOS exit cleanly. The summary is
+    already printed here, so skipping finalization loses nothing a test run needs.
+    """
+    del config
+    if sys.version_info < (3, 10) and "PySide6" in sys.modules and _session is not None:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(int(_session.exitstatus))
 
 
 @pytest.fixture(autouse=True)
