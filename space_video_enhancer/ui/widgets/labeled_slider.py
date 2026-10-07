@@ -5,6 +5,8 @@ from collections.abc import Callable
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QSlider, QStyle, QToolButton, QVBoxLayout, QWidget
 
+from space_video_enhancer.ui import palette
+
 VALUE_LABEL_MIN_WIDTH = 40
 
 
@@ -72,7 +74,7 @@ class LabeledSlider(QWidget):
         self.slider.setStyleSheet(
             "QSlider::groove:horizontal { height: 8px; border-radius: 4px;"
             f" background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops}); }}"
-            " QSlider::handle:horizontal { background: #ffffff; border: 2px solid #111827;"
+            f" QSlider::handle:horizontal {{ background: {palette.ON_ACCENT}; border: 2px solid {palette.VIEWER};"
             " width: 12px; margin: -5px 0; border-radius: 7px; }"
         )
 

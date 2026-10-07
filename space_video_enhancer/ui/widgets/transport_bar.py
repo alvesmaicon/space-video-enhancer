@@ -16,17 +16,19 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage
+from PySide6.QtGui import QFont, QFontMetrics, QImage
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from space_video_enhancer.audio import AudioPeaks
+from space_video_enhancer.ui import palette
 from space_video_enhancer.ui.format import format_timecode, position_labels, shows_hours
 from space_video_enhancer.ui.icons import glyph_icon
+from space_video_enhancer.ui.palette import qcolor
 from space_video_enhancer.ui.widgets.timeline import ClipBlock, TimelineWidget
 
-PRIMARY_COLOR = QColor("#0f766e")
-ON_PRIMARY_COLOR = QColor("#ffffff")
-TOOL_COLOR = QColor("#374151")
+PRIMARY_COLOR = qcolor(palette.ACCENT)
+ON_PRIMARY_COLOR = qcolor(palette.ON_ACCENT)
+TOOL_COLOR = qcolor(palette.TEXT)
 BUTTON_SIZE = QSize(38, 34)
 PLAY_BUTTON_SIZE = QSize(46, 36)
 TOOL_BUTTON_SIZE = QSize(28, 26)

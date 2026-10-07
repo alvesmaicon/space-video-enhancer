@@ -29,6 +29,7 @@ from space_video_enhancer.settings import (
     HueBandAdjust,
     NormalizedRect,
 )
+from space_video_enhancer.ui import palette
 from space_video_enhancer.ui.format import format_percent, format_signed
 from space_video_enhancer.ui.tabs.base import TabPage, form_rows, group_box, select_combo_data, set_checked_silently
 from space_video_enhancer.ui.widgets.labeled_slider import LabeledSlider
@@ -138,8 +139,8 @@ class ColorGradeTab(TabPage):
             button.setToolTip(BAND_LABELS[name])
             button.setStyleSheet(
                 f"QToolButton {{ background-color: {BAND_SWATCHES[name]}; "
-                "border: 1px solid #d6d3d1; border-radius: 6px; }"
-                " QToolButton:checked { border: 3px solid #111827; }"
+                f"border: 1px solid {palette.BORDER_STRONG}; border-radius: 4px; }}"
+                f" QToolButton:checked {{ border: 3px solid {palette.TEXT}; }}"
             )
             self.band_group.addButton(button, index)
             self.band_buttons[name] = button

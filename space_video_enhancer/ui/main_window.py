@@ -29,7 +29,6 @@ from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
-    QColor,
     QDesktopServices,
     QIcon,
     QImage,
@@ -81,6 +80,7 @@ from space_video_enhancer.settings import (
 )
 from space_video_enhancer.telemetry.log import current_session, get_logger, log_event
 from space_video_enhancer.telemetry.stats import RollingStats
+from space_video_enhancer.ui import palette
 from space_video_enhancer.ui.audio_preview import (
     PcmController,
     PreviewAudioPlayer,
@@ -91,6 +91,7 @@ from space_video_enhancer.ui.icons import glyph_icon
 from space_video_enhancer.ui.mesh_analysis import MeshAnalysisController, MeshAnalysisRequest
 from space_video_enhancer.ui.monitor_window import MonitorWindow
 from space_video_enhancer.ui.motion_path_analysis import MotionPathController, MotionPathRequest
+from space_video_enhancer.ui.palette import qcolor
 from space_video_enhancer.ui.preview_worker import PreviewController, PreviewImages
 from space_video_enhancer.ui.reference_frames import ReferenceFrameController
 from space_video_enhancer.ui.sections.adjustments import AdjustmentsSection, norm_to_qrect, qrect_to_norm
@@ -431,7 +432,7 @@ class MainWindow(
         self.pan_action.setCheckable(True)
         self.pan_action.setShortcut("H")
         self.pan_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self.pan_action.setIcon(glyph_icon("hand", QColor("#1f2937")))
+        self.pan_action.setIcon(glyph_icon("hand", qcolor(palette.TEXT)))
         self.pan_action.setToolTip(
             "Com o preview maior que a área, arraste a imagem com o botão esquerdo em vez de mover o divisor (H). "
             "O botão do meio do mouse arrasta sempre."
@@ -446,13 +447,13 @@ class MainWindow(
             "Diminuir zoom", lambda: self._step_preview_zoom(-1), QKeySequence.StandardKey.ZoomOut
         )
         self.hud_action = QAction("Métricas", self)
-        self.hud_action.setIcon(glyph_icon("metrics", QColor("#1f2937")))
+        self.hud_action.setIcon(glyph_icon("metrics", qcolor(palette.TEXT)))
         self.hud_action.setCheckable(True)
         self.hud_action.setShortcut("Ctrl+M")
         self.hud_action.setToolTip("Mostrar métricas de render, fila e decode sobre o preview (Ctrl+M)")
         self.hud_action.toggled.connect(self._toggle_hud)
         self.vectors_action = QAction("Vetores de movimento", self)
-        self.vectors_action.setIcon(glyph_icon("vectors", QColor("#1f2937")))
+        self.vectors_action.setIcon(glyph_icon("vectors", qcolor(palette.TEXT)))
         self.vectors_action.setCheckable(True)
         self.vectors_action.setShortcut("Ctrl+Shift+M")
         self.vectors_action.setToolTip(
@@ -463,7 +464,7 @@ class MainWindow(
         self.monitor_action = QAction("Preview em janela separada", self)
         self.monitor_action.setCheckable(True)
         self.monitor_action.setShortcut("Ctrl+Shift+D")
-        self.monitor_action.setIcon(glyph_icon("detach", QColor("#1f2937")))
+        self.monitor_action.setIcon(glyph_icon("detach", qcolor(palette.TEXT)))
         self.monitor_action.setToolTip(
             "Abrir o preview em uma janela separada com os controles de reprodução — leve para outra tela e use "
             "F11 para tela cheia (Ctrl+Shift+D)"

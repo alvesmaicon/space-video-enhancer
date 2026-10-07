@@ -13,8 +13,10 @@ from PySide6.QtGui import QColor, QGuiApplication, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from space_video_enhancer.ui import palette
 from space_video_enhancer.ui.main_window import MainWindow
 from space_video_enhancer.ui.monitor_window import MonitorView, MonitorWindow, next_screen
+from space_video_enhancer.ui.palette import qcolor
 from space_video_enhancer.ui.tabs.base import select_combo_data
 from space_video_enhancer.ui.widgets.compare_preview import fit_rect
 from tests.conftest import UI_VIDEO_FRAMES
@@ -47,14 +49,14 @@ def test_monitor_view_shows_the_result_the_source_or_a_split(app: QApplication) 
     view.show()
     pump(app, 0.05)
     image = view.grab().toImage()
-    assert image.pixelColor(20, 20) == QColor("#0b0f19"), "dark background and a placeholder until images arrive"
+    assert image.pixelColor(20, 20) == qcolor(palette.VIEWER), "dark background and a placeholder until images arrive"
     assert view.image_rect().isEmpty()
 
     view.set_images(_solid("#ff0000"), _solid("#0000ff"))
     image = view.grab().toImage()
     assert view.image_rect() == QRectF(0, 140, 640, 360)
     assert image.pixelColor(100, 320) == QColor("#0000ff") and image.pixelColor(540, 320) == QColor("#0000ff")
-    assert image.pixelColor(320, 60) == QColor("#0b0f19"), "letterboxed"
+    assert image.pixelColor(320, 60) == qcolor(palette.VIEWER), "letterboxed"
 
     view.set_mode("before")
     assert view.grab().toImage().pixelColor(320, 320) == QColor("#ff0000")

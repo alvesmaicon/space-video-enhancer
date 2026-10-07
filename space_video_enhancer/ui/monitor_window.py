@@ -41,19 +41,21 @@ from PySide6.QtWidgets import (
 )
 
 from space_video_enhancer.telemetry.log import get_logger, log_event
+from space_video_enhancer.ui import palette
 from space_video_enhancer.ui.format import position_labels
 from space_video_enhancer.ui.icons import glyph_icon
+from space_video_enhancer.ui.palette import qcolor
 from space_video_enhancer.ui.theme import load_stylesheet
 from space_video_enhancer.ui.widgets.compare_preview import CAPTION_BACKGROUND, draw_pill, fit_rect
 from space_video_enhancer.ui.widgets.transport_bar import BUTTON_SIZE, ICON_SIZE, PLAY_BUTTON_SIZE, PLAY_ICON_SIZE
 
 LOG = get_logger("ui")
 
-BACKGROUND_COLOR = QColor("#0b0f19")
-PLACEHOLDER_COLOR = QColor("#6b7280")
+BACKGROUND_COLOR = qcolor(palette.VIEWER)
+PLACEHOLDER_COLOR = qcolor(palette.TEXT_DISABLED)
 SPLIT_LINE_COLOR = QColor("#ffffff")
-ICON_COLOR = QColor("#e5e7eb")
-PLAY_ICON_COLOR = QColor("#ffffff")
+ICON_COLOR = qcolor(palette.TEXT)
+PLAY_ICON_COLOR = qcolor(palette.ON_ACCENT)
 PLACEHOLDER_TEXT = "Abra um vídeo na janela principal."
 DEFAULT_SIZE = QSize(960, 600)
 MIN_VIEW_SIZE = QSize(320, 180)

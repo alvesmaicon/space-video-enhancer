@@ -31,6 +31,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
 
 from space_video_enhancer.pipeline.preview import MotionOverlay
+from space_video_enhancer.ui import palette
+from space_video_enhancer.ui.palette import qcolor
 
 
 class CompareMode(str, Enum):
@@ -84,8 +86,8 @@ MIN_ZOOM = 0.1
 MAX_ZOOM = 8.0
 PLACEHOLDER_TEXT = "Abra um vídeo para comparar antes e depois."
 OPEN_BUTTON_TEXT = "Abrir vídeo…"
-BACKGROUND_COLOR = QColor("#f3f4f6")
-PLACEHOLDER_TEXT_COLOR = QColor("#4b5563")
+BACKGROUND_COLOR = qcolor(palette.VIEWER)
+PLACEHOLDER_TEXT_COLOR = qcolor(palette.TEXT_MUTED)
 SPLIT_LINE_COLOR = QColor("#ffffff")
 CAPTION_BACKGROUND = QColor(17, 24, 39, 165)
 CAPTION_TEXT_COLOR = QColor("#f9fafb")

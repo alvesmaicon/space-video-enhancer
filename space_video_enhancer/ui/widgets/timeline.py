@@ -36,8 +36,10 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QMenu, QScrollBar, QSizePolicy, QWidget
 
 from space_video_enhancer.audio import AudioPeaks
+from space_video_enhancer.ui import palette
 from space_video_enhancer.ui.format import format_timecode
 from space_video_enhancer.ui.images import device_pixel_ratio
+from space_video_enhancer.ui.palette import qcolor
 
 RULER_HEIGHT = 22
 TRACK_GAP = 4
@@ -66,40 +68,40 @@ THUMBNAIL_CACHE_SIZE = 600
 DEFAULT_ASPECT_RATIO = 16 / 9
 TICK_SECONDS = (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600)
 
-BACKGROUND_COLOR = QColor("#fcfaf7")
-RULER_COLOR = QColor("#efe9de")
-RULER_BORDER_COLOR = QColor("#d6d3d1")
-TICK_COLOR = QColor("#78716c")
-LABEL_COLOR = QColor("#57534e")
-TRACK_COLOR = QColor("#e7e5e4")
-TRACK_OUTSIDE_CLIP_COLOR = QColor(120, 113, 108, 60)
-RANGE_COLOR = QColor(15, 118, 110, 70)
-START_MARKER_COLOR = QColor("#0f766e")
-END_MARKER_COLOR = QColor("#b45309")
-KEYFRAME_MARKER_COLOR = QColor("#7c3aed")
-KEYFRAME_MARKER_EDGE_COLOR = QColor(255, 255, 255, 220)
+BACKGROUND_COLOR = qcolor(palette.WINDOW)
+RULER_COLOR = qcolor(palette.PANEL)
+RULER_BORDER_COLOR = qcolor(palette.BORDER)
+TICK_COLOR = qcolor(palette.TEXT_MUTED, 150)
+LABEL_COLOR = qcolor(palette.TEXT_MUTED)
+TRACK_COLOR = qcolor(palette.SURFACE)
+TRACK_OUTSIDE_CLIP_COLOR = QColor(0, 0, 0, 90)
+RANGE_COLOR = qcolor(palette.ACCENT, 60)
+START_MARKER_COLOR = qcolor(palette.ACCENT)
+END_MARKER_COLOR = qcolor(palette.WARNING)
+KEYFRAME_MARKER_COLOR = qcolor(palette.MARKER)
+KEYFRAME_MARKER_EDGE_COLOR = qcolor(palette.VIEWER, 220)
 KEYFRAME_MARKER_MIN_SPACING_PX = 3.0
-CUT_COLOR = QColor(220, 38, 38, 110)
-CUT_SELECTED_COLOR = QColor(220, 38, 38, 170)
-CUT_EDGE_COLOR = QColor("#b91c1c")
-PENDING_CUT_COLOR = QColor("#dc2626")
-CLIP_COLORS = (QColor(15, 118, 110, 55), QColor(180, 83, 9, 45))
-CLIP_ACTIVE_COLOR = QColor(15, 118, 110, 120)
-CLIP_BORDER_COLOR = QColor("#0f766e")
-CLIP_BOUNDARY_COLOR = QColor(31, 41, 55, 110)
-CLIP_TEXT_COLOR = QColor("#1f2937")
+CUT_COLOR = qcolor(palette.DANGER, 90)
+CUT_SELECTED_COLOR = qcolor(palette.DANGER, 150)
+CUT_EDGE_COLOR = qcolor(palette.DANGER)
+PENDING_CUT_COLOR = qcolor(palette.DANGER)
+CLIP_COLORS = (qcolor(palette.ACCENT, 45), qcolor(palette.WARNING, 40))
+CLIP_ACTIVE_COLOR = qcolor(palette.ACCENT, 100)
+CLIP_BORDER_COLOR = qcolor(palette.ACCENT)
+CLIP_BOUNDARY_COLOR = qcolor(palette.VIEWER, 200)
+CLIP_TEXT_COLOR = qcolor(palette.TEXT)
 CLIP_MIN_TEXT_WIDTH = 28
 CLIP_DRAG_THRESHOLD_PX = 6
 """A press on the clip strip becomes a reorder drag after this much horizontal travel; less is a click (seek)."""
-CLIP_GHOST_COLOR = QColor(15, 118, 110, 90)
-CLIP_INSERT_COLOR = QColor("#0f766e")
-PLAYHEAD_COLOR = QColor("#1f2937")
-PLAYHEAD_CELL_COLOR = QColor(31, 41, 55, 40)
-TRACK_LABEL_COLOR = QColor("#57534e")
-TRACK_LABEL_BACKGROUND = QColor(252, 250, 247, 200)
-HINT_COLOR = QColor("#9ca3af")
-WAVEFORM_COLOR = QColor(15, 118, 110, 150)
-WAVEFORM_CENTER_COLOR = QColor(15, 118, 110, 90)
+CLIP_GHOST_COLOR = qcolor(palette.ACCENT, 80)
+CLIP_INSERT_COLOR = qcolor(palette.ACCENT)
+PLAYHEAD_COLOR = qcolor(palette.TEXT)
+PLAYHEAD_CELL_COLOR = qcolor(palette.TEXT, 30)
+TRACK_LABEL_COLOR = qcolor(palette.TEXT_MUTED)
+TRACK_LABEL_BACKGROUND = qcolor(palette.WINDOW, 200)
+HINT_COLOR = qcolor(palette.TEXT_DISABLED)
+WAVEFORM_COLOR = qcolor(palette.ACCENT, 160)
+WAVEFORM_CENTER_COLOR = qcolor(palette.ACCENT, 90)
 WAVEFORM_MAX_GAIN = 20.0
 """Quiet audio is scaled up so its loudest peak fills the track, but never more than this."""
 AUDIO_STATE_TEXT = {
@@ -108,8 +110,8 @@ AUDIO_STATE_TEXT = {
     "unavailable": "FFmpeg não encontrado: sem forma de onda",
     "missing": "Arquivo não encontrado",
 }
-CLIP_MISSING_COLOR = QColor(220, 38, 38, 120)
-CLIP_MISSING_TEXT_COLOR = QColor("#7f1d1d")
+CLIP_MISSING_COLOR = qcolor(palette.DANGER, 110)
+CLIP_MISSING_TEXT_COLOR = qcolor(palette.TEXT)
 
 
 def _clamp(value: float, low: float, high: float) -> float:

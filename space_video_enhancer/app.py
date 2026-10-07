@@ -8,7 +8,7 @@ import threading
 import time
 from types import TracebackType
 
-from PySide6.QtCore import QMessageLogContext, QtMsgType, qInstallMessageHandler
+from PySide6.QtCore import QMessageLogContext, Qt, QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 
 from space_video_enhancer import __version__
@@ -72,6 +72,9 @@ def configure_application(app: QApplication) -> None:
     installed ``space-video-enhancer.desktop`` (see ``scripts/install-desktop-entry.sh``) to show the
     right name and icon in the dock. On macOS the menu-bar name still comes from the executable's
     bundle — only packaging into a ``.app`` changes it — but the Dock icon does follow the window icon.
+
+    The scheme is forced dark to match the theme: the QSS paints the widgets, but the title bar and the
+    native dialogs (open/save, message boxes) follow the system's light/dark setting unless told otherwise.
     """
     app.setApplicationName(APPLICATION_NAME)
     app.setApplicationDisplayName(APPLICATION_NAME)
@@ -79,6 +82,7 @@ def configure_application(app: QApplication) -> None:
     app.setApplicationVersion(__version__)
     app.setDesktopFileName(DESKTOP_FILE_NAME)
     app.setWindowIcon(app_icon())
+    app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
 
 
 def claim_windows_taskbar_identity() -> None:
