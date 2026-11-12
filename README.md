@@ -157,6 +157,8 @@ Os testes de interface rodam offscreen (sem display) e verificam layout, atalhos
 
 Os prints deste README são gerados da UI atual, offscreen e de forma reprodutível, por `QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/screenshots.py` (monta um clipe de demonstração sintético, abre a janela real e captura `docs/screenshots/`). Rode-o depois de mudanças visíveis na interface.
 
+Gravações de câmera de segurança (`.dav`, DVR/NVR Dahua) viram `.mp4` com `python3 scripts/dav_to_mp4.py <arquivos ou pastas>`: copia as trilhas sem recodificar quando o MP4 aceita os codecs (H.264/H.265 + AAC — segundos por arquivo, sem perda) e recodifica para H.264 quando não aceita ou quando a cópia sai incompleta (`--reencode` força; `-o` escolhe a pasta de saída). Só precisa do `ffmpeg`.
+
 ## Limitações conhecidas
 
 - Clipes de fps diferente são reajustados para o fps da linha do tempo. O modo é por clipe (aba Tempo › "Reajuste de fps"): *frame mais próximo* (rápido, pode trepidar), *mistura de quadros* (dissolvência, mais suave) ou *fluxo óptico* (sintetiza o quadro intermediário — melhor, mais lento; aplicado só na exportação, o preview mostra a mistura).
