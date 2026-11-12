@@ -1,13 +1,16 @@
-"""The tabs' controls and the preview overlays: presets, denoise, white balance, exposure, stabilization, crop."""
+"""Tab controls and preview overlays: presets, denoise, white balance, exposure, stabilization, perspective, crop."""
 
 from __future__ import annotations
 
 from collections.abc import Hashable
 
-from PySide6.QtCore import QRectF
+import numpy as np
+from PySide6.QtCore import QPointF, QRectF
 
 from space_video_enhancer.pipeline.exposure import gains_in_ev, region_medians
+from space_video_enhancer.pipeline.geometry import normalized_from_geometry, normalized_through_geometry
 from space_video_enhancer.pipeline.grade import neutral_gains, white_patch_gains
+from space_video_enhancer.pipeline.perspective import PerspectivePlan, plan_perspective, points_tuple
 from space_video_enhancer.pipeline.stabilization.keyframes import interpolate_keyframes
 from space_video_enhancer.pipeline.stabilization.mesh import (
     MeshCorrections,
@@ -27,7 +30,10 @@ from space_video_enhancer.settings import (
     NEUTRAL_GAINS,
     DenoiseMode,
     FilterSettings,
+    NormalizedPoint,
     NormalizedRect,
+    PerspectiveFit,
+    PerspectiveSettings,
     ReadoutAxis,
     StabilizationKeyframe,
     StabilizationMode,
@@ -62,7 +68,7 @@ def norm_to_qrect(rect: NormalizedRect) -> QRectF:
 
 
 class AdjustmentsSection(WindowState):
-    """The tabs' controls and the preview overlays: presets, denoise, white balance, exposure, stabilization, crop."""
+    """Tab controls and preview overlays: presets, denoise, white balance, exposure, stabilization, keystone, crop."""
 
     def _handle_image_filter_changed(self, *_args: object) -> None:
         self._schedule_preview_refresh()
@@ -108,6 +114,7 @@ class AdjustmentsSection(WindowState):
         self._schedule_preview_refresh()
 
     def _handle_geometry_change(self, *_args: object) -> None:
+        self._sync_perspective_controls()  # the points stay on the content: their place on screen moves
         self._update_crop_info_label()
         self._schedule_preview_refresh()
 
@@ -1008,12 +1015,20 @@ class AdjustmentsSection(WindowState):
                 return f"Malha pronta ({track.count} frames, rastreado em {track.measured_fraction:.0%} dos pares)"
         return "Malha: aguardando a análise"
 
-    def _displayed_size(self) -> tuple[int, int]:
-        """Frame size the crop rectangle refers to: source, scaled, then rotated."""
+    def _oriented_size(self) -> tuple[int, int]:
+        """Frame size the perspective points are placed on: source, scaled, then rotated."""
         scale = self.export_tab.scale_factor()
         width = round(self.source_size[0] * scale)
         height = round(self.source_size[1] * scale)
         return self._current_geometry().output_size(width, height)
+
+    def _displayed_size(self) -> tuple[int, int]:
+        """Frame size the crop rectangle refers to: source, scaled, rotated, then corrected for perspective."""
+        return self._current_perspective().output_size(*self._oriented_size())
+
+    def _preview_reference_size(self) -> tuple[int, int]:
+        """What 100% zoom means for the frame on screen: while marking the points it is the uncorrected one."""
+        return self._oriented_size() if self._perspective_draft is not None else self._displayed_size()
 
     def _displayed_aspect_ratio(self) -> float:
         width, height = self._displayed_size()
@@ -1055,7 +1070,8 @@ class AdjustmentsSection(WindowState):
 
     def _sync_crop_preview(self) -> None:
         self.preview.set_crop_state(
-            self.geometry_tab.crop_enabled(),
+            # The crop refers to the corrected frame: hidden while the uncorrected one is on screen for marking.
+            self.geometry_tab.crop_enabled() and self._perspective_draft is None,
             self.crop_rect_norm,
             self._normalized_crop_aspect_ratio(),
             editing=self._tab_is_active(self.geometry_tab),
@@ -1127,3 +1143,156 @@ class AdjustmentsSection(WindowState):
         if width < 0.08 or height < 0.08:
             return self._default_crop_rect(aspect_ratio)
         return QRectF(center.x() - (width / 2.0), center.y() - (height / 2.0), width, height)
+
+    # --- perspective ---------------------------------------------------------------------
+    # ``_perspective`` is the active clip's confirmed correction (enabled + points; the format is the combo);
+    # ``_perspective_draft`` the points being marked, ``None`` when not marking. Both in the frame before
+    # rotation/flip, like the settings; the overlay works in the displayed frame and converts on every drag.
+
+    def _handle_perspective_mark_toggled(self, checked: bool) -> None:
+        if checked:
+            self._begin_perspective_marking()
+        else:
+            self._end_perspective_marking("cancel")
+
+    def _begin_perspective_marking(self) -> None:
+        if self.frame_count <= 0 or self._perspective_draft is not None:
+            self._sync_perspective_controls()
+            return
+        self._perspective_draft = self._perspective.points
+        log_event(LOG, "ui.perspective", state="mark", confirmed=self._perspective.is_active)
+        self._sync_perspective_controls()
+        self._sync_crop_preview()
+        self._schedule_preview_refresh(immediate=True)  # the frame without the correction, to mark on
+        self.status.show_message("Arraste os 4 pontos até os cantos do plano e clique em Confirmar.")
+
+    def _end_perspective_marking(self, state: str) -> None:
+        """Leave the marking without applying it (``state`` names why, for the log)."""
+        if self._perspective_draft is None:
+            self._sync_perspective_controls()
+            return
+        self._perspective_draft = None
+        log_event(LOG, "ui.perspective", state=state)
+        self._sync_perspective_controls()
+        self._sync_crop_preview()
+        self._schedule_preview_refresh(immediate=True)
+
+    def _confirm_perspective(self) -> None:
+        draft = self._perspective_draft
+        if draft is None:
+            return
+        plan = self._perspective_plan(draft)
+        if plan is None:
+            self.status.show_message("Os 4 pontos precisam formar um quadrilátero (sem cruzar as bordas).")
+            return
+        self._perspective = PerspectiveSettings(enabled=True, points=draft, fit=self.geometry_tab.perspective_fit())
+        self._perspective_draft = None
+        log_event(
+            LOG,
+            "ui.perspective",
+            state="confirm",
+            fit=self._perspective.fit.value,
+            plane_aspect=round(plan.plane_aspect, 3),
+            focal=plan.focal_source,
+            points=[[round(point.x, 4), round(point.y, 4)] for point in draft],
+        )
+        self._after_perspective_output_change("correção de perspectiva")
+        self.status.show_message("Perspectiva corrigida: o crop agora recorta o frame corrigido.")
+
+    def _reset_perspective(self) -> None:
+        had_correction = self._perspective.is_active
+        self._perspective_draft = None
+        self._perspective = PerspectiveSettings(fit=self.geometry_tab.perspective_fit())
+        log_event(LOG, "ui.perspective", state="reset", had_correction=had_correction)
+        self._after_perspective_output_change("redefinir perspectiva")
+        self.status.show_message("Perspectiva redefinida: o vídeo volta sem correção.")
+
+    def _handle_perspective_fit_changed(self) -> None:
+        log_event(LOG, "ui.perspective", state="fit", fit=self.geometry_tab.perspective_fit().value)
+        self._after_perspective_output_change()
+
+    def _after_perspective_output_change(self, undo_label: str | None = None) -> None:
+        """The corrected frame changed shape: refit a fixed-aspect crop to it, then show and render.
+
+        ``undo_label`` makes the change its own undo step (confirm, reset); left to the store on the
+        next render, it would merge with the following change of the same fields.
+        """
+        aspect_ratio = self._normalized_crop_aspect_ratio()
+        if self.geometry_tab.crop_enabled() and aspect_ratio is not None:
+            self.crop_rect_norm = self._crop_rect_with_aspect(QRectF(self.crop_rect_norm), aspect_ratio)
+        if undo_label is not None:
+            self._update_active_clip(lambda clip: clip, undo_label)
+        self._sync_perspective_controls()
+        self._sync_crop_preview()
+        self._update_crop_info_label()
+        self._schedule_preview_refresh(immediate=True)
+
+    def _handle_preview_perspective_changed(self, points: list[QPointF]) -> None:
+        """A point was dragged on the preview (displayed frame): keep it in the frame before rotation/flip."""
+        if self._perspective_draft is None or len(points) != 4:
+            return
+        displayed = np.array([[point.x(), point.y()] for point in points], dtype=np.float64)
+        self._perspective_draft = points_tuple(normalized_from_geometry(displayed, self._current_geometry()))
+        self._sync_perspective_controls()
+
+    def _perspective_plan(self, points: tuple[NormalizedPoint, ...]) -> PerspectivePlan | None:
+        """The warp ``points`` would get on the current frame size (``None``: not a usable quadrilateral)."""
+        width, height = self._oriented_size()
+        settings = PerspectiveSettings(enabled=True, points=points, fit=self.geometry_tab.perspective_fit())
+        return plan_perspective(settings, self._current_geometry(), width, height)
+
+    def _sync_perspective_controls(self) -> None:
+        """Buttons, overlay and info label after any change to the confirmed correction or the draft."""
+        draft = self._perspective_draft
+        valid = draft is None or self._perspective_plan(draft) is not None
+        self.geometry_tab.set_perspective_state(
+            marking=draft is not None, confirmed=self._perspective.is_active, valid=valid
+        )
+        self._sync_perspective_preview()
+        self._update_perspective_info()
+
+    def _sync_perspective_preview(self) -> None:
+        draft = self._perspective_draft
+        marking = draft is not None and self.frame_count > 0 and self._tab_is_active(self.geometry_tab)
+        if not marking or draft is None:
+            self.preview.set_perspective_state(False, [], valid=True)
+            return
+        source = np.array([[point.x, point.y] for point in draft], dtype=np.float64)
+        displayed = normalized_through_geometry(source, self._current_geometry())
+        self.preview.set_perspective_state(
+            True, [QPointF(float(x), float(y)) for x, y in displayed], valid=self._perspective_plan(draft) is not None
+        )
+
+    def _update_perspective_info(self) -> None:
+        draft = self._perspective_draft
+        fit = self.geometry_tab.perspective_fit()
+        if draft is not None:
+            plan = self._perspective_plan(draft)
+            if plan is None:
+                self.geometry_tab.set_perspective_info(
+                    "Pontos inválidos: os 4 pontos precisam formar um quadrilátero, sem cantos colados nem bordas "
+                    "cruzadas."
+                )
+                return
+            self.geometry_tab.set_perspective_info(
+                "Arraste os 4 pontos até os cantos de algo que é retangular na cena (parede, tela, documento) e "
+                f"clique em Confirmar. {self._plane_text(plan)}."
+            )
+            return
+        if not self._perspective.is_active:
+            self.geometry_tab.set_perspective_info(
+                "Perspectiva: sem correção. Clique em Marcar pontos e arraste-os até os cantos do plano."
+            )
+            return
+        plan = self._perspective_plan(self._perspective.points)
+        if plan is None:
+            self.geometry_tab.set_perspective_info("Perspectiva: pontos inválidos — marque de novo ou redefina.")
+            return
+        width, height = plan.output_size
+        output = "mesmo quadro" if fit is PerspectiveFit.REAL else f"esticado para {fit.value} ({width}x{height})"
+        self.geometry_tab.set_perspective_info(f"Perspectiva corrigida | {self._plane_text(plan)} | {output}")
+
+    @staticmethod
+    def _plane_text(plan: PerspectivePlan) -> str:
+        source = "focal estimada" if plan.focal_source == "measured" else "focal típica de celular"
+        return f"Plano ≈ {plan.plane_aspect:.2f}:1 ({source})".replace(".", ",")

@@ -24,6 +24,7 @@ from space_video_enhancer.settings import (
     DEFAULT_STABILIZATION_RECT,
     DEFAULT_WHITE_BALANCE_RECT,
     NEUTRAL_GAINS,
+    PerspectiveSettings,
     RenderSettings,
 )
 from space_video_enhancer.telemetry.diff import diff as diff_settings
@@ -101,6 +102,7 @@ class MediaSection(WindowState):
         return replace(
             base,
             crop=replace(base.crop, rect=qrect_to_norm(crop_rect)),
+            perspective=PerspectiveSettings(fit=base.perspective.fit),  # the points belong to the other footage
             denoise_sample_rect=DEFAULT_DENOISE_SAMPLE_RECT,
             stabilization=replace(base.stabilization, focus_rect=DEFAULT_STABILIZATION_RECT, focus_regions=()),
             grade=replace(base.grade, white_balance_gains=NEUTRAL_GAINS, region=DEFAULT_WHITE_BALANCE_RECT),
@@ -502,8 +504,10 @@ class MediaSection(WindowState):
         self.noise_tab.apply(settings.filters)
         self.export_tab.apply(settings.filters)
         self.filters_tab.apply(settings.image_filter)
-        self.geometry_tab.apply(settings.geometry, settings.crop)
+        self.geometry_tab.apply(settings.geometry, settings.crop, settings.perspective)
         self.crop_rect_norm = norm_to_qrect(settings.crop.rect)
+        self._perspective = settings.perspective  # per-clip, like the crop rectangle
+        self._perspective_draft = None  # points being marked belonged to the clip being replaced
         self.denoise_sample_rect_norm = norm_to_qrect(settings.denoise_sample_rect)
         self.stabilization_tab.apply(settings.stabilization)
         self._manual_keyframes = settings.stabilization.keyframes  # per-clip, keyed by source frame
@@ -527,6 +531,7 @@ class MediaSection(WindowState):
         self._update_denoise_controls_state()
         self._update_stabilization_controls_state()
         self._sync_overlays()
+        self._sync_perspective_controls()
         self._update_crop_info_label()
         self._update_white_balance_info()
         self._update_exposure_info()

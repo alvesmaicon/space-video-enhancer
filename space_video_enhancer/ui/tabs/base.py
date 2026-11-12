@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from space_video_enhancer.settings import (
     AnonymizeMode,
     DenoiseMode,
+    PerspectiveFit,
     PreviewRenderMode,
     ReadoutAxis,
     RetimingMode,
@@ -37,6 +38,7 @@ E = TypeVar(
     ReadoutAxis,
     RetimingMode,
     AnonymizeMode,
+    PerspectiveFit,
 )
 Section = Union[QWidget, QLayout]
 

@@ -12,10 +12,12 @@ pixel (1.0 = 1:1) — per panel, so side by side is twice as wide — and lets t
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 
+import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
@@ -26,10 +28,12 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
     QPen,
+    QPolygonF,
     QResizeEvent,
 )
 from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
 
+from space_video_enhancer.pipeline.perspective import order_quad, quad_grid_lines
 from space_video_enhancer.pipeline.preview import MotionOverlay
 from space_video_enhancer.ui import palette
 from space_video_enhancer.ui.palette import qcolor
@@ -349,6 +353,144 @@ class SelectionOverlay:
         return None
 
 
+PERSPECTIVE_COLOR = QColor("#22d3ee")
+PERSPECTIVE_INVALID_COLOR = QColor("#f87171")
+PERSPECTIVE_GRID_COLOR = QColor(34, 211, 238, 120)
+PERSPECTIVE_LABEL_COLOR = QColor("#0e7490")
+PERSPECTIVE_INVALID_LABEL_COLOR = QColor("#b91c1c")
+PERSPECTIVE_POINT_RADIUS = 7.0
+PERSPECTIVE_HIT_RADIUS = 14.0
+"""Logical pixels around a point that grab it (a ring of radius 7 is a small target on a trackpad)."""
+PERSPECTIVE_GRID_DIVISIONS = 4
+
+
+class QuadOverlay:
+    """Four points the user drags onto the corners of a plane (perspective correction).
+
+    Same hit-testing protocol as :class:`SelectionOverlay` (``interactive``, ``begin_drag``…), so the
+    preview treats it as one more overlay. The points are normalized in the displayed frame and keep
+    their identity while dragged; the outline and the grid follow the canonical order the pipeline
+    uses (:func:`order_quad`), so two crossed handles never draw a bow tie. Dragging inside the
+    quadrilateral moves all four. The points are hollow rings so the pixel under each stays visible.
+    """
+
+    def __init__(self, on_changed: Callable[[list[QPointF]], None]) -> None:
+        self.points: list[QPointF] = []
+        self.enabled = False
+        self.editing = False
+        self.valid = True
+        self._on_changed = on_changed
+        self._drag_index: int | None = None
+        """The point being dragged, ``-1`` for the whole quadrilateral, ``None`` when idle."""
+        self._drag_origin = QPointF()
+        self._drag_start: list[QPointF] = []
+
+    @property
+    def interactive(self) -> bool:
+        return self.enabled and self.editing
+
+    @property
+    def dragging(self) -> bool:
+        return self._drag_index is not None
+
+    def set_state(self, enabled: bool, points: list[QPointF], editing: bool, valid: bool = True) -> None:
+        self.enabled = enabled and len(points) == 4
+        if not self.dragging:  # mid-drag the overlay owns the points; the echo from the window is the same
+            self.points = [QPointF(point) for point in points]
+        self.editing = editing and self.enabled
+        self.valid = valid
+        if not self.interactive:
+            self._drag_index = None
+
+    def display_points(self, image_rect: QRectF) -> list[QPointF]:
+        return [_normalized_to_display(point.x(), point.y(), image_rect) for point in self.points]
+
+    def _ordered_display(self, image_rect: QRectF) -> list[QPointF]:
+        ordered = order_quad(np.array([[point.x(), point.y()] for point in self.points]))
+        return [_normalized_to_display(x, y, image_rect) for x, y in ordered]
+
+    def point_at(self, position: QPointF, image_rect: QRectF) -> int | None:
+        """Index of the point under ``position`` (the nearest one when several are close)."""
+        best, best_distance = None, PERSPECTIVE_HIT_RADIUS
+        for index, point in enumerate(self.display_points(image_rect)):
+            distance = math.hypot(point.x() - position.x(), point.y() - position.y())
+            if distance <= best_distance:
+                best, best_distance = index, distance
+        return best
+
+    def _contains(self, position: QPointF, image_rect: QRectF) -> bool:
+        return QPolygonF(self._ordered_display(image_rect)).containsPoint(position, Qt.FillRule.OddEvenFill)
+
+    def hover_cursor(self, position: QPointF, image_rect: QRectF) -> Qt.CursorShape | None:
+        if len(self.points) != 4:
+            return None
+        if self.point_at(position, image_rect) is not None:
+            return Qt.CursorShape.CrossCursor
+        if self._contains(position, image_rect):
+            return Qt.CursorShape.SizeAllCursor
+        return None
+
+    def begin_drag(self, position: QPointF, image_rect: QRectF) -> Qt.CursorShape | None:
+        if len(self.points) != 4:
+            return None
+        index = self.point_at(position, image_rect)
+        if index is None and self._contains(position, image_rect):
+            index = -1
+        if index is None:
+            return None
+        self._drag_index = index
+        self._drag_origin = _point_to_normalized(position, image_rect)
+        self._drag_start = [QPointF(point) for point in self.points]
+        return Qt.CursorShape.CrossCursor if index >= 0 else Qt.CursorShape.SizeAllCursor
+
+    def drag_to(self, position: QPointF, image_rect: QRectF) -> None:
+        if self._drag_index is None:
+            return
+        pointer = _point_to_normalized(position, image_rect)  # clamped to the frame
+        if self._drag_index >= 0:
+            self.points[self._drag_index] = pointer
+        else:
+            xs = [point.x() for point in self._drag_start]
+            ys = [point.y() for point in self._drag_start]
+            dx = min(max(pointer.x() - self._drag_origin.x(), -min(xs)), 1.0 - max(xs))
+            dy = min(max(pointer.y() - self._drag_origin.y(), -min(ys)), 1.0 - max(ys))
+            self.points = [QPointF(point.x() + dx, point.y() + dy) for point in self._drag_start]
+        self._on_changed([QPointF(point) for point in self.points])
+
+    def end_drag(self) -> None:
+        self._drag_index = None
+
+    def paint(self, painter: QPainter, image_rect: QRectF) -> None:
+        if len(self.points) != 4 or image_rect.width() <= 0 or image_rect.height() <= 0:
+            return
+        color = PERSPECTIVE_COLOR if self.valid else PERSPECTIVE_INVALID_COLOR
+        painter.save()
+        if self.valid:
+            painter.setPen(QPen(PERSPECTIVE_GRID_COLOR, 1))
+            normalized = np.array([[point.x(), point.y()] for point in self.points])
+            for (x1, y1), (x2, y2) in quad_grid_lines(normalized, PERSPECTIVE_GRID_DIVISIONS):
+                painter.drawLine(_normalized_to_display(x1, y1, image_rect), _normalized_to_display(x2, y2, image_rect))
+        ordered = self._ordered_display(image_rect)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(color, 2))
+        painter.drawPolygon(QPolygonF(ordered))
+        for point in self.display_points(image_rect):
+            painter.setPen(QPen(QColor(0, 0, 0, 160), 4))  # dark halo: the ring reads on bright footage too
+            painter.drawEllipse(point, PERSPECTIVE_POINT_RADIUS, PERSPECTIVE_POINT_RADIUS)
+            painter.setPen(QPen(color, 2))
+            painter.drawEllipse(point, PERSPECTIVE_POINT_RADIUS, PERSPECTIVE_POINT_RADIUS)
+            painter.drawPoint(point)
+        label = "Plano da perspectiva" if self.valid else "Pontos inválidos: forme um quadrilátero"
+        background = PERSPECTIVE_LABEL_COLOR if self.valid else PERSPECTIVE_INVALID_LABEL_COLOR
+        top = min(ordered, key=lambda point: point.y())
+        size = pill_size(painter, label)
+        at = QPointF(top.x() - size.width() / 2.0, top.y() - size.height() - PERSPECTIVE_POINT_RADIUS - 6)
+        at.setX(min(max(at.x(), image_rect.left() + 4), image_rect.right() - size.width() - 4))
+        at.setY(max(at.y(), image_rect.top() + 4))
+        draw_pill(painter, at, label, background)
+        painter.restore()
+
+
 def pill_size(painter: QPainter, text: str) -> QSizeF:
     metrics = painter.fontMetrics()
     return QSizeF(metrics.horizontalAdvance(text) + (2 * PILL_PADDING_X), metrics.height() + (2 * PILL_PADDING_Y))
@@ -367,6 +509,10 @@ def draw_pill(painter: QPainter, top_left: QPointF, text: str, background: QColo
     painter.restore()
 
 
+def _normalized_to_display(x: float, y: float, image_rect: QRectF) -> QPointF:
+    return QPointF(image_rect.left() + x * image_rect.width(), image_rect.top() + y * image_rect.height())
+
+
 def _point_to_normalized(point: QPointF, image_rect: QRectF) -> QPointF:
     if image_rect.width() <= 0 or image_rect.height() <= 0:
         return QPointF(0.0, 0.0)
@@ -382,6 +528,8 @@ class ComparePreview(QWidget):
     focusRegionChanged = Signal(int, QRectF)
     """One of the object lock's numbered regions was moved/resized: ``(index, rect)``."""
     whiteBalanceChanged = Signal(QRectF)
+    perspectiveChanged = Signal(object)
+    """The perspective points were dragged: a list of four normalized ``QPointF`` (displayed frame)."""
     openRequested = Signal()
     """The empty-state "Abrir vídeo" button was clicked."""
     panRequested = Signal(int, int)
@@ -422,6 +570,7 @@ class ComparePreview(QWidget):
         self.white_balance = SelectionOverlay(
             WHITE_BALANCE_STYLE, QRectF(0.4, 0.4, 0.2, 0.2), self.whiteBalanceChanged.emit
         )
+        self.perspective = QuadOverlay(self.perspectiveChanged.emit)
 
         self.open_button = QPushButton(OPEN_BUTTON_TEXT, self)
         self.open_button.setObjectName("previewOpenButton")
@@ -617,9 +766,16 @@ class ComparePreview(QWidget):
 
         return emit
 
-    def _active_overlays(self) -> tuple[SelectionOverlay, ...]:
-        """Hit-testing priority: the numbered regions, the focus region, gray reference, noise sample, crop."""
-        return (*self.focus_regions, self.focus, self.white_balance, self.sample, self.crop)
+    def set_perspective_state(self, enabled: bool, points: list[QPointF], *, valid: bool) -> None:
+        """The four perspective points, shown (and draggable) only while they are being marked."""
+        self.perspective.set_state(enabled, points, editing=enabled, valid=valid)
+        if not enabled:
+            self.setCursor(self._idle_cursor())
+        self.update()
+
+    def _active_overlays(self) -> tuple[SelectionOverlay | QuadOverlay, ...]:
+        """Hit-testing priority: perspective points, numbered regions, focus region, gray reference, sample, crop."""
+        return (self.perspective, *self.focus_regions, self.focus, self.white_balance, self.sample, self.crop)
 
     def set_white_balance_state(self, enabled: bool, rect_norm: QRectF, editing: bool) -> None:
         self.white_balance.set_state(enabled, rect_norm, editing)
@@ -652,7 +808,15 @@ class ComparePreview(QWidget):
         painter.save()
         if self._onion is None and not self._compare_mode.is_split:
             painter.setClipRect(layout.after_panel)  # the zoomed frame may extend past its panel
-        for overlay in (self.crop, self.sample, self.focus, *self.focus_regions, self.white_balance):
+        overlays: tuple[SelectionOverlay | QuadOverlay, ...] = (
+            self.crop,
+            self.sample,
+            self.focus,
+            *self.focus_regions,
+            self.white_balance,
+            self.perspective,
+        )
+        for overlay in overlays:
             if overlay.enabled:
                 overlay.paint(painter, self._image_rect)
         painter.restore()

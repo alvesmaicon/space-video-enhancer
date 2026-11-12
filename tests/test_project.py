@@ -33,7 +33,10 @@ from space_video_enhancer.settings import (
     FilterSettings,
     GeometrySettings,
     HueBandAdjust,
+    NormalizedPoint,
     NormalizedRect,
+    PerspectiveFit,
+    PerspectiveSettings,
     RenderSettings,
     RotationMode,
     StabilizationKeyframe,
@@ -49,6 +52,16 @@ def _settings() -> RenderSettings:
     return RenderSettings(
         filters=FilterSettings(denoise_mode=DenoiseMode.SAMPLE, denoise_strength=33, contrast=61, scale_factor=1.5),
         geometry=GeometrySettings(rotation=RotationMode.CW_90, flip_horizontal=True),
+        perspective=PerspectiveSettings(
+            enabled=True,
+            points=(
+                NormalizedPoint(0.15, 0.2),
+                NormalizedPoint(0.8, 0.1),
+                NormalizedPoint(0.9, 0.85),
+                NormalizedPoint(0.1, 0.9),
+            ),
+            fit=PerspectiveFit.STRETCH_9_16,
+        ),
         crop=CropSettings(enabled=True, rect=NormalizedRect(0.1, 0.2, 0.5, 0.6), aspect_ratio=16 / 9),
         stabilization=StabilizationSettings(
             mode=StabilizationMode.HYBRID,
@@ -95,6 +108,8 @@ def test_settings_round_trip_through_plain_data() -> None:
     loaded = settings_from_dict(RenderSettings, json.loads(json.dumps(data)))
     assert loaded == settings
     assert isinstance(loaded.stabilization.keyframes[0], StabilizationKeyframe), "not left as a raw dict"
+    assert data["perspective"]["points"][0] == {"x": 0.15, "y": 0.2} and data["perspective"]["fit"] == "9:16"
+    assert isinstance(loaded.perspective.points[0], NormalizedPoint), "not left as a raw dict"
 
 
 def test_settings_from_other_versions_take_defaults_and_ignore_unknown_fields() -> None:
@@ -103,7 +118,9 @@ def test_settings_from_other_versions_take_defaults_and_ignore_unknown_fields() 
     del data["grade"]
     data["filters"]["future_knob"] = 3  # a newer file with a field this version does not know
     data["brand_new_section"] = {"x": 1}
+    del data["perspective"]  # a project from before the perspective correction
     loaded = settings_from_dict(RenderSettings, data)
+    assert loaded.perspective == PerspectiveSettings() and not loaded.perspective.is_active
     assert loaded.stabilization.mode is StabilizationMode.HYBRID
     assert loaded.stabilization.temporal_smoothing == StabilizationSettings().temporal_smoothing
     assert loaded.grade == ColorGradeSettings()

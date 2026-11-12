@@ -2,8 +2,8 @@
 
 Order: exposure lock metering (on the source frame) ->
 stabilize (with rolling-shutter unskew) -> basic filters (exposure gains, white balance, tonal, hue
-bands, scale) -> image preset -> geometry -> crop.
-Crop is last so the rectangle drawn on the (rotated/flipped) preview means the same
+bands, scale) -> image preset -> geometry -> perspective -> crop.
+Crop is last so the rectangle drawn on the (rotated/flipped, corrected) preview means the same
 thing on export.
 
 Pass a :class:`RenderTrace` to get per-stage timings and the decisions taken along the
@@ -23,6 +23,7 @@ from space_video_enhancer.pipeline.filters import (
     build_processing_context,
 )
 from space_video_enhancer.pipeline.geometry import apply_crop, apply_geometry
+from space_video_enhancer.pipeline.perspective import apply_perspective
 from space_video_enhancer.pipeline.presets import apply_image_filter_preset
 from space_video_enhancer.pipeline.stabilization.mesh import MeshCorrections
 from space_video_enhancer.pipeline.stabilization.stabilize import apply_stabilization
@@ -99,6 +100,10 @@ def render_frame(
 
         with tracing.stage("geometry"):
             processed = apply_geometry(processed, settings.geometry)
+
+        if settings.perspective.is_active:
+            with tracing.stage("perspective"):
+                processed = apply_perspective(processed, settings.perspective, settings.geometry)
 
         if crop:
             with tracing.stage("crop"):

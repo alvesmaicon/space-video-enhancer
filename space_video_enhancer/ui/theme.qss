@@ -73,6 +73,11 @@ QPushButton#secondaryButton:hover {
 QPushButton#secondaryButton:pressed {
     background: $SURFACE_PRESSED;
 }
+QPushButton#secondaryButton:checked {
+    background: $SURFACE_PRESSED;
+    border-color: $ACCENT;
+    color: $ACCENT;
+}
 QPushButton#secondaryButton:disabled {
     background: $PANEL;
     color: $TEXT_DISABLED;

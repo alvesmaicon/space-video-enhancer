@@ -1,8 +1,9 @@
 """Rotation, flipping and cropping.
 
-Canonical order in the pipeline is *geometry first, crop last*: the crop rectangle
-is expressed in the displayed (rotated/flipped) frame, exactly as the user drew it
-on the preview, so preview and export agree.
+Canonical order in the pipeline is *geometry first, crop last* (with the perspective
+correction of :mod:`.perspective` in between): the crop rectangle is expressed in the
+displayed (rotated/flipped, corrected) frame, exactly as the user drew it on the
+preview, so preview and export agree.
 """
 
 from __future__ import annotations
@@ -47,6 +48,22 @@ def normalized_through_geometry(points: np.ndarray, geometry: GeometrySettings) 
         y = 1.0 - y
     result[:, 0], result[:, 1] = x, y
     return result
+
+
+_INVERSE_ROTATION = {
+    RotationMode.NONE: RotationMode.NONE,
+    RotationMode.CW_90: RotationMode.CW_270,
+    RotationMode.ROTATE_180: RotationMode.ROTATE_180,
+    RotationMode.CW_270: RotationMode.CW_90,
+}
+
+
+def normalized_from_geometry(points: np.ndarray, geometry: GeometrySettings) -> np.ndarray:
+    """Inverse of :func:`normalized_through_geometry`: displayed (rotated/flipped) coordinates -> source ones."""
+    unflipped = normalized_through_geometry(
+        points, GeometrySettings(flip_horizontal=geometry.flip_horizontal, flip_vertical=geometry.flip_vertical)
+    )
+    return normalized_through_geometry(unflipped, GeometrySettings(_INVERSE_ROTATION[geometry.rotation]))
 
 
 def apply_crop(frame: np.ndarray, crop: CropSettings) -> np.ndarray:

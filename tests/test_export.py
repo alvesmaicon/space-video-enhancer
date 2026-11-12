@@ -34,6 +34,8 @@ from space_video_enhancer.settings import (
     FilterSettings,
     GeometrySettings,
     NormalizedRect,
+    PerspectiveFit,
+    PerspectiveSettings,
     RenderSettings,
     RetimingMode,
     RotationMode,
@@ -258,6 +260,23 @@ def test_export_applies_rotation_and_crop_consistently(tmp_path: Path) -> None:
     stream = _probe_video(output)
     # 96x64 rotated -> 64x96; top-left half -> 32x48
     assert (stream["width"], stream["height"]) == (32, 48)
+
+
+@requires_ffmpeg
+def test_export_stretches_the_perspective_plane_then_crops(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "out.mp4"
+    _write_source_video(source, size=(96, 64))
+    settings = RenderSettings(
+        filters=FilterSettings(sharpen=0),
+        perspective=PerspectiveSettings(enabled=True, fit=PerspectiveFit.STRETCH_9_16),
+        crop=CropSettings(True, NormalizedRect(0.0, 0.0, 1.0, 0.5)),
+    )
+    result = run_export(_request(source, output, settings, 1), progress=lambda *_: None, cancel=threading.Event())
+    assert result.success, result.message
+    stream = _probe_video(output)
+    # 96x64 stretched to 9:16 with the same pixel count -> 58x104; top half -> 58x52
+    assert (stream["width"], stream["height"]) == settings.output_size(96, 64) == (58, 52)
 
 
 @requires_ffmpeg

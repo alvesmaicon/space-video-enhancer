@@ -163,6 +163,8 @@ class PreviewSection(WindowState):
 
     def _handle_tab_changed(self, index: int) -> None:
         log_event(LOG, "ui.tab", tab=self.settings_tabs.tabText(index))
+        if self._perspective_draft is not None and not self._tab_is_active(self.geometry_tab):
+            self._end_perspective_marking("cancel_tab")  # the points are marked on the Geometria tab only
         self._sync_preview_pause()  # the region tabs need the image in this window
         self._sync_overlays()
         if self._filters_tab_visible():
@@ -174,6 +176,7 @@ class PreviewSection(WindowState):
     def _sync_overlays(self) -> None:
         """Each selection rectangle is editable only on its own tab; the crop stays visible elsewhere."""
         self._sync_crop_preview()
+        self._sync_perspective_preview()
         self._sync_denoise_sample_preview()
         self._sync_stabilization_preview()
         self._sync_white_balance_preview()
@@ -190,7 +193,7 @@ class PreviewSection(WindowState):
         self._sync_crop_preview()
         self._sync_denoise_sample_preview()
         self._sync_stabilization_preview()
-        self.preview.set_display_reference_size(*self._displayed_size())
+        self.preview.set_display_reference_size(*self._preview_reference_size())
 
         preview_settings = replace(
             settings,
@@ -198,6 +201,9 @@ class PreviewSection(WindowState):
                 settings.filters, scale_factor=self._preview_output_scale_factor(settings.filters.scale_factor)
             ),
         )
+        if self._perspective_draft is not None:
+            # Marking the points: they go on the frame as filmed, so the correction is left out of this render.
+            preview_settings = replace(preview_settings, perspective=replace(settings.perspective, enabled=False))
         size_limit = PREVIEW_SIZE_LIMIT.get(self._preview_render_mode())
         interactive = (
             self._pending_preview_reason in INTERACTIVE_REASONS and settings.filters.denoise_mode is not DenoiseMode.OFF

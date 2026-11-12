@@ -41,6 +41,8 @@ from space_video_enhancer.settings import (
     CropSettings,
     FilterSettings,
     GeometrySettings,
+    NormalizedPoint,
+    PerspectiveSettings,
     PreviewRenderMode,
     RenderSettings,
     StabilizationKeyframe,
@@ -112,6 +114,10 @@ class WindowState(QMainWindow):
     stabilization_reference_frame: np.ndarray | None
     stabilization_reference_frame_index: int
     _manual_keyframes: tuple[StabilizationKeyframe, ...]
+    _perspective: PerspectiveSettings
+    """The active clip's confirmed perspective correction (the format comes from the Geometria combo)."""
+    _perspective_draft: tuple[NormalizedPoint, ...] | None
+    """The four points being marked on the preview; ``None`` when not marking."""
     _onion_reference: QImage | None
     _stabilization_epoch: int
     _backend: OpenCLBackend
@@ -333,6 +339,18 @@ class WindowState(QMainWindow):
     def _sync_crop_preview(self) -> None:
         raise NotImplementedError  # adjustments
 
+    def _preview_reference_size(self) -> tuple[int, int]:
+        raise NotImplementedError  # adjustments
+
+    def _sync_perspective_controls(self) -> None:
+        raise NotImplementedError  # adjustments
+
+    def _sync_perspective_preview(self) -> None:
+        raise NotImplementedError  # adjustments
+
+    def _end_perspective_marking(self, state: str) -> None:
+        raise NotImplementedError  # adjustments
+
     def _sync_denoise_sample_preview(self) -> None:
         raise NotImplementedError  # adjustments
 
@@ -403,6 +421,9 @@ class WindowState(QMainWindow):
         raise NotImplementedError  # main_window
 
     def _current_geometry(self) -> GeometrySettings:
+        raise NotImplementedError  # main_window
+
+    def _current_perspective(self) -> PerspectiveSettings:
         raise NotImplementedError  # main_window
 
     def _current_render_settings(self) -> RenderSettings:

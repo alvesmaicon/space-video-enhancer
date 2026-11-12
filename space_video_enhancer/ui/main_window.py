@@ -74,6 +74,8 @@ from space_video_enhancer.settings import (
     CropSettings,
     FilterSettings,
     GeometrySettings,
+    NormalizedPoint,
+    PerspectiveSettings,
     PreviewRenderMode,
     RenderSettings,
     StabilizationKeyframe,
@@ -194,6 +196,8 @@ class MainWindow(
         self.stabilization_reference_frame: np.ndarray | None = None
         self.stabilization_reference_frame_index = 0
         self._manual_keyframes: tuple[StabilizationKeyframe, ...] = ()  # the active clip's manual-mode keyframes
+        self._perspective = PerspectiveSettings()  # the active clip's confirmed correction (per-clip data)
+        self._perspective_draft: tuple[NormalizedPoint, ...] | None = None  # points being marked, if any
         self._onion_reference: QImage | None = None  # the reference frame drawn as a ghost in manual mode
         self._motion_fill_request: MotionPathRequest | None = None  # the keyframe-fill analysis in flight, if any
         self._stabilization_epoch = 0  # bumped whenever inter-frame stabilization memory must restart
@@ -710,6 +714,7 @@ class MainWindow(
         self.preview.stabilizationChanged.connect(self._handle_preview_stabilization_changed)
         self.preview.focusRegionChanged.connect(self._handle_preview_focus_region_changed)
         self.preview.whiteBalanceChanged.connect(self._handle_preview_white_balance_changed)
+        self.preview.perspectiveChanged.connect(self._handle_preview_perspective_changed)
         self.preview.openRequested.connect(self._select_video)
         self.preview.panRequested.connect(self._handle_preview_pan)
 
@@ -778,6 +783,10 @@ class MainWindow(
         self.geometry_tab.geometryChanged.connect(self._handle_geometry_change)
         self.geometry_tab.cropModeChanged.connect(self._handle_crop_mode_changed)
         self.geometry_tab.cropResetRequested.connect(self._reset_crop_rect)
+        self.geometry_tab.perspectiveMarkToggled.connect(self._handle_perspective_mark_toggled)
+        self.geometry_tab.perspectiveConfirmRequested.connect(self._confirm_perspective)
+        self.geometry_tab.perspectiveResetRequested.connect(self._reset_perspective)
+        self.geometry_tab.perspectiveFitChanged.connect(self._handle_perspective_fit_changed)
         self.noise_tab.controlChanged.connect(self._handle_filter_control_change)
         self.filters_tab.anonymizeChanged.connect(self._handle_filter_control_change)
         self.noise_tab.resetRequested.connect(self._reset_slider_to_preset)
@@ -829,6 +838,10 @@ class MainWindow(
     def _current_geometry(self) -> GeometrySettings:
         return self.geometry_tab.geometry_settings()
 
+    def _current_perspective(self) -> PerspectiveSettings:
+        """The confirmed correction (points marked but not confirmed stay out of the clip)."""
+        return replace(self._perspective, fit=self.geometry_tab.perspective_fit())
+
     def _current_crop(self) -> CropSettings:
         return CropSettings(
             enabled=self.geometry_tab.crop_enabled(),
@@ -848,6 +861,7 @@ class MainWindow(
             filters=self._current_filter_settings(),
             image_filter=self.filters_tab.selection(),
             geometry=self._current_geometry(),
+            perspective=self._current_perspective(),
             crop=self._current_crop(),
             stabilization=self._current_stabilization(),
             denoise_sample_rect=qrect_to_norm(self.denoise_sample_rect_norm),

@@ -241,10 +241,80 @@ class GeometrySettings:
 
 
 @dataclass(frozen=True)
+class NormalizedPoint:
+    """A point in [0, 1] coordinates relative to a frame (Qt-free, like :class:`NormalizedRect`)."""
+
+    x: float
+    y: float
+
+
+class PerspectiveFit(str, Enum):
+    """What the corrected plane becomes (see :class:`PerspectiveSettings`)."""
+
+    REAL = "real"
+    """The plane takes its estimated real proportion inside the same frame; what surrounds it stays."""
+    STRETCH_16_9 = "16:9"
+    """The four points become the corners of a 16:9 output: the plane fills it, stretched if need be."""
+    STRETCH_9_16 = "9:16"
+    """The four points become the corners of a 9:16 output."""
+
+    @property
+    def aspect_ratio(self) -> float | None:
+        """Width/height of the output the plane is stretched to; ``None`` keeps the frame."""
+        if self is PerspectiveFit.STRETCH_16_9:
+            return 16 / 9
+        if self is PerspectiveFit.STRETCH_9_16:
+            return 9 / 16
+        return None
+
+
+DEFAULT_PERSPECTIVE_POINTS = (
+    NormalizedPoint(0.2, 0.2),
+    NormalizedPoint(0.8, 0.2),
+    NormalizedPoint(0.8, 0.8),
+    NormalizedPoint(0.2, 0.8),
+)
+"""Where the four handles start when no correction was confirmed yet (the user drags them onto the plane)."""
+
+
+@dataclass(frozen=True)
+class PerspectiveSettings:
+    """Perspective (keystone) correction from four points on something that is a rectangle in reality.
+
+    ``points`` are normalized in the frame *before* rotation/flip (the stabilized source), so they stay
+    on the content when the orientation changes; the pipeline maps them into the displayed frame,
+    orders them (top-left, top-right, bottom-right, bottom-left) and warps that quadrilateral into
+    a rectangle. The crop comes after, so its rectangle refers to the corrected frame.
+    """
+
+    enabled: bool = False
+    points: tuple[NormalizedPoint, ...] = DEFAULT_PERSPECTIVE_POINTS
+    fit: PerspectiveFit = PerspectiveFit.REAL
+
+    @property
+    def is_active(self) -> bool:
+        return self.enabled and len(self.points) == 4
+
+    def output_size(self, width: int, height: int) -> tuple[int, int]:
+        """Size of a ``width x height`` (displayed) frame after the correction.
+
+        :attr:`PerspectiveFit.REAL` keeps the frame; a stretch keeps its pixel count in the chosen
+        shape (1920x1080 stretched to 9:16 is 1080x1920), even on both sides for the encoder.
+        """
+        aspect_ratio = self.fit.aspect_ratio
+        if not self.is_active or aspect_ratio is None or width <= 0 or height <= 0:
+            return (width, height)
+        area = float(width * height)
+        stretched_width = max(2, 2 * round((area * aspect_ratio) ** 0.5 / 2))
+        stretched_height = max(2, 2 * round((area / aspect_ratio) ** 0.5 / 2))
+        return (stretched_width, stretched_height)
+
+
+@dataclass(frozen=True)
 class CropSettings:
     enabled: bool = False
     rect: NormalizedRect = DEFAULT_CROP_RECT
-    """Expressed in the *displayed* frame (after rotation/flip), exactly as drawn on the preview."""
+    """Expressed in the *displayed* frame (after rotation/flip and perspective), exactly as drawn on the preview."""
     aspect_ratio: float | None = None
     """Fixed width/height the rectangle is constrained to (the crop preset); ``None`` is a free crop."""
 
@@ -528,6 +598,7 @@ class RenderSettings:
     filters: FilterSettings = DEFAULT_FILTER_SETTINGS
     image_filter: ImageFilterSelection = field(default_factory=ImageFilterSelection)
     geometry: GeometrySettings = field(default_factory=GeometrySettings)
+    perspective: PerspectiveSettings = field(default_factory=PerspectiveSettings)
     crop: CropSettings = field(default_factory=CropSettings)
     stabilization: StabilizationSettings = field(default_factory=StabilizationSettings)
     denoise_sample_rect: NormalizedRect = DEFAULT_DENOISE_SAMPLE_RECT
@@ -537,14 +608,16 @@ class RenderSettings:
     anonymize: AnonymizeSettings = field(default_factory=AnonymizeSettings)
 
     def output_size(self, width: int, height: int) -> tuple[int, int]:
-        """Size of the exported frame for a ``width x height`` source: scale, rotation, then crop.
+        """Size of the exported frame for a ``width x height`` source: scale, rotation, perspective, then crop.
 
         Stabilization's automatic crop trims the same fraction on every side, so it keeps this
         aspect ratio; the export fits every clip into the first clip's output canvas.
         """
         scaled_width = max(1, round(width * self.filters.scale_factor))
         scaled_height = max(1, round(height * self.filters.scale_factor))
-        displayed_width, displayed_height = self.geometry.output_size(scaled_width, scaled_height)
+        displayed_width, displayed_height = self.perspective.output_size(
+            *self.geometry.output_size(scaled_width, scaled_height)
+        )
         pixels = self.crop.pixel_rect(displayed_width, displayed_height)
         if pixels is None:
             return (displayed_width, displayed_height)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Union
 
@@ -267,6 +267,16 @@ def render_preview(
         wobble_track=request.wobble_track,
         mesh_corrections=request.mesh_corrections,
     )
+    motion = motion_overlay(
+        state,
+        request.settings.stabilization,
+        request.settings.geometry,
+        mesh_corrections=request.mesh_corrections,
+        frame_index=request.frame_index,
+    )
+    if request.settings.perspective.output_size(*before.shape[1::-1]) != tuple(before.shape[1::-1]):
+        # Stretched to another shape (16:9 <-> 9:16): the whole "before" frame, padded to the "after" shape.
+        before, motion = _pad_before_to(before, after.shape[1] / after.shape[0], motion)
     if request.canvas_aspect is not None:
         with trace.stage("letterbox"):
             after = fit_to_aspect(after, request.canvas_aspect)
@@ -284,14 +294,22 @@ def render_preview(
         decode_sequential,
         seeks,
         sequential_reads,
-        motion_overlay(
-            state,
-            request.settings.stabilization,
-            request.settings.geometry,
-            mesh_corrections=request.mesh_corrections,
-            frame_index=request.frame_index,
-        ),
+        motion,
     )
+
+
+def _pad_before_to(
+    before: np.ndarray, aspect_ratio: float, motion: MotionOverlay | None
+) -> tuple[np.ndarray, MotionOverlay | None]:
+    """``before`` padded with black to ``aspect_ratio`` (never scaled), with the motion overlay moved along."""
+    padded = fit_to_aspect(before, aspect_ratio)
+    if motion is None or padded is before:
+        return padded, motion
+    height, width = before.shape[:2]
+    padded_height, padded_width = padded.shape[:2]
+    scale = np.array([width / padded_width, height / padded_height])
+    offset = np.array([(padded_width - width) // 2 / padded_width, (padded_height - height) // 2 / padded_height])
+    return padded, replace(motion, previous=motion.previous * scale + offset, current=motion.current * scale + offset)
 
 
 def render_thumbnails(request: ThumbnailRequest, backend: OpenCLBackend | None) -> ThumbnailResult:

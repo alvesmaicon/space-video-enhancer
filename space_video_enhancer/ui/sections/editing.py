@@ -28,6 +28,7 @@ SETTINGS_SECTION_NAMES = {
     "filters": "ajustes de imagem",
     "image_filter": "filtro",
     "geometry": "geometria",
+    "perspective": "perspectiva",
     "crop": "crop",
     "stabilization": "estabilização",
     "denoise_sample_rect": "amostra de ruído",
